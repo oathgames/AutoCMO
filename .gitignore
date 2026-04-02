@@ -1,4 +1,4 @@
-# Source code — lives in private repo (oathgames/autocmo-core)
+# Source code
 autocmo/
 *.go
 go.mod

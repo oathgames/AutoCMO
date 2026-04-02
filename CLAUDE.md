@@ -12,7 +12,7 @@ The `/cmo` command handles all setup on first run:
 ## Session Protocol
 
 ### On Start
-1. Scan `assets/` for brands and products
+1. Scan `assets/brands/` for brands and products
 2. Read active brand's `brand.md` + product's `product.md`
 3. Read `memory.md` — past learnings
 
@@ -25,19 +25,18 @@ The `/cmo` command handles all setup on first run:
 ## Folder Structure
 
 ```
-assets/
+assets/brands/
 └── <brand>/                    ← e.g., "madchill"
     ├── brand.md                ← Brand voice, audience, CTA (auto-generated)
     ├── quality-benchmark/      ← S-tier ad examples (quality bar)
     ├── voices/                 ← Voice samples for cloning
     ├── avatars/                ← Creator faces/videos
+    ├── competitors.md          ← Auto-discovered competitors
+    ├── seo.md                  ← SEO audit findings (if Shopify connected)
     └── products/
-        ├── <product>/          ← e.g., "full-zip"
-        │   ├── references/     ← Product photos (auto-pulled from store)
-        │   └── product.md      ← Product details (auto-generated)
-        └── <product>/
-            ├── references/
-            └── product.md
+        └── <product>/          ← e.g., "full-zip"
+            ├── references/     ← Product photos (auto-pulled from store)
+            └── product.md      ← Product details (auto-generated)
 
 results/                        ← All output (timestamped)
 memory.md                       ← Learning memory (grows over time)
@@ -47,7 +46,7 @@ memory.md                       ← Learning memory (grows over time)
 Run `/cmo` — setup flow asks for website + writes brand.md.
 
 ### Adding a new product
-Create a subfolder with `references/` inside a brand folder, drop photos in it. Claude auto-generates `product.md` on first use.
+Create a subfolder under `assets/brands/<brand>/products/` with a `references/` folder inside. Drop photos in it. Claude auto-generates `product.md` on first use.
 
 ## Updates
 Type `/update` to check for and install new versions.
