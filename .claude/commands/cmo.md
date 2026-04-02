@@ -114,23 +114,22 @@ When the user says "check Meta performance":
 
 ## Folder Structure
 ```
-assets/
+assets/brands/
 └── <brand>/                        ← Brand folder (e.g., "madchill")
     ├── brand.md                    ← Brand voice, audience, CTA style
     ├── quality-benchmark/          ← S-tier ad examples
     ├── voices/                     ← Voice samples
     ├── avatars/                    ← Creator faces/videos
+    ├── competitors.md              ← Auto-discovered competitors
+    ├── seo.md                      ← SEO audit (if Shopify connected)
     └── products/
-        ├── <product>/              ← e.g., "full-zip"
-        │   ├── references/         ← Product photos (auto-pulled from store)
-        │   └── product.md          ← Product details (auto-generated)
-        └── <product>/
-            ├── references/
-            └── product.md
+        └── <product>/              ← e.g., "full-zip"
+            ├── references/         ← Product photos (auto-pulled from store)
+            └── product.md          ← Product details (auto-generated)
 ```
 
 ### Detection Logic
-1. **List brands**: scan `assets/` for subdirectories that contain `brand.md`
+1. **List brands**: scan `assets/brands/` for subdirectories that contain `brand.md`
 2. **List products**: scan `assets/brands/<brand>/products/` for subdirectories with a `references/` folder
 3. **Route from user input**:
    - `/cmo cream-set video` → find which brand contains `cream-set`, use it
@@ -164,11 +163,11 @@ Before every run:
 
 ## Step 2: Smart Routing
 
-| User wants... | Mode | Pipeline | Est. cost |
-|---|---|---|---|
-| Product footage, lifestyle, B-roll, cinematic | `product-showcase` | Veo via fal.ai | see billing dashboard |
-| Product photos, ad images | `image` | Ideogram V3 via fal.ai | see billing dashboard |
-| Someone talking to camera | `talking-head` | HeyGen | see billing dashboard |
+| User wants... | Mode | Pipeline |
+|---|---|---|
+| Product footage, lifestyle, B-roll, cinematic | `product-showcase` | Veo via fal.ai |
+| Product photos, ad images | `image` | fal.ai (model auto-selected) |
+| Someone talking to camera | `talking-head` | HeyGen |
 
 ## CRITICAL: Image Prompt Rules — Product Accuracy Is Non-Negotiable
 
@@ -218,7 +217,7 @@ Ready to generate:
   Mode:     product-showcase
   Model:    Veo (fal.ai)
   Duration: 6s
-  Est cost: see billing dashboard
+  Est cost: varies by model
   Script:   "Wait okay — you need to see this set..."
 
 Run it? (y/n)
@@ -483,7 +482,7 @@ If Shopify is not configured, save the blog as a `.html` file in results/ for ma
   / ___ \ |_| | || (_) | |___| |  | | |_| |
  /_/   \_\__,_|\__\___/ \____|_|  |_|\___/
 
-  AI Content Engine — v1.0
+  Your AI CMO
 
   What I can do:
   ──────────────────────────────────────────
@@ -558,7 +557,7 @@ This runs silently during setup — no questions asked. The user sees the result
 
      1. Generate a product-showcase image (both formats). Show quality report. Post to Slack if configured.
 
-     2. If shopifyStore + shopifyAccessToken are configured in autoautocmo-config.json:
+     2. If shopifyStore + shopifyAccessToken are configured in autocmo-config.json:
         - Write a 600-1000 word SEO blog post about the product (or a related lifestyle topic)
         - Use the brand voice from brand.md
         - Include the product name as primary keyword, related terms as secondary
@@ -643,7 +642,7 @@ This runs silently during setup — no questions asked. The user sees the result
      == COMPETITOR INTEL (if competitors.md exists) ==
      7. Read assets/brands/<brand>/competitors.md for brand names
      8. If metaAccessToken configured, run the Ad Library scan:
-        .claude/tools/AutoCMO.exe --config .claude/tools/autoautocmo-config.json --cmd-file <json>
+        .claude/tools/AutoCMO.exe --config .claude/tools/autocmo-config.json --cmd-file <json>
         with: {"action":"competitor-scan","blogBody":"Brand1,Brand2,Brand3","imageCount":3}
         This pulls actual ad copy, headlines, CTAs, and snapshot URLs from Meta Ad Library.
         Read the snapshot URLs via WebFetch to analyze visual creatives.
@@ -872,7 +871,7 @@ Shopify is connected! Here's what I'll do:
 ```
 
 **F) Adding a second brand later:**
-User says "add a new brand" → same flow, creates new folder under `assets/`
+User says "add a new brand" → same flow, creates new folder under `assets/brands/`
 
 **G) Adding a new product:**
 User drops photos in a new subfolder → Claude auto-generates `product.md` on next run.
