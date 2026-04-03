@@ -30,6 +30,8 @@ async function createWindow() {
     minHeight: 500,
     icon: path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png'),
     backgroundColor: '#1a1a1c',
+    frame: false,
+    titleBarStyle: 'hidden',
     show: false,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
@@ -299,6 +301,9 @@ ipcMain.handle('answer-question', (_, toolUseID, answers) => {
 });
 
 ipcMain.handle('open-claude-download', () => { shell.openExternal('https://claude.ai/download'); });
+ipcMain.handle('win-minimize', () => { if (win) win.minimize(); });
+ipcMain.handle('win-maximize', () => { if (win) { win.isMaximized() ? win.unmaximize() : win.maximize(); } });
+ipcMain.handle('win-close', () => { if (win) win.close(); });
 
 ipcMain.handle('get-mobile-qr', async () => {
   const info = wsServer.getConnectionInfo();

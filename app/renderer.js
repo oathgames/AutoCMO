@@ -14,8 +14,10 @@ let turnStartTime = null;
 let turnTokens = 0;
 let sessionTotalTokens = 0;
 
-// ── Platform Detection ──────────────────────────────────────
-// (Window controls handled by native OS chrome)
+// ── Window Controls ─────────────────────────────────────────
+document.getElementById('btn-min').addEventListener('click', () => merlin.winMinimize());
+document.getElementById('btn-max').addEventListener('click', () => merlin.winMaximize());
+document.getElementById('btn-close').addEventListener('click', () => merlin.winClose());
 
 // ── Setup Flow ──────────────────────────────────────────────
 async function init() {

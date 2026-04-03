@@ -1,6 +1,11 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('merlin', {
+  // Window controls
+  winMinimize: () => ipcRenderer.invoke('win-minimize'),
+  winMaximize: () => ipcRenderer.invoke('win-maximize'),
+  winClose: () => ipcRenderer.invoke('win-close'),
+
   // Setup
   checkSetup: () => ipcRenderer.invoke('check-setup'),
   openClaudeDownload: () => ipcRenderer.invoke('open-claude-download'),
