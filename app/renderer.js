@@ -23,16 +23,25 @@ merlin.onPlatform((platform) => {
 
 // ── Setup Flow ──────────────────────────────────────────────
 async function init() {
-  // Show the chat immediately — don't block on setup check
+  // Show chat immediately with a welcome message — no blank screen
   setup.classList.add('hidden');
 
-  // Check + start session in parallel — non-blocking
+  const welcomeBubble = addClaudeBubble();
+  textBuffer = '✦ Starting up...';
+  welcomeBubble.innerHTML = renderMarkdown(textBuffer);
+  welcomeBubble.classList.remove('streaming');
+
+  // Check + start session in background
   merlin.checkSetup().then((result) => {
     if (result.ready) {
+      // Replace welcome with loading indicator
+      welcomeBubble.classList.add('streaming');
+      welcomeBubble.innerHTML = '✦ Connecting to Claude...';
       merlin.startSession();
     } else {
       setup.classList.remove('hidden');
       document.getElementById('setup-status').textContent = result.reason || 'Install Claude Desktop to get started.';
+      welcomeBubble.parentElement.remove();
     }
   });
 }
@@ -71,7 +80,7 @@ function addClaudeBubble() {
 
   const avatar = document.createElement('div');
   avatar.className = 'msg-avatar';
-  avatar.textContent = '🪄';
+  avatar.textContent = '✦';
 
   const bubble = document.createElement('div');
   bubble.className = 'msg-bubble streaming';
@@ -122,7 +131,7 @@ function renderMarkdown(text) {
   if (!text) return '';
 
   // Strip mascot prefix if Claude prepends it
-  text = text.replace(/^\s*🪄\s*/g, '');
+  text = text.replace(/^\s*✦\s*/g, '');
 
   let html = escapeHtml(text);
 
@@ -159,7 +168,18 @@ function escapeHtml(text) {
 }
 
 // ── SDK Message Handling ────────────────────────────────────
+let firstMessage = true;
+
 merlin.onSdkMessage((msg) => {
+  // Remove the loading bubble when first real content arrives
+  if (firstMessage && msg.type === 'stream_event') {
+    const loadingBubble = document.querySelector('.msg-claude');
+    if (loadingBubble) loadingBubble.remove();
+    firstMessage = false;
+    currentBubble = null;
+    textBuffer = '';
+  }
+
   switch (msg.type) {
     case 'system':
       // Session init — ready
