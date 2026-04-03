@@ -88,7 +88,7 @@ When Meta is configured, the full loop is:
 Daily 9 AM: auto-cmo generates content
   → Generate 3 variations (batch mode)
   → Visual QA passes all 3
-  → Push all 3 into ONE ad set in "Auto CMO - Testing"
+  → Push all 3 into ONE ad set in "R2 - Testing"
   → Meta optimizes across the 3 creatives automatically
 
 Daily 10 AM: auto-cmo-optimize reviews yesterday
@@ -103,8 +103,8 @@ Monday 9 AM: auto-cmo-digest
 ```
 
 **Two campaigns are auto-created:**
-- **Auto CMO - Testing** (ABO) — each ad gets its own budget. Isolated testing.
-- **Auto CMO - Scaling** (CBO) — winners get moved here. Meta optimizes budget across all winners.
+- **R2 - Testing** (ABO) — each ad gets its own budget. Isolated testing.
+- **R2 - Scaling** (CBO) — winners get moved here. Meta optimizes budget across all winners.
 
 When the user says "push to Meta" after approving content:
 1. Read config — check `maxDailyAdBudget` and `maxMonthlyAdSpend`
