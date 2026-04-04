@@ -526,15 +526,14 @@ document.getElementById('qr-modal').addEventListener('click', (e) => {
 // ── Magic Panel ─────────────────────────────────────────────
 // ── Brand + Integration Filtering ────────────────────────────
 const verticalIntegrations = {
-  ecom:    ['meta','tiktok','shopify','klaviyo','google','pinterest','fal','elevenlabs','heygen'],
-  apparel: ['meta','tiktok','shopify','klaviyo','google','pinterest','fal','elevenlabs','heygen'],
-  skincare:['meta','tiktok','shopify','klaviyo','google','pinterest','fal','elevenlabs'],
-  fitness: ['meta','tiktok','google','fal','elevenlabs','heygen'],
-  food:    ['meta','tiktok','shopify','klaviyo','google','fal'],
-  tech:    ['meta','google','tiktok','fal','elevenlabs'],
-  gaming:  ['meta','tiktok','google','fal','heygen'],
-  music:   ['meta','tiktok','google','fal','elevenlabs'],
-  saas:    ['meta','google','klaviyo','fal'],
+  ecom:    ['meta','tiktok','shopify','klaviyo','google','pinterest','fal','elevenlabs','heygen','attentive','gorgias','yotpo','stripe','ga4','slack'],
+  apparel: ['meta','tiktok','shopify','klaviyo','google','pinterest','fal','elevenlabs','heygen','attentive','gorgias','yotpo','stripe','ga4','slack'],
+  skincare:['meta','tiktok','shopify','klaviyo','google','pinterest','fal','elevenlabs','attentive','yotpo','stripe','ga4','slack'],
+  fitness: ['meta','tiktok','google','fal','elevenlabs','heygen','stripe','ga4','slack'],
+  food:    ['meta','tiktok','shopify','klaviyo','google','fal','attentive','yotpo','stripe','ga4','slack'],
+  tech:    ['meta','google','tiktok','fal','elevenlabs','stripe','ga4','slack','notion'],
+  gaming:  ['meta','tiktok','google','fal','heygen','discord','stripe','ga4','slack'],
+  saas:    ['meta','google','klaviyo','fal','stripe','ga4','slack','notion','gorgias'],
 };
 
 function loadBrands() {
@@ -647,6 +646,14 @@ document.querySelectorAll('.magic-tile').forEach(tile => {
       fal: 'Set up fal.ai for image generation',
       elevenlabs: 'Set up ElevenLabs for voice',
       heygen: 'Set up HeyGen for video avatars',
+      attentive: 'Connect Attentive for SMS marketing',
+      gorgias: 'Connect Gorgias for customer support',
+      yotpo: 'Connect Yotpo for reviews and loyalty',
+      stripe: 'Connect Stripe for payment data',
+      ga4: 'Connect Google Analytics 4',
+      discord: 'Connect Discord for community management',
+      slack: 'Connect Slack for notifications',
+      notion: 'Connect Notion for content planning',
     };
     if (names[platform]) {
       document.getElementById('magic-panel').classList.add('hidden');
