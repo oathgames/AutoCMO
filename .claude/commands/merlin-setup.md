@@ -95,26 +95,26 @@ The goal: **WOW the user in 30 seconds.** The moment they give you their URL, st
 
      == ERROR HANDLING (applies to ALL steps) ==
      If the app returns an error or non-zero exit code:
-       - Log the error to memory.md under "## Errors"
+       - Log the error to assets/brands/<brand>/memory.md under "## Errors"
        - Post to Slack if configured: "✦ Merlin error: {error message}"
        - Skip that step and continue to the next
        - Do NOT retry failed API calls — they will be retried next cycle
      If a token/API key error occurs (401, 403, "unauthorized", "expired"):
-       - Log: "⚠ TOKEN EXPIRED: {platform}" to memory.md
+       - Log: "⚠ TOKEN EXPIRED: {platform}" to assets/brands/<brand>/memory.md
        - Post to Slack: "✦ ⚠ {platform} token expired — re-authenticate to resume"
        - Skip ALL steps for that platform until the next session
 
      == MEMORY ROTATION ==
-     Before starting, check memory.md line count. If over 200 lines:
+     Before starting, check assets/brands/<brand>/memory.md line count. If over 200 lines:
        - Summarize entries older than 30 days into 1-2 sentences per section
        - Archive the full old entries to memory-archive-{date}.md
-       - Keep the last 30 days of detail in memory.md
+       - Keep the last 30 days of detail in assets/brands/<brand>/memory.md
 
      == MULTI-BRAND ==
      Scan assets/brands/ for all brand folders (skip "example").
      For EACH brand that has products:
 
-     1. Read brand.md + memory.md. Pick a product not used in the last 7 days (check Run Log).
+     1. Read brand.md + assets/brands/<brand>/memory.md. Pick a product not used in the last 7 days (check Run Log).
         If all products were used recently, pick the one with the longest gap.
 
      2. Generate a product-showcase image (both formats).
@@ -127,7 +127,7 @@ The goal: **WOW the user in 30 seconds.** The moment they give you their URL, st
         - Check CONFIG.blogPublishMode:
           - If "draft": publish as draft via {"action": "blog-post", ..., "draft": true}
           - If "published" or missing: publish live
-        - Log the blog title + URL + publish status in memory.md
+        - Log the blog title + URL + publish status in assets/brands/<brand>/memory.md
 
      4. SEO fix queue — if assets/brands/<brand>/seo.md exists:
         - Fix 2-3 images with EMPTY alt text (seo-fix-alt action)
@@ -173,7 +173,7 @@ When connecting any ad platform, also set up budget defaults:
      Same rules as merlin-daily task: log errors, alert on token expiry, skip and continue.
 
      == BUDGET CHECK (before ANY ad action) ==
-     Read the current month's total spend from memory.md "## Monthly Spend" section.
+     Read the current month's total spend from assets/brands/<brand>/memory.md "## Monthly Spend" section.
      If total spend >= CONFIG.maxMonthlyAdSpend: STOP. Log "Monthly budget cap reached ($X/$Y)."
      Post to Slack: "✦ Monthly ad budget reached. Pausing all ad operations."
      Skip all ad operations. Still run the digest portion.
@@ -184,7 +184,7 @@ When connecting any ad platform, also set up budget defaults:
      2. The app returns each ad with a verdict. Act on verdicts:
         - KILL / FATIGUE → run meta-kill
         - WINNER → run meta-duplicate to Scaling campaign (only if budget allows)
-        - MASSIVE_WINNER → run meta-lookalike (only ONCE per winner, check memory.md)
+        - MASSIVE_WINNER → run meta-lookalike (only ONCE per winner, check assets/brands/<brand>/memory.md)
      3. For each new ad being scaled, check: dailyBudget <= CONFIG.maxDailyAdBudget
      4. Auto-retarget: for any WINNER being scaled, run meta-retarget
 
@@ -192,8 +192,8 @@ When connecting any ad platform, also set up budget defaults:
      5. Run tiktok-insights. Same verdict logic. Same budget checks.
 
      == WRAP UP ==
-     6. Update memory.md "## Monthly Spend": add today's spend totals
-     7. Update memory.md with: which ads killed, scaled, retargeted, and why
+     6. Update assets/brands/<brand>/memory.md "## Monthly Spend": add today's spend totals
+     7. Update assets/brands/<brand>/memory.md with: which ads killed, scaled, retargeted, and why
      ```
 
 7. Create a THIRD scheduled task -- weekly digest (always, not just for ads):
@@ -217,7 +217,7 @@ When connecting any ad platform, also set up budget defaults:
      == SEO (per brand, if Shopify configured) ==
      4. Run: {"action": "blog-list"} to get posts published this week
      5. Read assets/brands/<brand>/seo.md — count completed [x] vs remaining [ ] auto-fixes
-     6. Read memory.md for blog post URLs published this week
+     6. Read assets/brands/<brand>/memory.md for blog post URLs published this week
 
      == COMPETITOR INTEL (per brand, if competitors.md exists) ==
      7. Read assets/brands/<brand>/competitors.md for brand names
@@ -248,7 +248,7 @@ When connecting any ad platform, also set up budget defaults:
        Images generated: X | Videos: X
 
      10. Post to Slack if configured
-     11. Update memory.md with weekly summary
+     11. Update assets/brands/<brand>/memory.md with weekly summary
      ```
 
 **E) Shopify connection (optional):**
@@ -315,3 +315,8 @@ Write findings to `assets/brands/<brand>/seo.md`:
 # SEO Audit — <Brand Name>
 Audited: YYYY-MM-DD | Store: <url>
 
+```
+
+### After each scheduled task completes
+
+Check if `assets/brands/brands-index.json` exists. If it does not exist, regenerate it by scanning `assets/brands/` for all brand folders (excluding `example`) and writing the index with each brand's name, vertical, status, and productCount. This is a lightweight check — only write if the file is missing.

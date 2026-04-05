@@ -179,7 +179,28 @@ Rules:
 
 ### E) Preflight done
 
-Continue to Step 0. If the user typed just `/merlin` with no arguments and no brands exist yet, fall through to the Setup Flow.
+Continue to Step F, then Step 0. If the user typed just `/merlin` with no arguments and no brands exist yet, fall through to the Setup Flow.
+
+### F) Product completeness check
+
+Silently scan `assets/brands/` for all non-example brand folders. For each brand, scan `products/` for subdirectories that contain a `references/` folder with images but have no `product.md`. For each such product:
+
+Create a stub `product.md`:
+```
+# {Product Name}
+
+- **Handle**: {folder-name}
+- **Status**: needs-enrichment
+
+## Description
+(Stub — will be enriched with full product details on first content generation.)
+```
+
+Where {Product Name} is the folder name converted to Title Case (hyphens/underscores become spaces).
+
+Log: "Created stub product.md for {brand}/{product}" — only if stubs were actually created. This step is silent if all products already have product.md.
+
+On the NEXT content generation for that product, read the reference images and rewrite product.md with full details (description, colors, materials, key features).
 
 ## Step 0: Resolve Brand + Product
 
@@ -211,7 +232,7 @@ Monday 9 AM: merlin-digest
 
 When the user says "push to Meta" after approving content:
 1. Read config — check `maxDailyAdBudget` and `maxMonthlyAdSpend`
-2. Check memory.md "## Monthly Spend" — if at or over monthly cap, warn and ask to confirm
+2. Check assets/brands/<brand>/memory.md "## Monthly Spend" — if at or over monthly cap, warn and ask to confirm
 3. Upload the image to Meta
 4. Create ad set + creative + ad in Testing campaign with dailyBudget capped at `maxDailyAdBudget`
 5. Report the ad ID, link, and daily budget
@@ -267,7 +288,7 @@ On first run with a new brand, ask for the website URL and scrape it (same as be
 Before every run:
 1. Read `assets/brands/<brand>/brand.md`
 2. Read `assets/brands/<brand>/<product>/product.md` (generate if missing)
-3. Read `memory.md`
+3. Read `assets/brands/<brand>/memory.md`
 4. Read images in `assets/brands/<brand>/products/<product>/references/`
 5. Read images in `assets/brands/<brand>/quality-benchmark/` (if they exist)
 
@@ -471,18 +492,18 @@ Model: Ideogram V3 | Time: 13s
 
 ## Step 7: Update Memory
 
-After every run, update `memory.md`:
+After every run, update `assets/brands/<brand>/memory.md`:
 - `## Run Log`: `- YYYY-MM-DD | brand/product | mode | model | pass/fail | takeaway`
 - `## What Works`: one sentence per finding
 - `## What Fails`: one sentence per finding
 - `## Model Notes`: speed, cost, quality per model
 
-**Memory hygiene — keep memory.md lean:**
+**Memory hygiene — keep assets/brands/<brand>/memory.md lean:**
 - Run Log: keep only the last 50 entries. When adding a new entry, if there are more than 50, delete the oldest entries beyond 50. Old runs are not useful — patterns are captured in What Works/What Fails.
 - What Works / What Fails: keep only the 20 most recent findings per section. If a new finding contradicts an older one, replace the old one.
 - Monthly Spend: keep only the last 6 months. Archive older months by deleting them.
 - Errors: keep only the last 20 entries. Recurring errors should be consolidated into one line with a count.
-- Total target: memory.md should stay under 200 lines (~800 tokens). If it exceeds this, prune the oldest entries in Run Log first.
+- Total target: assets/brands/<brand>/memory.md should stay under 200 lines (~800 tokens). If it exceeds this, prune the oldest entries in Run Log first.
 
 ## Competitor Intelligence
 
@@ -542,7 +563,7 @@ Claude then analyzes the results:
 1. Read each ad's copy — extract hooks, CTAs, offers
 2. Visit snapshot URLs via WebFetch to describe the visual creative
 3. Compare to our recent ads
-4. Log insights to memory.md under `## Competitor Signals`
+4. Log insights to assets/brands/<brand>/memory.md under `## Competitor Signals`
 
 If no Meta token, fall back to WebSearch for competitor news.
 
@@ -561,13 +582,13 @@ If no Meta token, fall back to WebSearch for competitor news.
 - If competitors are running sales → consider a value-focused angle instead of discounting
 - If a competitor hook style is trending → adapt it for our brand voice
 - Long-running competitor ads = proven formats — reference their structure in our scripts
-- Save winning patterns to memory.md for script generation
+- Save winning patterns to assets/brands/<brand>/memory.md for script generation
 
 ## SEO Blog Generation
 
 When the user says "write a blog post" or when triggered by the daily scheduled task:
 
-1. **Pick a topic** based on the brand's products, recent ad winners (from memory.md), or seasonal angles
+1. **Pick a topic** based on the brand's products, recent ad winners (from assets/brands/<brand>/memory.md), or seasonal angles
 2. **Write 600-1000 word SEO blog post** in the brand's voice (from brand.md):
    - Title with primary keyword (under 60 chars)
    - Casual, readable tone matching the brand
@@ -580,7 +601,7 @@ When the user says "write a blog post" or when triggered by the daily scheduled 
 3. **Internal linking (mandatory in every post):**
    - Link to the featured product page: `<a href="/products/{handle}">{Product Name}</a>`
    - Link to 1-2 related products mentioned naturally in the text
-   - Link to 1-2 previous blog posts if they exist (check via `blog-list` or memory.md)
+   - Link to 1-2 previous blog posts if they exist (check via `blog-list` or assets/brands/<brand>/memory.md)
    - Use descriptive anchor text with keywords, NOT "click here"
    - Example: `"Pair it with our <a href="/products/camo-tuna-patch-trucker-hat">Camo Tuna Trucker</a> for the full look."`
 
@@ -606,7 +627,7 @@ When the user says "write a blog post" or when triggered by the daily scheduled 
 }
 ```
 
-7. **Update memory.md** with: blog title, topic, date, URL, primary keyword
+7. **Update assets/brands/<brand>/memory.md** with: blog title, topic, date, URL, primary keyword
 
 **Topic ideas per cycle** (rotate through):
 - Product spotlight (deep dive on one product — link to product + related items)

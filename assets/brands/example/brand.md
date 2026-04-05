@@ -4,6 +4,7 @@
 - **Tagline**: Your Brand Tagline
 - **URL**: https://yourbrand.com
 - **Category**: Your Category (e.g., Streetwear, Skincare, Home Goods)
+- **Status**: active
 
 ## Products
 - **Product Name** ($XX): Brief description

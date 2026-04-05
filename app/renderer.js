@@ -483,10 +483,27 @@ function renderMarkdown(text) {
   html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
   // Horizontal rules
   html = html.replace(/^---$/gm, '<hr>');
+  // Markdown images: ![alt](path) — render inline
+  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
+    // Local file path → use merlin:// protocol
+    if (src.includes('/') && !src.startsWith('http')) {
+      return `<img src="merlin://${src}" alt="${alt || 'Image'}" loading="lazy">`;
+    }
+    // Remote URL or data URI
+    if (src.startsWith('http') || src.startsWith('data:')) {
+      return `<img src="${src}" alt="${alt || 'Image'}" loading="lazy">`;
+    }
+    return match;
+  });
+
   // Links
   html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
     if (/^(https?:\/\/|mailto:)/i.test(url)) {
       return `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
+    }
+    // Local file links → render as merlin:// links
+    if (url.includes('/') && /\.(jpg|jpeg|png|gif|webp|pdf|mp4)$/i.test(url)) {
+      return `<a href="merlin://${url}" target="_blank">${text}</a>`;
     }
     return match;
   });
@@ -602,9 +619,9 @@ merlin.onSdkMessage((msg) => {
       // Check for image content blocks in the assistant message
       if (msg.message?.content) {
         for (const block of msg.message.content) {
-          if (block.type === 'image' && block.source?.data) {
+          if (block.type === 'image' && block.source?.data && block.source.data.length > 100) {
             const imgBubble = addClaudeBubble();
-            imgBubble.innerHTML = `<img src="data:${block.source.media_type || 'image/png'};base64,${block.source.data}" alt="Image">`;
+            imgBubble.innerHTML = `<img src="data:${block.source.media_type || 'image/png'};base64,${block.source.data}" alt="Image" style="max-width:100%;border-radius:10px">`;
             imgBubble.classList.remove('streaming');
             currentBubble = null;
             textBuffer = '';
@@ -654,15 +671,14 @@ function handleStreamEvent(msg) {
   if (event.type === 'content_block_start') {
     if (event.content_block && event.content_block.type === 'text') {
       // Remove tool status when text starts
-      const toolStatus = document.querySelector('.tool-status');
-      if (toolStatus) toolStatus.remove();
+      document.querySelectorAll('.tool-status-row').forEach(el => el.remove());
       if (!currentBubble) {
         addClaudeBubble();
         isStreaming = true;
         setInputDisabled(true);
       }
     }
-    // Show tool activity status (like Claude Code)
+    // Show tool activity status (like Claude Code) — single persistent row, no stacking
     if (event.content_block && event.content_block.type === 'tool_use') {
       const toolName = event.content_block.name || '';
       const friendlyNames = {
@@ -674,12 +690,15 @@ function handleStreamEvent(msg) {
       };
       const label = friendlyNames[toolName] || 'Thinking';
       removeTypingIndicator();
-      const existing = document.querySelector('.tool-status');
-      if (existing) existing.remove();
-      const status = document.createElement('div');
-      status.className = 'msg msg-claude';
-      status.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-bubble tool-status">${label}</div>`;
-      messages.appendChild(status);
+      // Reuse existing status row or create one
+      let statusRow = document.querySelector('.tool-status-row');
+      if (!statusRow) {
+        statusRow = document.createElement('div');
+        statusRow.className = 'msg msg-claude tool-status-row';
+        statusRow.innerHTML = `<div class="msg-avatar">✦</div><div class="msg-bubble tool-status"></div>`;
+        messages.appendChild(statusRow);
+      }
+      statusRow.querySelector('.tool-status').textContent = label;
       scrollToBottom();
     }
   }
@@ -691,8 +710,7 @@ function handleStreamEvent(msg) {
   }
 
   if (event.type === 'message_stop') {
-    const toolStatus = document.querySelector('.tool-status');
-    if (toolStatus) toolStatus.closest('.msg')?.remove();
+    document.querySelectorAll('.tool-status-row').forEach(el => el.remove());
     finalizeBubble();
   }
 }

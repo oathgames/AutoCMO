@@ -47,13 +47,13 @@ For OAuth actions, always use `timeout: 300000` (5 minutes) so the user has time
 ### On Start
 1. Scan `assets/brands/` for brands and products
 2. Read active brand's `brand.md` + product's `product.md`
-3. Read `memory.md` — past learnings
+3. Read active brand's `memory.md` (in brand folder) — past learnings
 
 ### On Every Run
 1. Resolve brand + product from user's request
 2. Load brand.md + product.md + reference photos + quality benchmarks
 3. After pipeline → show output inline, get approval before posting
-4. After approval → update `memory.md`
+4. After approval → update brand's `memory.md`
 
 ## Folder Structure
 
@@ -61,6 +61,7 @@ For OAuth actions, always use `timeout: 300000` (5 minutes) so the user has time
 assets/brands/
 └── <brand>/                    ← e.g., "madchill"
     ├── brand.md                ← Brand voice, audience, CTA (auto-generated)
+    ├── memory.md               ← Learning memory (grows over time)
     ├── quality-benchmark/      ← S-tier ad examples (quality bar)
     ├── voices/                 ← Voice samples for cloning
     ├── avatars/                ← Creator faces/videos
@@ -72,7 +73,6 @@ assets/brands/
             └── product.md      ← Product details (auto-generated)
 
 results/                        ← All output (timestamped)
-memory.md                       ← Learning memory (grows over time)
 ```
 
 ### Adding a new brand
@@ -83,7 +83,7 @@ Create a subfolder under `assets/brands/<brand>/products/` with a `references/` 
 
 ## Updates
 Type `/update` to check for and install new versions.
-Downloads the latest engine + framework files from GitHub while preserving user data (memory.md, brand folders, config).
+Downloads the latest engine + framework files from GitHub while preserving user data (brand folders with memory.md, config).
 Backups are saved to `.merlin-backup/{version}/` before overwriting.
 
 ## How Merlin Improves Over Time

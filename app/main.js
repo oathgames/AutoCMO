@@ -54,7 +54,10 @@ async function createWindow() {
       return new Response('Forbidden', { status: 403 });
     }
     try {
-      return new Response(fs.readFileSync(filePath));
+      const data = fs.readFileSync(filePath);
+      const ext = path.extname(filePath).toLowerCase();
+      const types = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml', '.mp4': 'video/mp4', '.webm': 'video/webm', '.pdf': 'application/pdf' };
+      return new Response(data, { headers: { 'Content-Type': types[ext] || 'application/octet-stream' } });
     } catch {
       return new Response('Not found', { status: 404 });
     }
@@ -648,6 +651,12 @@ ipcMain.handle('get-brands', () => {
           const match = content.match(/vertical[:\s]+(\w+)/i);
           if (match) vertical = match[1];
         }
+        let status = 'active';
+        if (fs.existsSync(brandMd)) {
+          const content = fs.readFileSync(brandMd, 'utf8');
+          const statusMatch = content.match(/status[:\s]+(active|paused|archived)/i);
+          if (statusMatch) status = statusMatch[1].toLowerCase();
+        }
         // Count products
         const productsDir = path.join(brandPath, 'products');
         let productCount = 0;
@@ -672,9 +681,41 @@ ipcMain.handle('get-brands', () => {
           displayName = d.name.split(/[-_]/).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
         }
 
-        return { name: d.name, displayName, vertical, productCount };
+        return { name: d.name, displayName, vertical, productCount, status };
       });
-    return dirs;
+
+    // Auto-generate brand index for commands/scheduled tasks
+    try {
+      const crypto = require('crypto');
+      const indexPath = path.join(brandsDir, 'brands-index.json');
+
+      // Compute hash of current brand state
+      const hashInput = dirs.map(b => `${b.name}:${b.productCount}:${b.status}`).sort().join('|');
+      const currentHash = crypto.createHash('md5').update(hashInput).digest('hex');
+
+      // Only write if changed
+      let existingHash = '';
+      try { existingHash = JSON.parse(fs.readFileSync(indexPath, 'utf8')).hash; } catch {}
+
+      if (currentHash !== existingHash) {
+        const configPath = path.join(appRoot, '.claude', 'tools', 'merlin-config.json');
+        let cfg = {};
+        try { cfg = JSON.parse(fs.readFileSync(configPath, 'utf8')); } catch {}
+
+        const index = {
+          hash: currentHash,
+          generated: new Date().toISOString(),
+          brands: dirs.map(b => ({
+            ...b,
+            hasShopify: !!cfg.shopifyAccessToken,
+            hasMeta: !!cfg.metaAccessToken,
+          })),
+        };
+        fs.writeFileSync(indexPath, JSON.stringify(index, null, 2));
+      }
+    } catch {}
+
+    return dirs.filter(b => b.status !== 'archived');
   } catch { return []; }
 });
 
