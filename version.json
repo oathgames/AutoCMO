@@ -18,5 +18,10 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v0.6.0: Per-brand connections + spells, brand selector in perf bar, test harness (--test-all), preloaded sidebar data, agency report UX, archive scroll stability, input validation hardening, security headers on WS server."
+  "notes": "v0.6.0: Per-brand connections + spells, brand selector in perf bar, test harness (--test-all), preloaded sidebar data, agency report UX, archive scroll stability, input validation hardening, security headers on WS server.",
+  "whatsNew": [
+    "Manage connections & spells per brand",
+    "Live Ads tab in Archive",
+    "Agency report generator"
+  ]
 }

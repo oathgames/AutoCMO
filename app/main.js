@@ -878,9 +878,10 @@ ipcMain.handle('create-spell', (_, taskId, cron, description, prompt, brandName)
     const tasksDir = path.join(os.homedir(), '.claude', 'scheduled-tasks', fullTaskId);
     fs.mkdirSync(tasksDir, { recursive: true });
 
-    // Include brand context in the spell prompt
+    // Include brand context + first-run showcase instructions in the spell prompt
     const brandContext = brandName ? `\nBrand: ${brandName}\nBrand assets: assets/brands/${brandName}/\n` : '';
-    const skillContent = `---\nname: ${fullTaskId}\ndescription: ${description}\ncronExpression: "${cron}"\n---\n${brandContext}\n${prompt}\n`;
+    const firstRunBlock = `\nFirst-run check: If this is the first time running (no prior results exist for this task), use the best quality settings, narrate each step, show results visually, and end with a summary of what you did and when the next scheduled run is.\n`;
+    const skillContent = `---\nname: ${fullTaskId}\ndescription: ${description}\ncronExpression: "${cron}"\n---\n${brandContext}${firstRunBlock}\n${prompt}\n`;
     fs.writeFileSync(path.join(tasksDir, 'SKILL.md'), skillContent);
 
     // Store spell metadata per-brand
@@ -1850,7 +1851,16 @@ ipcMain.handle('get-credits', async (_, brandName) => {
 
   return credits;
 });
-ipcMain.handle('get-version', () => getCurrentVersion());
+ipcMain.handle('get-version', () => {
+  const ver = getCurrentVersion();
+  // Read whatsNew bullets from version.json for tooltip
+  let whatsNew = [];
+  try {
+    const vj = JSON.parse(fs.readFileSync(path.join(appRoot, 'version.json'), 'utf8'));
+    whatsNew = vj.whatsNew || [];
+  } catch {}
+  return { version: ver, whatsNew };
+});
 ipcMain.handle('win-minimize', () => { if (win) win.minimize(); });
 ipcMain.handle('win-maximize', () => { if (win) { win.isMaximized() ? win.unmaximize() : win.maximize(); } });
 ipcMain.handle('win-close', () => { if (win) win.close(); });

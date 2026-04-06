@@ -156,10 +156,14 @@ async function init() {
   const vLabel = document.getElementById('version-label');
   if (vLabel && merlin.getVersion) {
     try {
-      const ver = await merlin.getVersion();
+      const info = await merlin.getVersion();
+      const ver = typeof info === 'object' ? info.version : info;
       vLabel.textContent = 'v' + ver;
-      // News tooltip — update these with each release
-      vLabel.dataset.tip = '✦ What\'s New\n• Per-brand connections & spells\n• Live Ads tab in Archive\n• Agency report generator';
+      // News tooltip — pulled from version.json whatsNew array
+      const bullets = (typeof info === 'object' && info.whatsNew && info.whatsNew.length)
+        ? info.whatsNew.map(b => '• ' + b).join('\n')
+        : '• Up to date';
+      vLabel.dataset.tip = '✦ What\'s New\n' + bullets;
     } catch {}
   }
 
@@ -1491,13 +1495,13 @@ async function loadSpells() {
 
   // Then render available templates that aren't active yet (gray dots)
   const templateData = [
-    { spell: 'daily-ads', cron: '0 9 * * 1-5', name: 'Daily Ads', desc: 'Fresh creatives every morning', prompt: 'Create fresh ad creatives every weekday morning' },
-    { spell: 'performance-check', cron: '0 10 * * 1-5', name: 'Performance Check', desc: 'Kill losers, scale winners', prompt: 'Review ad performance, kill losers, scale winners' },
-    { spell: 'morning-briefing', cron: '0 5 * * 1-5', name: 'Morning Briefing', desc: 'Overnight results ready at 5 AM', prompt: 'Pull overnight ad results, revenue, and content activity — cache as a morning briefing card that shows instantly when you open Merlin. Save output as JSON to .merlin-briefing.json with fields: date, ads, content, revenue, recommendation.' },
-    { spell: 'weekly-digest', cron: '0 9 * * 1', name: 'Weekly Digest', desc: 'Monday morning summary', prompt: 'Weekly summary of spend, revenue, and wins' },
-    { spell: 'seo-blog', cron: '0 9 * * 2,4', name: 'SEO Blog Writer', desc: 'Publish posts Tue + Thu', prompt: 'Write and publish SEO blog posts' },
-    { spell: 'competitor-scan', cron: '0 9 * * 5', name: 'Competitor Watch', desc: 'Friday intel report', prompt: 'Scan competitor ads and report new trends' },
-    { spell: 'email-flows', cron: '0 9 * * 3', name: 'Email Flows', desc: 'Build + optimize automations', prompt: 'Build and optimize email flows — welcome series, abandoned cart, win-back' },
+    { spell: 'daily-ads', cron: '0 9 * * 1-5', name: 'Daily Ads', desc: 'Fresh creatives every morning', prompt: 'Generate 3 fresh ad image variations for the top product. Use the AdBrief pipeline with different hooks and scenes. Show each image inline. If connected to an ad platform, publish the best one to the Testing campaign.' },
+    { spell: 'performance-check', cron: '0 10 * * 1-5', name: 'Performance Check', desc: 'Kill losers, scale winners', prompt: 'Pull performance data from all connected ad platforms using dashboard. For each ad: if ROAS < 1.5x, pause it. If ROAS > 3x for 3+ days, duplicate to Scaling campaign. Summarize: what you paused, what you scaled, net budget change.' },
+    { spell: 'morning-briefing', cron: '0 5 * * 1-5', name: 'Morning Briefing', desc: 'Overnight results ready at 5 AM', prompt: 'Pull overnight ad results, revenue, and content activity using dashboard. Cache as a morning briefing card: save output as JSON to .merlin-briefing.json with fields: date, topAd (name + ROAS), revenue, spend, mer, recommendation (one sentence). Keep it concise — this displays on app open.' },
+    { spell: 'weekly-digest', cron: '0 9 * * 1', name: 'Weekly Digest', desc: 'Monday morning summary', prompt: 'Pull 7-day performance from dashboard. Compare to previous week. List: total revenue, total spend, MER trend, top 3 ads by ROAS, worst 3 ads paused, and one strategic recommendation for the coming week.' },
+    { spell: 'seo-blog', cron: '0 9 * * 2,4', name: 'SEO Blog Writer', desc: 'Publish posts Tue + Thu', prompt: 'Run seo-keywords to find a trending topic. Write a 600-word SEO blog post targeting that keyword. Generate a featured image with the image action. Publish to Shopify using blog-post. Report: title, target keyword, and published URL.' },
+    { spell: 'competitor-scan', cron: '0 9 * * 5', name: 'Competitor Watch', desc: 'Friday intel report', prompt: 'Use competitor-scan to check the Meta Ad Library for competitor ads. Look for new creatives launched this week. Report: how many new ads found, common themes, hooks being used, and one tactical recommendation to differentiate.' },
+    { spell: 'email-flows', cron: '0 9 * * 3', name: 'Email Flows', desc: 'Build + optimize automations', prompt: 'Run email-audit to check existing flows. If missing critical flows (welcome, abandoned cart, post-purchase), create them. If flows exist, check open/click rates with klaviyo-performance and suggest subject line improvements. Report: flows active, flows created, and top/bottom performer.' },
   ];
 
   // Merge active + templates into one list, collapse after 5
@@ -1636,8 +1640,10 @@ function activateSpell(template, row) {
     if (result.success) {
       row.querySelector('.spell-dot').className = 'spell-dot dot-active';
       row.querySelector('.spell-meta').textContent = 'Active ✓';
-      // Delay refresh to avoid race with filesystem write
       setTimeout(() => loadSpells(), 2000);
+
+      // First-run confirmation: ask user if they want to run immediately
+      showFirstRunPrompt(template, spellBrand);
     } else {
       row.querySelector('.spell-dot').className = 'spell-dot dot-error';
       row.querySelector('.spell-meta').textContent = `Failed — ${result.error || 'tap to retry'}`;
@@ -1650,6 +1656,72 @@ function activateSpell(template, row) {
     row.style.pointerEvents = '';
     console.error('[spell] Creation error:', err);
   });
+}
+
+// First-run: prompt user to run the spell immediately after activation
+function showFirstRunPrompt(template, brand) {
+  // Close the sidebar so the chat is visible
+  document.getElementById('magic-panel').classList.add('hidden');
+
+  // Build a confirmation card in chat
+  const card = document.createElement('div');
+  card.className = 'message assistant';
+  const brandLabel = brand ? ` for ${brand}` : '';
+  card.innerHTML = `
+    <div class="bubble" style="border:1px solid var(--accent-dim);padding:16px">
+      <strong>${escapeHtml(template.name)}</strong> is now scheduled${escapeHtml(brandLabel)}.<br>
+      <span style="color:var(--text-dim);font-size:13px">Want to run it now so you can see the results?</span>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn-primary first-run-yes" style="flex:1;padding:8px 0">Run now</button>
+        <button class="btn-secondary first-run-no" style="flex:1;padding:8px 0">I'll wait for the schedule</button>
+      </div>
+    </div>
+  `;
+  document.getElementById('chat').appendChild(card);
+  card.scrollIntoView({ behavior: 'smooth' });
+
+  card.querySelector('.first-run-yes').addEventListener('click', () => {
+    // Replace buttons with "Running..." state
+    card.querySelector('.bubble div:last-child').innerHTML = '<span style="color:var(--accent)">Running now...</span>';
+
+    // Send the spell prompt as a chat message so user sees it execute live
+    const firstRunPrompt = `This is the FIRST RUN of "${template.name}"${brandLabel}. The user just activated this automation and wants to see it in action.\n\n` +
+      `IMPORTANT — First run rules:\n` +
+      `1. Use the best quality settings available\n` +
+      `2. Show your work: narrate each step as you do it\n` +
+      `3. Present results visually — show images inline, show metrics in a clear summary\n` +
+      `4. End with: what you did, what to expect next time, and when the next scheduled run is\n\n` +
+      `Now execute: ${template.prompt}`;
+
+    addUserBubble(`Run "${template.name}" now`);
+    showTypingIndicator();
+    turnStartTime = Date.now();
+    turnTokens = 0;
+    sessionActive = true;
+    startTickingTimer();
+    merlin.sendMessage(firstRunPrompt);
+  });
+
+  card.querySelector('.first-run-no').addEventListener('click', () => {
+    // Replace with confirmation
+    const cronDesc = describeCron(template.cron);
+    card.querySelector('.bubble div:last-child').innerHTML =
+      `<span style="color:var(--text-dim);font-size:13px">Got it. Next run: ${escapeHtml(cronDesc)}</span>`;
+  });
+}
+
+// Human-readable cron description
+function describeCron(cron) {
+  if (!cron) return 'on schedule';
+  const parts = cron.split(' ');
+  if (parts.length !== 5) return cron;
+  const [min, hour, , , dow] = parts;
+  const h = parseInt(hour);
+  const ampm = h >= 12 ? 'PM' : 'AM';
+  const h12 = h === 0 ? 12 : h > 12 ? h - 12 : h;
+  const time = `${h12}:${min.padStart(2, '0')} ${ampm}`;
+  const days = { '1-5': 'Weekdays', '0,6': 'Weekends', '*': 'Daily', '1': 'Monday', '2': 'Tuesday', '3': 'Wednesday', '4': 'Thursday', '5': 'Friday', '6': 'Saturday', '0': 'Sunday', '2,4': 'Tue + Thu' };
+  return `${days[dow] || dow} at ${time}`;
 }
 
 // Real-time spell updates
