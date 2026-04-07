@@ -62,8 +62,10 @@
         "zip"
       ],
       "icon": "app/icon-1024.png",
-      "identity": null,
-      "hardenedRuntime": false
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
     },
     "dmg": {
       "writeUpdateInfo": false

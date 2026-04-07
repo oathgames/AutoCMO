@@ -50,6 +50,15 @@ dist/
 .merlin-key
 .env
 
+# Certificates & signing keys (NEVER commit)
+*.cer
+*.p12
+*.pem
+*.key
+*.csr
+*.mobileprovision
+*.provisionprofile
+
 # OS
 .DS_Store
 Thumbs.db
