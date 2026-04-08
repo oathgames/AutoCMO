@@ -1,6 +1,6 @@
 {
   "name": "Merlin",
-  "version": "0.8.3",
+  "version": "0.8.5",
   "description": "Merlin — Your AI CMO",
   "main": "app/main.js",
   "scripts": {
@@ -21,6 +21,7 @@
     "appId": "com.merlin.desktop",
     "productName": "Merlin",
     "asar": true,
+    "afterSign": "build/notarize.js",
     "files": [
       "app/**/*"
     ],
@@ -29,14 +30,24 @@
         "from": ".claude",
         "to": ".claude",
         "filter": [
-          "**/*"
+          "**/*",
+          "!tools/ffmpeg*",
+          "!tools/ffprobe*",
+          "!tools/Merlin.exe",
+          "!tools/Merlin",
+          "!tools/merlin-config.json",
+          "!tools/.merlin-*"
         ]
       },
       {
         "from": "assets",
         "to": "assets",
         "filter": [
-          "**/*"
+          "**/*",
+          "!brands/*",
+          "brands/example/**/*",
+          "!music/*.mp3",
+          "!music/*.wav"
         ]
       },
       {
@@ -81,11 +92,12 @@
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true,
       "shortcutName": "Merlin",
-      "runAfterFinish": true,
+      "runAfterFinish": false,
+      "menuCategory": false,
+      "deleteAppDataOnUninstall": false,
       "installerIcon": "app/icon.ico",
       "uninstallerIcon": "app/icon.ico",
-      "installerHeaderIcon": "app/icon.ico",
-      "deleteAppDataOnUninstall": false
+      "installerHeaderIcon": "app/icon.ico"
     }
   }
 }

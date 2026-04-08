@@ -1,5 +1,5 @@
 {
-  "version": "0.8.3",
+  "version": "0.8.5",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -18,10 +18,10 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v0.8.2: OneClick installer (no more freeze), SDK unpacked import fix, TikTok OAuth live, hi-res icon, tray icon fix, duplicate handler crash fix.",
+  "notes": "v0.8.5: Mac notarization (no more 'unverified' warning), reliable Claude Code detection on Mac (nvm/volta/bun/fnm), polished Windows installer with detached launch.",
   "whatsNew": [
-    "OneClick installer — installs and launches instantly, no freeze",
-    "TikTok Ads — one-click OAuth connection now live",
-    "Tray icon + window visibility fixes for packaged builds"
+    "Mac installs now open cleanly — no 'unverified developer' warning",
+    "Claude Code detection fixed for nvm, volta, bun, and fnm installs",
+    "Polished Windows installer — faster, cleaner finish, no freeze"
   ]
 }

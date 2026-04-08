@@ -22,18 +22,60 @@ Menu.setApplicationMenu(null);
       path.join(home, 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links'),
     );
   } else {
+    // On macOS/Linux, Electron launched from Finder/Dock/installer does NOT
+    // inherit the user's shell PATH. Spawn a login+interactive shell to read
+    // the real PATH — this catches nvm, fnm, volta, asdf, bun, custom prefixes,
+    // and anything configured in ~/.zshrc, ~/.bashrc, ~/.profile.
+    try {
+      const { execSync } = require('child_process');
+      const shell = process.env.SHELL || '/bin/bash';
+      const shellPath = execSync(`${shell} -ilc 'echo "$PATH"'`, {
+        timeout: 3000,
+        encoding: 'utf8',
+        stdio: ['ignore', 'pipe', 'ignore'],
+      }).trim();
+      if (shellPath) extra.push(...shellPath.split(':').filter(Boolean));
+    } catch { /* fall through to static paths below */ }
+
+    // Static fallbacks for common locations that may not be in shell PATH yet
     extra.push(
       '/usr/local/bin',
       '/opt/homebrew/bin',
+      '/opt/local/bin',
       path.join(home, '.local', 'bin'),
       path.join(home, '.claude', 'bin'),
       path.join(home, '.claude', 'local', 'bin'),
-      path.join(home, '.nvm', 'current', 'bin'),
+      path.join(home, '.npm-global', 'bin'),
+      path.join(home, '.volta', 'bin'),
+      path.join(home, '.bun', 'bin'),
+      path.join(home, 'n', 'bin'),
     );
+
+    // Glob nvm versions: ~/.nvm/versions/node/v*/bin (pick newest)
+    try {
+      const nvmRoot = path.join(home, '.nvm', 'versions', 'node');
+      if (fs.existsSync(nvmRoot)) {
+        const versions = fs.readdirSync(nvmRoot)
+          .filter(v => v.startsWith('v'))
+          .sort()
+          .reverse();
+        for (const v of versions) extra.push(path.join(nvmRoot, v, 'bin'));
+      }
+    } catch {}
+
+    // Glob fnm versions
+    try {
+      const fnmRoot = path.join(home, '.fnm', 'node-versions');
+      if (fs.existsSync(fnmRoot)) {
+        const versions = fs.readdirSync(fnmRoot).sort().reverse();
+        for (const v of versions) extra.push(path.join(fnmRoot, v, 'installation', 'bin'));
+      }
+    } catch {}
   }
   const sep = process.platform === 'win32' ? ';' : ':';
   const current = process.env.PATH || '';
-  const missing = extra.filter(p => !current.includes(p));
+  const seen = new Set(current.split(sep).filter(Boolean));
+  const missing = extra.filter(p => p && !seen.has(p));
   if (missing.length > 0) {
     process.env.PATH = current + sep + missing.join(sep);
   }
@@ -850,34 +892,22 @@ ipcMain.handle('check-setup', async () => {
     });
   }
 
-  // Fast path: check if claude binary exists at known locations (no exec needed)
-  const knownPaths = [];
-  if (process.platform === 'win32') {
-    knownPaths.push(
-      path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude.cmd'),
-      path.join(os.homedir(), 'AppData', 'Roaming', 'npm', 'claude'),
-      path.join(os.homedir(), '.claude', 'bin', 'claude.exe'),
-      path.join(os.homedir(), 'AppData', 'Local', 'Programs', 'claude', 'claude.exe'),
-      path.join(os.homedir(), 'AppData', 'Local', 'Microsoft', 'WinGet', 'Links', 'claude.exe'),
-    );
-  } else {
-    knownPaths.push(
-      '/usr/local/bin/claude',
-      '/opt/homebrew/bin/claude',
-      path.join(os.homedir(), '.local', 'bin', 'claude'),
-      path.join(os.homedir(), '.claude', 'bin', 'claude'),
-      path.join(os.homedir(), '.claude', 'local', 'bin', 'claude'),
-    );
+  // Fast path: walk every directory in PATH (which fixPath already populated
+  // with shell PATH + nvm/fnm/volta/bun/etc.) and look for the claude binary.
+  const pathDirs = (process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean);
+  const exeNames = process.platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude'] : ['claude'];
+  for (const dir of pathDirs) {
+    for (const name of exeNames) {
+      try {
+        const full = path.join(dir, name);
+        fs.accessSync(full, fs.constants.F_OK);
+        return { ready: true };
+      } catch {}
+    }
   }
 
-  // File-exists check is instant (no child process spawn)
-  for (const p of knownPaths) {
-    try { fs.accessSync(p, fs.constants.X_OK); return { ready: true }; } catch {}
-  }
-
-  // Fallback: try exec (slower, but catches PATH locations we don't know about)
-  const candidates = ['claude'];
-  const results = await Promise.all(candidates.map(cmd => tryCmd(cmd)));
+  // Fallback: try exec (catches edge cases where PATH walk missed something)
+  const results = await Promise.all(['claude'].map(cmd => tryCmd(cmd)));
   if (results.some(r => r)) return { ready: true };
 
   // Claude CLI not found — attempt auto-install
