@@ -1,5 +1,5 @@
 {
-  "version": "0.8.1",
+  "version": "0.8.2",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -18,10 +18,10 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v0.8.1: Download reliability fix (3-tier fallback, no more GitHub page redirects), mobile landing page, SDK error diagnostics, second-instance window restore.",
+  "notes": "v0.8.2: OneClick installer (no more freeze), SDK unpacked import fix, TikTok OAuth live, hi-res icon, tray icon fix, duplicate handler crash fix.",
   "whatsNew": [
-    "Download links never break — 3-tier fallback with hardcoded URL pattern",
-    "Mobile visitors get 'email yourself the link' instead of broken DMG download",
-    "Better error diagnostics when Claude CLI connection fails"
+    "OneClick installer — installs and launches instantly, no freeze",
+    "TikTok Ads — one-click OAuth connection now live",
+    "Tray icon + window visibility fixes for packaged builds"
   ]
 }

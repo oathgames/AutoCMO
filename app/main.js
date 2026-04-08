@@ -299,8 +299,10 @@ async function createWindow() {
     });
   }
   win.once('ready-to-show', () => {
-    // If launched hidden at startup (tray mode), stay hidden — spells still fire
-    const launchedHidden = process.argv.includes('--hidden') || app.getLoginItemSettings().wasOpenedAsHidden;
+    // Show window unless explicitly launched hidden (tray mode at startup)
+    // ALWAYS show on first run (no workspace yet) — user needs to see the app after install
+    const isFirstRun = app.isPackaged && !fs.existsSync(path.join(appRoot, 'CLAUDE.md'));
+    const launchedHidden = !isFirstRun && (process.argv.includes('--hidden') || app.getLoginItemSettings().wasOpenedAsHidden);
     if (!launchedHidden) win.show();
     win.webContents.send('platform', process.platform);
 
@@ -353,7 +355,15 @@ async function createWindow() {
   };
 
   try {
-    const trayIcon = path.join(__dirname, process.platform === 'win32' ? 'icon.ico' : 'icon.png');
+    const { nativeImage } = require('electron');
+    const iconFile = process.platform === 'win32' ? 'icon.ico' : 'icon.png';
+    // Try multiple paths: asar, unpacked asar, __dirname
+    let trayIcon;
+    for (const base of [__dirname, path.join(__dirname, '..'), appInstall]) {
+      const p = path.join(base, iconFile);
+      if (fs.existsSync(p)) { trayIcon = p; break; }
+    }
+    if (!trayIcon) trayIcon = path.join(__dirname, iconFile); // fallback
     tray = new Tray(trayIcon);
     tray.setToolTip('Merlin — AI CMO');
     tray.setContextMenu(Menu.buildFromTemplate([
@@ -2355,16 +2365,6 @@ ipcMain.handle('get-wisdom', async () => {
   } catch { return _wisdomCache || null; }
 });
 
-ipcMain.handle('get-version', () => {
-  const ver = getCurrentVersion();
-  // Read whatsNew bullets from version.json for tooltip
-  let whatsNew = [];
-  try {
-    const vj = JSON.parse(fs.readFileSync(path.join(appRoot, 'version.json'), 'utf8'));
-    whatsNew = vj.whatsNew || [];
-  } catch {}
-  return { version: ver, whatsNew };
-});
 ipcMain.handle('win-minimize', () => { if (win) win.minimize(); });
 ipcMain.handle('win-maximize', () => { if (win) { win.isMaximized() ? win.unmaximize() : win.maximize(); } });
 ipcMain.handle('win-close', () => { if (win) win.close(); });
