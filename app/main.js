@@ -1301,6 +1301,28 @@ async function startSession() {
       if (isNewEmail) {
         cfg._userEmail = acctInfo.email;
         writeConfig(cfg);
+        // If user opted in to emails, sync updated email to server
+        try {
+          const state = readState();
+          if (state.emailOptIn && acctInfo.email) {
+            const https = require('https');
+            const payload = JSON.stringify({
+              machineId: getMachineId(),
+              email: acctInfo.email,
+              consent: true,
+              consentAt: state.emailOptInAt || new Date().toISOString(),
+              source: 'email-update',
+            });
+            const syncReq = https.request('https://merlingotme.com/api/subscribe', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+              timeout: 5000,
+            });
+            syncReq.on('error', () => {});
+            syncReq.write(payload);
+            syncReq.end();
+          }
+        } catch {}
         // First-time user: if we can infer a brand domain and no brands exist yet,
         // send a hint so Claude can suggest it mid-conversation
         const domain = acctInfo.email.split('@')[1]?.toLowerCase();
@@ -2331,8 +2353,42 @@ ipcMain.handle('check-tos-accepted', () => {
   } catch { return false; }
 });
 
-ipcMain.handle('accept-tos', () => {
-  writeState({ tosAccepted: new Date().toISOString() });
+ipcMain.handle('accept-tos', (_, opts) => {
+  const now = new Date().toISOString();
+  const emailOptIn = opts?.emailOptIn ?? false;
+  writeState({
+    tosAccepted: now,
+    emailOptIn,
+    emailOptInAt: emailOptIn ? now : undefined,
+  });
+
+  // Sync email consent to server (fire-and-forget)
+  if (emailOptIn) {
+    try {
+      const cfg = readConfig();
+      const email = cfg?._userEmail || '';
+      const machineId = getMachineId();
+      if (email || machineId) {
+        const https = require('https');
+        const payload = JSON.stringify({
+          machineId,
+          email,
+          consent: true,
+          consentAt: now,
+          source: 'tos-onboarding',
+        });
+        const req = https.request('https://merlingotme.com/api/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+          timeout: 5000,
+        });
+        req.on('error', () => {}); // fire-and-forget
+        req.write(payload);
+        req.end();
+      }
+    } catch {}
+  }
+
   return { success: true };
 });
 
@@ -3959,7 +4015,7 @@ async function downloadAndApplyUpdate() {
 
 // Single instance lock — prevent multiple windows
 const gotLock = app.requestSingleInstanceLock();
-if (!gotLock) { app.quit(); }
+if (!gotLock) { app.exit(0); } // exit(0) is synchronous — quit() is async and flashes a taskbar icon before closing
 app.on('second-instance', () => {
   if (win && !win.isDestroyed()) {
     win.show();

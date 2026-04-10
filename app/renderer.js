@@ -1752,8 +1752,12 @@ document.addEventListener('click', (e) => {
 });
 
 // Connect platform tiles — ALL connections handled directly in UI, zero chat involvement
-const OAUTH_PLATFORMS = new Set(['meta', 'tiktok', 'shopify', 'google', 'amazon', 'pinterest', 'klaviyo', 'slack', 'discord']);
+const OAUTH_PLATFORMS = new Set(['tiktok', 'shopify', 'google', 'amazon', 'pinterest', 'klaviyo', 'slack', 'discord']);
 const API_KEY_PLATFORMS = {
+  // Meta: manual token entry while app is in review. Users get their token
+  // from developers.facebook.com → Graph API Explorer. Once App Review
+  // passes, move meta back to OAUTH_PLATFORMS for one-click OAuth login.
+  meta:       { key: 'metaAccessToken', label: 'Meta Ads', placeholder: 'EAAL...', url: 'https://developers.facebook.com/tools/explorer/' },
   fal:        { key: 'falApiKey', label: 'fal.ai', placeholder: 'fal-xxxx...', url: 'https://fal.ai/dashboard/keys' },
   elevenlabs: { key: 'elevenLabsApiKey', label: 'ElevenLabs', placeholder: 'xi_xxxx...', url: 'https://elevenlabs.io/app/settings/api-keys' },
   heygen:     { key: 'heygenApiKey', label: 'HeyGen', placeholder: 'your-api-key', url: 'https://app.heygen.com/settings?nav=API' },
@@ -3797,7 +3801,8 @@ document.getElementById('progress-close')?.addEventListener('click', () => {
     const btn = document.getElementById('tos-accept-btn');
     cb.addEventListener('change', () => { btn.disabled = !cb.checked; });
     btn.addEventListener('click', async () => {
-      await merlin.acceptTos();
+      const emailOptIn = document.getElementById('email-optin-checkbox').checked;
+      await merlin.acceptTos({ emailOptIn });
       document.getElementById('tos-overlay').style.animation = 'fadeOut .3s ease forwards';
       setTimeout(() => {
         document.getElementById('tos-overlay').classList.add('hidden');

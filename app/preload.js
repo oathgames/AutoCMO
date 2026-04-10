@@ -26,7 +26,7 @@ contextBridge.exposeInMainWorld('merlin', {
   openClaudeDownload: () => ipcRenderer.invoke('open-claude-download'),
   openMerlinFolder: () => ipcRenderer.invoke('open-merlin-folder'),
   checkTosAccepted: () => ipcRenderer.invoke('check-tos-accepted'),
-  acceptTos: () => ipcRenderer.invoke('accept-tos'),
+  acceptTos: (opts) => ipcRenderer.invoke('accept-tos', opts),
 
   // Mobile
   getMobileQR: () => ipcRenderer.invoke('get-mobile-qr'),
