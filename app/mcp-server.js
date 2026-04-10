@@ -13,22 +13,40 @@
 
 const { buildTools } = require('./mcp-tools');
 
-// Cache the SDK import — same pattern as importClaudeAgentSdk() in main.js.
+// Resolve the SDK module. Prefers the already-imported module passed in via
+// ctx.sdkModule (from main.js's importClaudeAgentSdk(), which correctly
+// handles the app.asar.unpacked path on all platforms). Falls back to a
+// local import that mirrors main.js's platform-aware path resolution.
 let _sdkModule = null;
-async function importSdk() {
+async function importSdk(ctx) {
   if (_sdkModule) return _sdkModule;
+
+  // Best path: reuse the module main.js already loaded. This guarantees
+  // the MCP server and query() use the exact same SDK instance — no dual-
+  // package hazard, no asar resolution issues.
+  if (ctx && ctx.sdkModule) {
+    _sdkModule = ctx.sdkModule;
+    return _sdkModule;
+  }
+
+  // Fallback: import ourselves, using the same platform-aware path as
+  // importClaudeAgentSdk() in main.js.
   try {
     _sdkModule = await import('@anthropic-ai/claude-agent-sdk');
   } catch {
-    // Packaged app: try the unpacked asar path
     const path = require('path');
     const app = require('electron').app;
+    // Mac:   exe is at Contents/MacOS/Merlin → resources at Contents/Resources/
+    // Win:   exe is at root → resources at root/resources/
+    const resourcesDir = process.platform === 'darwin'
+      ? path.join(path.dirname(app.getPath('exe')), '..', 'Resources')
+      : path.join(path.dirname(app.getPath('exe')), 'resources');
     const unpacked = path.join(
-      path.dirname(app.getPath('exe')),
-      'resources', 'app.asar.unpacked', 'node_modules',
+      resourcesDir, 'app.asar.unpacked', 'node_modules',
       '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs'
     );
-    _sdkModule = await import(unpacked);
+    // ESM import() requires a file:// URL on all platforms
+    _sdkModule = await import('file://' + unpacked.replace(/\\/g, '/'));
   }
   return _sdkModule;
 }
@@ -48,11 +66,12 @@ async function importSdk() {
  *   - appRoot: string
  *   - activeChildProcesses: Set
  *   - appendAudit(event, details): void
+ *   - sdkModule: object (optional — pre-imported SDK module from importClaudeAgentSdk())
  *
  * @returns {Promise<McpSdkServerConfigWithInstance>} — pass to query options.mcpServers
  */
 async function createMerlinMcpServer(ctx) {
-  const sdk = await importSdk();
+  const sdk = await importSdk(ctx);
   const { createSdkMcpServer, tool } = sdk;
 
   // Zod is a peer dependency of the SDK — both the SDK and Merlin resolve

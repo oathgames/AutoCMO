@@ -1127,7 +1127,8 @@ async function startSession() {
   }
 
   // Import SDK — packaged apps MUST use the unpacked path (asar import is unreliable)
-  const { query } = await importClaudeAgentSdk();
+  const sdkModule = await importClaudeAgentSdk();
+  const { query } = sdkModule;
 
   // Determine the active brand — must match what the welcome message shows
   let activeBrand = '';
@@ -1201,6 +1202,7 @@ async function startSession() {
       appRoot,
       activeChildProcesses,
       appendAudit,
+      sdkModule,
     });
     mcpConfig = { merlin: merlinMcp };
   } catch (err) {
