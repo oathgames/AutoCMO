@@ -247,7 +247,7 @@ Before every run:
 
 | User wants... | Mode | Pipeline |
 |---|---|---|
-| Product footage, lifestyle, B-roll, cinematic | `product-showcase` | Veo via fal.ai |
+| Product footage, lifestyle, B-roll, cinematic | `product-showcase` | Seedance 2 via fal.ai (default) |
 | Product photos, ad images | `image` | fal.ai (model auto-selected) |
 | Someone talking to camera | `talking-head` | HeyGen |
 
@@ -289,6 +289,16 @@ Read `brand.md` + `product.md` + reference photos. Then write:
 - **product-showcase**: 30-40 words. Voiceover narration.
 
 Rules: Hook in 3 seconds. Sound human. ONE specific detail from reference photos. CTA from brand.md.
+
+### Video Prompt Coherence (when writing `productHook` or video descriptions)
+
+Every video prompt MUST include these 6 anchors — they prevent AI video artifacts:
+1. **Camera motion** — specify exactly: "slow smooth dolly-in", "static tripod", "gentle pan right". Never leave camera unspecified.
+2. **Facial consistency** — "consistent facial features" + specific expression ("shy smile", "confident gaze"). Prevents face morphing.
+3. **Hand anatomy** — "anatomically correct hands with fluid, stable movement" + specific gesture if needed. Hands are the #1 failure mode.
+4. **Texture lock** — "fixed [fabric/material] textures, stable rendering". Name the specific material (embroidery, knit, denim). Prevents texture shimmer.
+5. **Hair physics** — "gentle hair movement" or "minimal hair movement". Never leave hair unspecified — it defaults to wild/unrealistic.
+6. **Lighting + finish** — "warm golden hour lighting" or specific lighting + "high-definition details, clean professional finish".
 
 ## Step 4: Cost Estimate + Confirmation
 

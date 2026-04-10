@@ -266,6 +266,8 @@ async function init() {
 
   // Auto-detect Claude — poll every 3 seconds until found
   async function detectClaude() {
+    // Guard against double-start from poller + retry button racing
+    if (sessionActive) return true;
     const result = await merlin.checkSetup();
     document.getElementById('setup-status').textContent = getSetupStatusText(result);
     if (result.ready) {

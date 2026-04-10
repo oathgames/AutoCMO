@@ -1,5 +1,5 @@
 {
-  "version": "0.9.5",
+  "version": "0.9.6",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -23,7 +23,7 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v0.9.5: MCP server architecture, cross-vertical wisdom intelligence, landing page auditor, hardened rate limits on all API calls.",
+  "notes": "v0.9.6: MCP server architecture, cross-vertical wisdom intelligence, landing page auditor, hardened rate limits on all API calls.",
   "whatsNew": [
     "Landing page auditor — scans your product page for conversion killers",
     "Cross-vertical wisdom — model performance tracking, ad intelligence rules",

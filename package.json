@@ -1,6 +1,6 @@
 {
   "name": "Merlin",
-  "version": "0.9.5",
+  "version": "0.9.6",
   "description": "Merlin — Your AI CMO",
   "main": "app/main.js",
   "scripts": {
@@ -21,6 +21,9 @@
     "appId": "com.merlin.desktop",
     "productName": "Merlin",
     "asar": true,
+    "asarUnpack": [
+      "node_modules/@anthropic-ai/claude-agent-sdk/**/*"
+    ],
     "afterSign": "build/notarize.js",
     "files": [
       "app/**/*"

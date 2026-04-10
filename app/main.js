@@ -23,14 +23,16 @@ Menu.setApplicationMenu(null);
     );
   } else {
     // On macOS/Linux, Electron launched from Finder/Dock/installer does NOT
-    // inherit the user's shell PATH. Spawn a login+interactive shell to read
-    // the real PATH — this catches nvm, fnm, volta, asdf, bun, custom prefixes,
-    // and anything configured in ~/.zshrc, ~/.bashrc, ~/.profile.
+    // inherit the user's shell PATH. Spawn a LOGIN shell (not interactive) to
+    // read the real PATH from ~/.zprofile, ~/.bash_profile, ~/.profile.
+    // The -l flag sources login configs. The -i (interactive) flag is OMITTED
+    // because it triggers zsh compinit, conda hooks, and iterm2 integrations
+    // that can hang or print garbage to stdout in a non-TTY context.
     try {
       const { execSync } = require('child_process');
       const shell = process.env.SHELL || '/bin/bash';
-      const shellPath = execSync(`${shell} -ilc 'echo "$PATH"'`, {
-        timeout: 3000,
+      const shellPath = execSync(`${shell} -lc 'echo "$PATH"' 2>/dev/null`, {
+        timeout: 5000,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
       }).trim();
@@ -112,6 +114,9 @@ const appInstall = app.isPackaged
 const appRoot = app.isPackaged
   ? path.join(app.getPath('documents'), 'Merlin')
   : path.join(__dirname, '..');
+// Ensure workspace exists early — the SDK probe uses it as cwd and fails
+// with ENOENT if it doesn't exist yet (race with bootstrapWorkspace on first launch).
+try { fs.mkdirSync(appRoot, { recursive: true }); } catch {}
 
 // Resolve the Merlin engine binary. We prefer the INSTALL location because
 // files placed there by the trusted installer don't get quarantined by
@@ -127,7 +132,10 @@ function getBinaryPath() {
 
 let claudeSdkModulePromise = null;
 const CLAUDE_SETUP_CACHE_MS = 2500;
-const CLAUDE_SETUP_TIMEOUT_MS = 5000;
+// Mac cold start: SDK → spawn claude CLI → Node.js loads → connects to Desktop.
+// 5s was too short (always timed out). 20s was too long (poor UX during polling).
+// 12s balances cold-start latency with responsiveness.
+const CLAUDE_SETUP_TIMEOUT_MS = 12000;
 let cachedClaudeSetup = { at: 0, result: null };
 let claudeSetupPromise = null;
 
@@ -244,29 +252,11 @@ async function probeClaudeSetup(force = false) {
     let querySession = null;
     let result;
 
-    if (process.platform === 'darwin' && !desktop.installed) {
-      result = {
-        ready: false,
-        desktopInstalled: false,
-        desktopRunning: false,
-        desktopPath: null,
-        reason: 'Claude Desktop is not installed yet. Install it to continue, or use an API key.',
-      };
-      cachedClaudeSetup = { at: Date.now(), result };
-      return result;
-    }
-
-    if (process.platform === 'darwin' && !desktop.running) {
-      result = {
-        ready: false,
-        desktopInstalled: desktop.installed,
-        desktopRunning: false,
-        desktopPath: desktop.path,
-        reason: 'Claude Desktop is installed. Open it and sign in to continue.',
-      };
-      cachedClaudeSetup = { at: Date.now(), result };
-      return result;
-    }
+    // Previously gated on desktop.installed/running for Mac, but this was
+    // too restrictive: mdfind can fail, Spotlight can be disabled, and the
+    // SDK can authenticate via Claude Code CLI even without Claude Desktop.
+    // Now we always try the SDK probe. Desktop status is still reported in
+    // the result for the UI to show helpful guidance if the probe fails.
 
     try {
       const { query } = await importClaudeAgentSdk();
@@ -283,6 +273,7 @@ async function probeClaudeSetup(force = false) {
         setTimeout(() => reject(new Error('Claude setup timed out')), CLAUDE_SETUP_TIMEOUT_MS);
       });
       const account = await Promise.race([querySession.accountInfo(), timeout]);
+      console.log('[setup-probe] accountInfo:', JSON.stringify(account || null));
       const hasAccount = !!(account && (
         account.email ||
         account.organization ||
@@ -292,7 +283,15 @@ async function probeClaudeSetup(force = false) {
         account.apiProvider
       ));
 
-      if (!hasAccount) throw new Error('Claude account information unavailable');
+      if (!hasAccount) {
+        // SDK connected but returned no auth data — user likely hasn't signed in
+        // inside Claude Desktop, or their session expired.
+        throw new Error(
+          desktop.running
+            ? 'Claude Desktop is running but your session may have expired. Open Claude Desktop and make sure you\'re signed in.'
+            : 'Claude account information unavailable — sign in to Claude Desktop first.'
+        );
+      }
 
       result = {
         ready: true,
@@ -303,6 +302,7 @@ async function probeClaudeSetup(force = false) {
       };
     } catch (error) {
       const errorMessage = error?.message || String(error);
+      console.error('[setup-probe] SDK connection failed:', errorMessage);
       let reason;
 
       if (/app\.asar\.unpacked|Cannot find module|Cannot find package/i.test(errorMessage)) {
@@ -315,8 +315,20 @@ async function probeClaudeSetup(force = false) {
         } else {
           reason = 'Claude Desktop is not installed yet. Install it to continue, or use an API key.';
         }
+      } else if (/timed? ?out/i.test(errorMessage)) {
+        // SDK timed out connecting to Claude Desktop. Most common cause on Mac:
+        // Claude Desktop is open but still initializing, or user hasn't completed
+        // the first-run onboarding in Claude Desktop.
+        if (desktop.running) {
+          reason = 'Claude Desktop is open but still starting up. Wait a few seconds and retry, or make sure you\'ve completed the Claude sign-in.';
+        } else {
+          reason = 'Connection to Claude timed out. Open Claude Desktop and sign in first.';
+        }
+      } else if (/ECONNREFUSED|ENOENT|spawn|EPIPE/i.test(errorMessage)) {
+        // SDK can't reach the Claude Code CLI at all
+        reason = 'Merlin could not find the Claude connection. Make sure Claude Desktop is fully open and signed in. If this persists, try reinstalling Claude Desktop from claude.ai/download.';
       } else if (desktop.running) {
-        reason = 'Claude Desktop is open, but Merlin could not connect to Claude yet. Finish signing in, then retry.';
+        reason = 'Claude Desktop is open, but Merlin could not connect yet. Make sure you\'re signed in inside Claude Desktop, then retry.';
       } else if (desktop.installed) {
         reason = 'Claude Desktop is installed. Open it to finish connecting Merlin.';
       } else {
