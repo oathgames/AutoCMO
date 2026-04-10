@@ -243,11 +243,22 @@
       <span class="stats-revenue-label">revenue influenced</span>
     </div>
 
+    <div class="stats-bar-wrap">
+      <div class="stats-bar">
+        <div id="stats-bar-spend" class="stats-bar-segment stats-bar-spend" style="width:50%">
+          <span class="stats-bar-label"></span>
+        </div>
+        <div id="stats-bar-revenue" class="stats-bar-segment stats-bar-revenue" style="width:50%">
+          <span class="stats-bar-label"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="stats-story" class="stats-story"></div>
+
     <div class="stats-grid">
-      <div class="stats-cell"><span id="stats-ads" class="stats-val">--</span><span class="stats-label">ads created</span></div>
-      <div class="stats-cell"><span id="stats-winners" class="stats-val">--</span><span class="stats-label">winners found</span></div>
-      <div class="stats-cell"><span id="stats-roas" class="stats-val">--</span><span class="stats-label">avg ROAS</span></div>
       <div class="stats-cell"><span id="stats-spend" class="stats-val">--</span><span class="stats-label">ad spend</span></div>
+      <div class="stats-cell"><span id="stats-roas" class="stats-val">--</span><span class="stats-label">return</span></div>
     </div>
 
     <div id="stats-top-ad" class="stats-top-ad"></div>
@@ -344,7 +355,7 @@
   </div>
 </div>
 
-<!-- Setup overlay (only shown if Claude not installed) -->
+<!-- Setup overlay (shown when Claude is not ready yet) -->
 <div id="setup" class="overlay">
   <div class="setup-card">
     <div class="setup-mascot">✦</div>
@@ -352,8 +363,8 @@
     <p class="setup-sub">Your AI CMO Wizard</p>
     <p id="setup-status" class="setup-desc" style="white-space:pre-line">Setting up...</p>
     <div id="setup-main">
-      <p class="setup-explain">Merlin is powered by <strong style="color:var(--text)">Claude</strong> from Anthropic.<br>We'll set everything up automatically.</p>
-      <button id="setup-auto-btn" class="btn-primary">Install Claude &amp; Get Started</button>
+      <p class="setup-explain">Merlin is powered by <strong style="color:var(--text)">Claude</strong> from Anthropic.<br>We'll help you open Claude Desktop and finish setup automatically.</p>
+      <button id="setup-auto-btn" class="btn-primary">Open Claude Desktop</button>
       <p style="font-size:10px;color:var(--text-dim);margin-top:8px;text-align:center">Requires a Claude account (Pro or Max recommended)</p>
       <div style="margin-top:16px;padding-top:12px;border-top:1px solid var(--border)">
         <button id="setup-manual-btn" class="btn-secondary" style="width:100%;margin-bottom:6px">I already have Claude &mdash; retry</button>

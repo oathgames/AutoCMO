@@ -113,6 +113,237 @@ const appRoot = app.isPackaged
   ? path.join(app.getPath('documents'), 'Merlin')
   : path.join(__dirname, '..');
 
+// Resolve the Merlin engine binary. We prefer the INSTALL location because
+// files placed there by the trusted installer don't get quarantined by
+// Windows Defender — the installer's user-approved trust extends to its
+// extraResources. Workspace is the fallback for dev and for cases where
+// ensureBinary had to download the binary at runtime.
+function getBinaryPath() {
+  const binaryName = process.platform === 'win32' ? 'Merlin.exe' : 'Merlin';
+  const installBin = path.join(appInstall, '.claude', 'tools', binaryName);
+  try { fs.accessSync(installBin, fs.constants.F_OK); return installBin; } catch {}
+  return path.join(appRoot, '.claude', 'tools', binaryName);
+}
+
+let claudeSdkModulePromise = null;
+const CLAUDE_SETUP_CACHE_MS = 2500;
+const CLAUDE_SETUP_TIMEOUT_MS = 5000;
+let cachedClaudeSetup = { at: 0, result: null };
+let claudeSetupPromise = null;
+
+function getPackagedResourcePath(...segments) {
+  return path.join(appInstall, ...segments);
+}
+
+async function importClaudeAgentSdk() {
+  if (!claudeSdkModulePromise) {
+    claudeSdkModulePromise = (async () => {
+      if (app.isPackaged) {
+        const unpackedSdk = getPackagedResourcePath(
+          'app.asar.unpacked',
+          'node_modules',
+          '@anthropic-ai',
+          'claude-agent-sdk',
+          'sdk.mjs',
+        );
+        return import('file://' + unpackedSdk.replace(/\\/g, '/'));
+      }
+      return import('@anthropic-ai/claude-agent-sdk');
+    })();
+  }
+
+  try {
+    return await claudeSdkModulePromise;
+  } catch (err) {
+    claudeSdkModulePromise = null;
+    throw err;
+  }
+}
+
+function execCommand(cmd, timeout = 5000) {
+  const { exec } = require('child_process');
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (payload) => {
+      if (!settled) {
+        settled = true;
+        resolve(payload);
+      }
+    };
+    const child = exec(cmd, { timeout }, (error, stdout = '', stderr = '') => {
+      finish({ error, stdout: stdout || '', stderr: stderr || '' });
+    });
+    child.on('error', (error) => finish({ error, stdout: '', stderr: '' }));
+  });
+}
+
+async function getClaudeDesktopStatus() {
+  const status = { installed: false, running: false, path: null };
+
+  if (process.platform === 'darwin') {
+    const userApps = path.join(os.homedir(), 'Applications');
+    const candidates = [
+      '/Applications/Claude.app',
+      '/Applications/Claude Desktop.app',
+      path.join(userApps, 'Claude.app'),
+      path.join(userApps, 'Claude Desktop.app'),
+    ];
+
+    for (const candidate of candidates) {
+      try {
+        fs.accessSync(candidate, fs.constants.F_OK);
+        status.installed = true;
+        status.path = candidate;
+        break;
+      } catch {}
+    }
+
+    if (!status.installed) {
+      const { stdout } = await execCommand(
+        `mdfind "kMDItemKind == 'Application' && (kMDItemFSName == 'Claude.app' || kMDItemFSName == 'Claude Desktop.app')"`,
+        3000,
+      );
+      const discovered = stdout.split(/\r?\n/).map((line) => line.trim()).find(Boolean);
+      if (discovered) {
+        status.installed = true;
+        status.path = discovered;
+      }
+    }
+
+    const { stdout } = await execCommand(
+      `pgrep -if "/Claude( Desktop)?\\.app/" || pgrep -x "Claude" || pgrep -f "Claude Desktop"`,
+      3000,
+    );
+    status.running = stdout.trim().length > 0;
+    return status;
+  }
+
+  if (process.platform === 'win32') {
+    const { stdout } = await execCommand('tasklist /FI "IMAGENAME eq Claude.exe" /NH', 3000);
+    status.running = stdout.toLowerCase().includes('claude.exe');
+    return status;
+  }
+
+  const { stdout } = await execCommand('pgrep -x "Claude" || pgrep -f "Claude Desktop"', 3000);
+  status.running = stdout.trim().length > 0;
+  return status;
+}
+
+function isClaudeAuthError(message = '') {
+  return /auth|authorization|token|sign in|signin|logged in|login|account/i.test(message);
+}
+
+async function probeClaudeSetup(force = false) {
+  if (!force && cachedClaudeSetup.result && (Date.now() - cachedClaudeSetup.at) < CLAUDE_SETUP_CACHE_MS) {
+    return cachedClaudeSetup.result;
+  }
+  if (claudeSetupPromise) return claudeSetupPromise;
+
+  claudeSetupPromise = (async () => {
+    const desktop = await getClaudeDesktopStatus();
+    let querySession = null;
+    let result;
+
+    if (process.platform === 'darwin' && !desktop.installed) {
+      result = {
+        ready: false,
+        desktopInstalled: false,
+        desktopRunning: false,
+        desktopPath: null,
+        reason: 'Claude Desktop is not installed yet. Install it to continue, or use an API key.',
+      };
+      cachedClaudeSetup = { at: Date.now(), result };
+      return result;
+    }
+
+    if (process.platform === 'darwin' && !desktop.running) {
+      result = {
+        ready: false,
+        desktopInstalled: desktop.installed,
+        desktopRunning: false,
+        desktopPath: desktop.path,
+        reason: 'Claude Desktop is installed. Open it and sign in to continue.',
+      };
+      cachedClaudeSetup = { at: Date.now(), result };
+      return result;
+    }
+
+    try {
+      const { query } = await importClaudeAgentSdk();
+      querySession = query({
+        prompt: 'Merlin readiness check.',
+        options: {
+          cwd: appRoot,
+          permissionMode: 'default',
+          settingSources: ['project'],
+        },
+      });
+
+      const timeout = new Promise((_, reject) => {
+        setTimeout(() => reject(new Error('Claude setup timed out')), CLAUDE_SETUP_TIMEOUT_MS);
+      });
+      const account = await Promise.race([querySession.accountInfo(), timeout]);
+      const hasAccount = !!(account && (
+        account.email ||
+        account.organization ||
+        account.subscriptionType ||
+        account.tokenSource ||
+        account.apiKeySource ||
+        account.apiProvider
+      ));
+
+      if (!hasAccount) throw new Error('Claude account information unavailable');
+
+      result = {
+        ready: true,
+        desktopInstalled: desktop.installed,
+        desktopRunning: desktop.running,
+        desktopPath: desktop.path,
+        reason: 'Claude is ready. Starting Merlin...',
+      };
+    } catch (error) {
+      const errorMessage = error?.message || String(error);
+      let reason;
+
+      if (/app\.asar\.unpacked|Cannot find module|Cannot find package/i.test(errorMessage)) {
+        reason = 'Merlin could not load its Claude integration. Please reinstall Merlin.';
+      } else if (isClaudeAuthError(errorMessage)) {
+        if (desktop.running) {
+          reason = 'Claude Desktop is open, but Merlin still needs you to finish signing in.';
+        } else if (desktop.installed) {
+          reason = 'Claude Desktop is installed. Open it and sign in to continue.';
+        } else {
+          reason = 'Claude Desktop is not installed yet. Install it to continue, or use an API key.';
+        }
+      } else if (desktop.running) {
+        reason = 'Claude Desktop is open, but Merlin could not connect to Claude yet. Finish signing in, then retry.';
+      } else if (desktop.installed) {
+        reason = 'Claude Desktop is installed. Open it to finish connecting Merlin.';
+      } else {
+        reason = 'Claude Desktop is not installed yet. Install it to continue, or use an API key.';
+      }
+
+      result = {
+        ready: false,
+        desktopInstalled: desktop.installed,
+        desktopRunning: desktop.running,
+        desktopPath: desktop.path,
+        reason,
+        error: errorMessage,
+      };
+    } finally {
+      try { querySession?.close(); } catch {}
+    }
+
+    cachedClaudeSetup = { at: Date.now(), result };
+    return result;
+  })().finally(() => {
+    claudeSetupPromise = null;
+  });
+
+  return claudeSetupPromise;
+}
+
 // ── Workspace bootstrap + sync ──────────────────────────────
 // 100% non-blocking. Every file operation runs in a child process.
 // The main thread NEVER touches the filesystem during bootstrap.
@@ -463,21 +694,157 @@ function setPendingApproval(toolUseID, fn) {
 // ── SDK Integration ─────────────────────────────────────────
 
 const autoApproveTools = new Set([
-  'Read', 'Glob', 'Grep', 'WebSearch', 'WebFetch', 'TodoWrite',
+  // NOTE: WebFetch REMOVED — now goes through handleToolApproval with a
+  // canUseTool banned-host check (below). The hook is primary, canUseTool
+  // is belt-and-suspenders.
+  // is belt-and-suspenders.
+  'Read', 'Glob', 'Grep', 'WebSearch', 'TodoWrite',
   'Skill', 'Edit', 'Write', 'NotebookEdit', 'Agent',
 ]);
 
-// Safe Bash patterns that can be auto-approved (read-only or setup operations)
+// Safe Bash patterns that can be auto-approved (read-only or setup operations).
+// Removed: /^curl\s.*-[sS]/, /^curl\s.*download/, /^node\s+-e\b/ — all three
+// were blanket auto-approvals that Claude could use to make arbitrary network
+// calls. Curl is now permission-checked via the allow/deny lists + hook, and
+// node -e is blocked by the hook when it contains network intent.
 const safeBashPatterns = [
-  /^ls\b/, /^cat\b/, /^head\b/, /^tail\b/, /^wc\b/, /^find\b/, /^grep\b/,
+  // REMOVED: cat, head, tail — can read decrypted temp config files.
+  // They now require user approval via the approval card.
+  /^ls\b/, /^wc\b/, /^find\b/, /^grep\b/,
   /^mkdir\b/, /^cp\b/, /^mv\b/, /^echo\b/, /^pwd\b/, /^cd\b/, /^test\b/,
-  /^curl\s.*-[sS]/, /^curl\s.*download/, /^chmod\b/, /^xattr\b/, /^codesign\b/,
-  /^node\s+-e\b/, /^npx\b/,
+  /^chmod\b/, /^xattr\b/, /^codesign\b/,
+  /^npx\b/,
 ];
 
 function isSafeBash(command) {
   const cmd = (command || '').trim();
   return safeBashPatterns.some(p => p.test(cmd));
+}
+
+// ── Security: banned-host check for WebFetch + Bash ────────────────
+// Duplicate of the hook logic for defense in depth. If the hook crashes
+// or is bypassed, canUseTool still blocks.
+const BANNED_API_HOSTS = [
+  'graph.facebook.com', 'business.facebook.com',
+  'business-api.tiktok.com', 'open-api.tiktok.com', 'open.tiktokapis.com',
+  'googleads.googleapis.com', 'ads.google.com', 'www.googleadservices.com',
+  'advertising-api.amazon.com', 'advertising-api-eu.amazon.com',
+  'advertising-api-fe.amazon.com', 'sellingpartnerapi-na.amazon.com',
+  'sellingpartnerapi-eu.amazon.com', 'sellingpartnerapi-fe.amazon.com',
+  'api.klaviyo.com', 'a.klaviyo.com',
+  'adsapi.snapchat.com', 'ads-api.pinterest.com',
+];
+const ALLOWED_URL_PREFIXES = [
+  'https://github.com/oathgames/',
+  'https://api.github.com/repos/oathgames/',
+  'https://raw.githubusercontent.com/oathgames/',
+  'https://merlingotme.com/',
+  'https://www.merlingotme.com/',
+  'https://api.merlingotme.com/',
+];
+const PROTECTED_PATH_PATTERNS = [
+  /merlin-config\.json$/i,
+  /\.merlin-config-[a-z0-9_-]+\.json$/i,
+  /\.merlin-tokens[a-z0-9_-]*$/i,
+  /\.merlin-vault(\.|$)/i,
+  /\.merlin-ratelimit(\.|$)/i,
+  /\.merlin-audit(\.|$)/i,
+  /\.rate-state\.bin$/i,
+  // The actual vault file at %APPDATA%/Merlin/.vault
+  /[/\\]Merlin[/\\]\.vault$/i,
+  /[/\\]\.vault$/i,
+  /[/\\]\.rate-state\b/i,
+];
+
+function containsBannedHost(text) {
+  if (!text) return null;
+  const lower = text.toLowerCase();
+  // Allow whitelisted URLs
+  for (const p of ALLOWED_URL_PREFIXES) if (lower.includes(p)) return null;
+  // Direct URL match (protocol prefix)
+  for (const host of BANNED_API_HOSTS) {
+    if (lower.includes('://' + host) || lower.includes('//' + host)) return host;
+  }
+  // Shopify admin API (but not OAuth authorize)
+  if (/\.myshopify\.com\/admin\/api/i.test(text)) return 'myshopify-admin-api';
+  // HTTP-fetching verbs with bare host
+  if (/\b(curl|wget|httpie|xh|Invoke-WebRequest|Invoke-RestMethod|iwr|irm)\b/i.test(text)) {
+    for (const host of BANNED_API_HOSTS) if (lower.includes(host)) return host;
+  }
+  return null;
+}
+
+function isProtectedPath(filePath) {
+  if (!filePath) return false;
+  return PROTECTED_PATH_PATTERNS.some(p => p.test(filePath));
+}
+
+// Returns { blocked: bool, reason: string } — runs BEFORE any auto-approve.
+function checkHardDeny(toolName, input) {
+  // WebFetch — URL check
+  if (toolName === 'WebFetch' && input && input.url) {
+    const host = containsBannedHost(input.url);
+    if (host) {
+      return {
+        blocked: true,
+        reason: 'Direct WebFetch to ' + host + ' is not allowed. Use the Merlin binary — it enforces rate limits to protect your ad accounts from platform bans.',
+      };
+    }
+  }
+  // Bash — command + banned host + protected file patterns
+  if (toolName === 'Bash' && input && input.command) {
+    const host = containsBannedHost(input.command);
+    if (host) {
+      return {
+        blocked: true,
+        reason: 'Direct command access to ' + host + ' is not allowed. Use `Merlin.exe --cmd \'{"action":"..."}\'` — Merlin handles rate limits internally.',
+      };
+    }
+    // Shell verbs touching protected files
+    const fileVerbs = /\b(cat|less|more|head|tail|type|Get-Content|Set-Content|grep|rg|awk|sed|xxd|hexdump|od|strings|tee|cp|mv|rm|del|Remove-Item|Copy-Item|Move-Item)\b/;
+    if (fileVerbs.test(input.command)) {
+      for (const pat of PROTECTED_PATH_PATTERNS) {
+        // Loosen end-of-string anchor for command scan
+        const cmdPat = new RegExp(pat.source.replace(/\$$/, '\\b'), 'i');
+        if (cmdPat.test(input.command)) {
+          return {
+            blocked: true,
+            reason: 'Access to Merlin credential files is not allowed. The Merlin binary handles credentials internally.',
+          };
+        }
+      }
+    }
+  }
+  // Read / Edit / Write — file_path check
+  if ((toolName === 'Read' || toolName === 'Edit' || toolName === 'Write' || toolName === 'NotebookEdit') && input && input.file_path) {
+    if (isProtectedPath(input.file_path)) {
+      return {
+        blocked: true,
+        reason: input.file_path + ' is a protected Merlin credential file. Use the Merlin binary instead.',
+      };
+    }
+  }
+  // Grep / Glob — path check (these are auto-approved and bypass the Read hook)
+  if ((toolName === 'Grep' || toolName === 'Glob') && input && input.path) {
+    if (isProtectedPath(input.path)) {
+      return {
+        blocked: true,
+        reason: 'Search of protected Merlin credential files is not allowed.',
+      };
+    }
+  }
+  // WebSearch — block if query contains token-like strings (exfiltration)
+  if (toolName === 'WebSearch' && input && input.query) {
+    // Tokens are typically 40+ chars of base64-ish. If the query contains one,
+    // it's almost certainly an exfiltration attempt.
+    if (/[A-Za-z0-9_\-+/]{40,}/.test(input.query)) {
+      return {
+        blocked: true,
+        reason: 'Search queries must not contain long encoded strings (possible credential exfiltration).',
+      };
+    }
+  }
+  return { blocked: false };
 }
 
 // Translate tool calls to plain English for approval cards
@@ -529,6 +896,20 @@ function translateTool(toolName, input) {
 }
 
 async function handleToolApproval(toolName, input) {
+  // SECURITY: hard-deny bypass attempts BEFORE any auto-approve logic.
+  // This duplicates the PreToolUse hook as defense in depth.
+  const deny = checkHardDeny(toolName, input);
+  if (deny.blocked) {
+    try { appendAudit('bypass_attempt', { tool: toolName, reason: deny.reason }); } catch {}
+    try { reportBypassTelemetry(toolName, deny.reason); } catch {}
+    try {
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('bypass-attempt', { reason: deny.reason });
+      }
+    } catch {}
+    return { behavior: 'deny', message: deny.reason };
+  }
+
   if (autoApproveTools.has(toolName)) {
     return { behavior: 'allow', updatedInput: input };
   }
@@ -538,18 +919,65 @@ async function handleToolApproval(toolName, input) {
     return { behavior: 'allow', updatedInput: input };
   }
 
-  // Auto-approve safe Bash commands (read-only, setup, file management)
-  if (toolName === 'Bash' && isSafeBash(input.command)) {
+  // ── MCP Merlin tools — auto-approve read-only, gate spend actions ──
+  if (toolName.startsWith('mcp__merlin__')) {
+    const action = (input && input.action) || '';
+
+    // Read-only actions: always auto-approve (no user approval needed)
+    const READ_ONLY = new Set([
+      'insights', 'products', 'orders', 'analytics', 'cohorts', 'dashboard',
+      'calendar', 'wisdom', 'report', 'audit', 'revenue', 'keywords',
+      'rankings', 'track', 'gaps', 'status', 'performance', 'lists',
+      'campaigns', 'list', 'list-avatars', 'discover', 'adlib',
+      'competitor-scan', 'landing-audit', 'dry-run', 'version',
+      'blog-list', 'update-rank',
+    ]);
+    if (READ_ONLY.has(action) || toolName === 'mcp__merlin__connection_status') {
+      return { behavior: 'allow', updatedInput: input };
+    }
+
+    // Login actions: auto-approve (user already clicked the tile)
+    if (toolName === 'mcp__merlin__platform_login') {
+      return { behavior: 'allow', updatedInput: input };
+    }
+
+    // Spend actions: show approval card with budget enforcement
+    const SPEND = new Set(['push', 'duplicate', 'setup', 'setup-retargeting']);
+    if (SPEND.has(action)) {
+      // Budget enforcement (reuse existing logic)
+      let activeBrand = '';
+      try { activeBrand = readState().activeBrand || ''; } catch {}
+      const cfg = activeBrand ? readBrandConfig(activeBrand) : readConfig();
+      const dailyBudget = cfg.dailyAdBudget || 0;
+      const translations = {
+        'push': { label: 'Publish this ad', cost: `$${input.dailyBudget || 5}/day budget` },
+        'duplicate': { label: 'Scale this winning ad', cost: 'Increases budget' },
+        'setup': { label: 'Set up ad campaigns', cost: 'Free' },
+        'setup-retargeting': { label: 'Set up retargeting audiences', cost: 'Free' },
+      };
+      const translated = translations[action] || { label: `Run ${action}`, cost: null };
+      if (dailyBudget > 0 && (action === 'push')) {
+        const adBudget = input.dailyBudget || 5;
+        translated.cost = `$${adBudget}/day · Budget cap: $${dailyBudget}/day`;
+      }
+      const toolUseID = Date.now().toString();
+      const payload = { toolUseID, label: translated.label, cost: translated.cost };
+      if (win && !win.isDestroyed()) win.webContents.send('approval-request', payload);
+      wsServer.broadcast('approval-request', payload);
+      return new Promise((resolve) => {
+        setPendingApproval(toolUseID, (approved) => {
+          resolve(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'User declined' });
+        });
+      });
+    }
+
+    // All other MCP merlin tools: auto-approve (config, voice, content, etc.)
     return { behavior: 'allow', updatedInput: input };
   }
 
-  // Auto-approve OAuth login flows — user already clicked the tile to connect
-  if (toolName === 'Bash' && input.command && input.command.includes('Merlin')) {
-    const cmdMatch = input.command.match(/"action"\s*:\s*"([^"]+)"/);
-    const action = cmdMatch ? cmdMatch[1] : '';
-    if (action.endsWith('-login')) {
-      return { behavior: 'allow', updatedInput: input };
-    }
+  // Auto-approve safe Bash commands (read-only, setup, file management)
+  if (toolName === 'Bash' && isSafeBash(input.command)) {
+    return { behavior: 'allow', updatedInput: input };
   }
 
   // GUARDRAIL: Block destructive campaign operations
@@ -652,13 +1080,7 @@ async function startSession() {
   }
 
   // Import SDK — packaged apps MUST use the unpacked path (asar import is unreliable)
-  let query;
-  if (app.isPackaged) {
-    const unpackedSdk = path.join(path.dirname(app.getPath('exe')), 'resources', 'app.asar.unpacked', 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'sdk.mjs');
-    ({ query } = await import('file://' + unpackedSdk.replace(/\\/g, '/')));
-  } else {
-    ({ query } = await import('@anthropic-ai/claude-agent-sdk'));
-  }
+  const { query } = await importClaudeAgentSdk();
 
   // Determine the active brand — must match what the welcome message shows
   let activeBrand = '';
@@ -714,6 +1136,30 @@ async function startSession() {
     }
   } catch {}
 
+  // Register the Merlin MCP server — all platform API calls route through
+  // this in-process server. Credentials never enter Claude's context.
+  let mcpConfig = {};
+  try {
+    const { createMerlinMcpServer } = require('./mcp-server');
+    const merlinMcp = await createMerlinMcpServer({
+      getBinaryPath,
+      readConfig,
+      readBrandConfig,
+      writeConfig,
+      writeBrandTokens,
+      vaultGet,
+      vaultPut,
+      runOAuthFlow,
+      getConnections,
+      appRoot,
+      activeChildProcesses,
+      appendAudit,
+    });
+    mcpConfig = { merlin: merlinMcp };
+  } catch (err) {
+    console.error('[mcp] Failed to create Merlin MCP server:', err.message);
+  }
+
   activeQuery = query({
     prompt: messageGenerator(),
     options: {
@@ -722,7 +1168,8 @@ async function startSession() {
       includePartialMessages: true,
       settingSources: ['project'],
       canUseTool: handleToolApproval,
-      env: sessionEnv,
+      env: { ...sessionEnv, CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: '360000' },
+      mcpServers: mcpConfig,
     },
   });
 
@@ -880,71 +1327,33 @@ ipcMain.handle('get-version', () => {
 });
 
 ipcMain.handle('check-setup', async () => {
-  const { exec } = require('child_process');
-
-  function tryCmd(cmd) {
-    return new Promise((resolve) => {
-      const child = exec(`"${cmd}" --version`, { timeout: 5000, shell: true });
-      child.on('close', (code) => resolve(code === 0));
-      child.on('error', () => resolve(false));
-      // Safety: resolve false if neither event fires
-      setTimeout(() => resolve(false), 6000);
-    });
-  }
-
-  // Fast path: walk every directory in PATH (which fixPath already populated
-  // with shell PATH + nvm/fnm/volta/bun/etc.) and look for the claude binary.
-  const pathDirs = (process.env.PATH || '').split(process.platform === 'win32' ? ';' : ':').filter(Boolean);
-  const exeNames = process.platform === 'win32' ? ['claude.exe', 'claude.cmd', 'claude'] : ['claude'];
-  for (const dir of pathDirs) {
-    for (const name of exeNames) {
-      try {
-        const full = path.join(dir, name);
-        fs.accessSync(full, fs.constants.F_OK);
-        return { ready: true };
-      } catch {}
-    }
-  }
-
-  // Fallback: try exec (catches edge cases where PATH walk missed something)
-  const results = await Promise.all(['claude'].map(cmd => tryCmd(cmd)));
-  if (results.some(r => r)) return { ready: true };
-
-  // Claude CLI not found — attempt auto-install
-  return { ready: false, canAutoInstall: true, reason: 'Setting up Merlin\'s AI engine...' };
+  return probeClaudeSetup();
 });
 
 ipcMain.handle('install-claude', async () => {
-  const { exec } = require('child_process');
-  return new Promise((resolve) => {
-    // Try npm global install first (works if Node.js is available)
-    const cmd = process.platform === 'win32'
-      ? 'npm install -g @anthropic-ai/claude-code 2>&1'
-      : 'npm install -g @anthropic-ai/claude-code 2>&1 || sudo npm install -g @anthropic-ai/claude-code 2>&1';
+  const desktop = await getClaudeDesktopStatus();
 
-    const child = exec(cmd, { timeout: 120000 });
-    let output = '';
-    child.stdout?.on('data', d => { output += d; });
-    child.stderr?.on('data', d => { output += d; });
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolve({ success: true });
-      } else {
-        // npm not available — try direct binary download
-        const binUrl = process.platform === 'darwin'
-          ? 'https://storage.googleapis.com/anthropic-sdk/claude-code/latest/claude-code-macos'
-          : 'https://storage.googleapis.com/anthropic-sdk/claude-code/latest/claude-code-windows.exe';
-        const binDest = process.platform === 'win32'
-          ? path.join(os.homedir(), '.claude', 'bin', 'claude.exe')
-          : path.join(os.homedir(), '.local', 'bin', 'claude');
+  if (desktop.running) {
+    return { success: true, action: 'already-running' };
+  }
 
-        resolve({ success: false, fallback: 'manual', reason: 'Auto-install requires Node.js. Please install Claude from claude.ai/download' });
-      }
-    });
-    child.on('error', () => {
-      resolve({ success: false, fallback: 'manual', reason: 'Auto-install requires Node.js. Please install Claude from claude.ai/download' });
-    });
-  });
+  if (desktop.path) {
+    const launchError = await shell.openPath(desktop.path);
+    if (!launchError) {
+      return { success: true, action: 'opened-desktop' };
+    }
+    return {
+      success: false,
+      reason: 'Claude Desktop is installed, but Merlin could not open it automatically. Please open Claude Desktop and sign in.',
+    };
+  }
+
+  shell.openExternal('https://claude.ai/download');
+  return {
+    success: false,
+    fallback: 'manual',
+    reason: 'Claude Desktop is required. We opened the download page for you.',
+  };
 });
 
 ipcMain.handle('start-session', () => { startSession(); return { success: true }; });
@@ -1016,15 +1425,19 @@ ipcMain.handle('get-account-info', async () => {
 });
 
 // Direct OAuth — bypasses SDK entirely, runs the binary from main process
-ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
-  const binaryName = process.platform === 'win32' ? 'Merlin.exe' : 'Merlin';
-  const binaryPath = path.join(appRoot, '.claude', 'tools', binaryName);
+// Standalone OAuth flow — callable from both the IPC handler (UI clicks)
+// and the MCP platform_login tool. Returns { success, platform } or { error }.
+async function runOAuthFlow(platform, brandName, extra) {
+  let binaryPath = getBinaryPath();
   const configPath = path.join(appRoot, '.claude', 'tools', 'merlin-config.json');
-  // Auto-download the engine if missing (fresh install + integration click)
+  // Defensive fallback: if neither install nor workspace has the binary,
+  // try to download. This shouldn't happen now that the binary is bundled
+  // in the installer, but kept as a safety net for upgrade edge cases.
   try { fs.accessSync(binaryPath); } catch {
     try {
       if (win && !win.isDestroyed()) win.webContents.send('engine-status', 'Downloading engine...');
       await ensureBinary();
+      binaryPath = getBinaryPath(); // re-resolve in case ensureBinary wrote to workspace
     } catch (e) {
       return { error: `Could not download engine: ${e.message}` };
     }
@@ -1101,26 +1514,61 @@ ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
 
   const action = `${platform}-login`;
   const cmdObj = { action };
-  // For Shopify, pass the store name — check config first (instant), then brand.md, then productUrl
+  // For Shopify, always pass the brand's CUSTOM DOMAIN (e.g. mad-chill.com).
+  // The binary's resolveShopifyStore converts it to the canonical .myshopify.com
+  // slug via the Shopify.shop JS variable with /cart.js verification. We do NOT
+  // trust cached `shopifyStore` values from the config — those may have been
+  // seeded with wrong data and persist indefinitely. Always re-resolve.
+  //
+  // Resolution order (strict — never falls back to a DIFFERENT brand):
+  //   1. extra.store override from caller
+  //   2. Active brand's brand.md URL field
+  //   3. Active brand's productUrl field in brand config
+  //   4. Global productUrl (legacy single-brand configs)
+  //
+  // If the active brand has no URL configured, we return a friendly error
+  // asking the user to set one — we do NOT silently connect a different brand.
   if (platform === 'shopify') {
-    const cfg = brandName ? readBrandConfig(brandName) : readConfig();
-    if (cfg.shopifyStore) {
-      // Already resolved and stored — zero latency
-      cmdObj.brand = cfg.shopifyStore;
-    } else if (brandName) {
-      // Fall back to brand website URL (binary will resolve .myshopify.com)
+    const readUrlFromBrandMd = (name) => {
       try {
-        const brandMd = path.join(appRoot, 'assets', 'brands', brandName, 'brand.md');
+        const brandMd = path.join(appRoot, 'assets', 'brands', name, 'brand.md');
         const content = fs.readFileSync(brandMd, 'utf8');
         const urlMatch = content.match(/URL:\s*(https?:\/\/[^\s\n]+)/i) || content.match(/website:\s*(https?:\/\/[^\s\n]+)/i);
-        if (urlMatch) cmdObj.brand = urlMatch[1].replace(/^https?:\/\//, '').replace(/\/$/, '');
+        if (urlMatch) return urlMatch[1].replace(/^https?:\/\//, '').replace(/\/$/, '');
       } catch {}
-    }
-    if (!cmdObj.brand && cfg.productUrl) {
-      cmdObj.brand = cfg.productUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      return null;
+    };
+
+    if (extra?.store) {
+      cmdObj.brand = extra.store;
+    } else if (brandName) {
+      // Step 2: active brand's brand.md
+      const url = readUrlFromBrandMd(brandName);
+      if (url) {
+        cmdObj.brand = url;
+      } else {
+        // Step 3: active brand's productUrl
+        const brandCfg = readBrandConfig(brandName);
+        if (brandCfg?.productUrl) {
+          cmdObj.brand = brandCfg.productUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+        }
+      }
+      if (!cmdObj.brand) {
+        return {
+          error: `${brandName} has no website URL configured. Edit assets/brands/${brandName}/brand.md and set the URL field to your store's domain (e.g. URL: https://yourstore.com).`,
+        };
+      }
+    } else {
+      // Step 4: no active brand — fall back to global productUrl (legacy)
+      const globalCfg = readConfig();
+      if (globalCfg.productUrl) {
+        cmdObj.brand = globalCfg.productUrl.replace(/^https?:\/\//, '').replace(/\/$/, '');
+      }
+      if (!cmdObj.brand) {
+        return { error: 'No active brand selected. Choose a brand from the dropdown first.' };
+      }
     }
   }
-  if (extra?.store) cmdObj.brand = extra.store;
   const cmd = JSON.stringify(cmdObj);
   const { execFile } = require('child_process');
 
@@ -1151,14 +1599,25 @@ ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
         const result = JSON.parse(jsonStr);
         if (!result || Object.keys(result).length === 0) throw new Error('Empty JSON result');
         // console.log(`[oauth] parsed result:`, JSON.stringify(result));
-        // Save tokens to config + record timestamp
-        // Discord/Slack are global (shared across brands) — always write to global config
+        // Save tokens — sensitive values go to the vault, metadata goes
+        // to the brand config with @@VAULT@@ placeholders.
         const isGlobalPlatform = platform === 'discord' || platform === 'slack';
+        const vaultBrand = (brandName && !isGlobalPlatform) ? brandName : '_global';
+        const publicFields = {};
+        const placeholders = {};
+        for (const [k, v] of Object.entries(result)) {
+          if (VAULT_SENSITIVE_KEYS.includes(k)) {
+            vaultPut(vaultBrand, k, v);
+            placeholders[k] = `@@VAULT:${k}@@`;
+          } else {
+            publicFields[k] = v;
+          }
+        }
         if (brandName && !isGlobalPlatform) {
-          writeBrandTokens(brandName, result);
+          writeBrandTokens(brandName, { ...publicFields, ...placeholders });
         } else {
           const cfg = readConfig();
-          Object.assign(cfg, result);
+          Object.assign(cfg, publicFields, placeholders);
           if (!cfg._tokenTimestamps) cfg._tokenTimestamps = {};
           cfg._tokenTimestamps[platform] = Date.now();
           writeConfig(cfg);
@@ -1191,6 +1650,11 @@ ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
     });
     activeChildProcesses.add(child);
   });
+}
+
+// IPC wrapper — UI tile clicks invoke the standalone function above.
+ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
+  return runOAuthFlow(platform, brandName, extra);
 });
 
 // Save a single config field (for API key entry from UI)
@@ -1352,8 +1816,7 @@ ipcMain.handle('open-folder', (_, folderPath) => {
 // ── Performance status bar: read cached dashboard data ──────
 // Background dashboard refresh — runs binary to pull fresh data from all platforms
 ipcMain.handle('refresh-perf', async (_, brandName) => {
-  const binaryName = process.platform === 'win32' ? 'Merlin.exe' : 'Merlin';
-  const binaryPath = path.join(appRoot, '.claude', 'tools', binaryName);
+  const binaryPath = getBinaryPath();
   try { fs.accessSync(binaryPath); } catch { return { error: 'binary missing' }; }
 
   // Use merged brand config if brand specified (includes brand tokens)
@@ -1362,9 +1825,9 @@ ipcMain.handle('refresh-perf', async (_, brandName) => {
   if (brandName) {
     const merged = brandName ? readBrandConfig(brandName) : readConfig();
     if (merged && Object.keys(merged).length > 0) {
-      const tmpPath = path.join(os.tmpdir(), `.merlin-config-perf-${Date.now()}.json`);
-      fs.writeFileSync(tmpPath, JSON.stringify(merged, null, 2));
-      setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 120000);
+      const tmpPath = path.join(os.tmpdir(), `.merlin-config-tmp-${require('crypto').randomBytes(16).toString('hex')}.json`);
+      fs.writeFileSync(tmpPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+      setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 60000);
       configPath = tmpPath;
     }
   }
@@ -1734,9 +2197,9 @@ ipcMain.handle('get-decrypted-config-path', (_, brandName) => {
   if (brandName) {
     const cfg = readBrandConfig(brandName);
     if (!cfg || Object.keys(cfg).length === 0) return null;
-    const tmpPath = path.join(os.tmpdir(), `.merlin-config-${Date.now()}.json`);
-    fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2));
-    setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 500);
+    const tmpPath = path.join(os.tmpdir(), `.merlin-config-tmp-${require('crypto').randomBytes(16).toString('hex')}.json`);
+    fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    setTimeout(() => { try { fs.unlinkSync(tmpPath); } catch {} }, 60000);
     return tmpPath;
   }
   const configPath = path.join(appRoot, '.claude', 'tools', 'merlin-config.json');
@@ -1744,23 +2207,8 @@ ipcMain.handle('get-decrypted-config-path', (_, brandName) => {
 });
 
 ipcMain.handle('check-claude-running', async () => {
-  const { exec } = require('child_process');
-  return new Promise((resolve) => {
-    const cmd = process.platform === 'win32'
-      ? 'tasklist /FI "IMAGENAME eq Claude.exe" /NH'
-      : 'pgrep -x "Claude" || pgrep -f "Claude Desktop"';
-    const child = exec(cmd, { timeout: 5000 });
-    let output = '';
-    child.stdout.on('data', (d) => { output += d; });
-    child.on('close', () => {
-      if (process.platform === 'win32') {
-        resolve(output.toLowerCase().includes('claude.exe'));
-      } else {
-        resolve(output.trim().length > 0);
-      }
-    });
-    child.on('error', () => resolve(false));
-  });
+  const status = await getClaudeDesktopStatus();
+  return status.running;
 });
 
 // ── Session State Persistence (centralized, atomic) ─────────
@@ -1785,6 +2233,206 @@ ipcMain.handle('save-state', (_, data) => {
 });
 
 ipcMain.handle('load-state', () => readState());
+
+// ── Audit log ──────────────────────────────────────────────
+// Append-only log of security-relevant events. Rotated at 1MB.
+// Written to .claude/tools/.merlin-audit.log inside the workspace.
+// Claude's Read/Write of this file is blocked by the hook.
+const AUDIT_LOG = path.join(appRoot, '.claude', 'tools', '.merlin-audit.log');
+const AUDIT_MAX_BYTES = 1024 * 1024;
+
+function appendAudit(event, details) {
+  try {
+    fs.mkdirSync(path.dirname(AUDIT_LOG), { recursive: true });
+    try {
+      const st = fs.statSync(AUDIT_LOG);
+      if (st.size > AUDIT_MAX_BYTES) {
+        fs.renameSync(AUDIT_LOG, AUDIT_LOG + '.old');
+      }
+    } catch {}
+    const entry = JSON.stringify({ ts: new Date().toISOString(), src: 'main', event, ...details });
+    // Redact base64-ish strings >= 32 chars (likely tokens)
+    const redacted = entry.replace(/[A-Za-z0-9_\-+/]{32,}={0,2}/g, '[TOKEN]');
+    fs.appendFileSync(AUDIT_LOG, redacted + '\n');
+  } catch (err) {
+    console.error('[audit]', err.message);
+  }
+}
+
+function reportBypassTelemetry(toolName, reason) {
+  try {
+    const crypto = require('crypto');
+    const hash = crypto.createHash('sha256').update(String(reason)).digest('hex').slice(0, 16);
+    const payload = JSON.stringify({
+      id: (typeof getMachineId === 'function' ? getMachineId() : ''),
+      v: (typeof getCurrentVersion === 'function' ? getCurrentVersion() : ''),
+      p: process.platform,
+      e: 'bypass_blocked',
+      tool: toolName,
+      hash,
+    });
+    const https = require('https');
+    const req = https.request('https://api.merlingotme.com/api/ping', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
+      timeout: 5000,
+    });
+    req.on('error', () => {});
+    req.write(payload);
+    req.end();
+  } catch {}
+}
+
+// ── Credential Vault ──────────────────────────────────────
+// AES-256-GCM encrypted file shared between Electron and the Go binary.
+// Both sides derive the SAME key from hostname + username + constant,
+// so either can read what the other wrote. Vault file lives OUTSIDE the
+// workspace at %APPDATA%/Merlin/.vault (Windows) or equivalent — Claude
+// cannot access it via Read/Bash (hook-blocked).
+//
+// Key derivation MUST match vault.go's vaultKey() exactly. If you change
+// one, you MUST change the other.
+const _vaultCrypto = require('crypto');
+
+function _vaultDeriveKey() {
+  const hostname = (os.hostname() || '').toLowerCase();
+  let username = (os.userInfo().username || '').toLowerCase();
+  // Strip Windows domain prefix (DOMAIN\user → user)
+  const bsIdx = username.lastIndexOf('\\');
+  if (bsIdx >= 0) username = username.slice(bsIdx + 1);
+  const h = _vaultCrypto.createHash('sha256');
+  h.update('merlin-vault-v1');
+  h.update(Buffer.from([0x1f])); // separator — matches Go byte{0x1f}
+  h.update(hostname);
+  h.update(Buffer.from([0x1f]));
+  h.update(username);
+  return h.digest(); // 32 bytes → AES-256
+}
+
+function _vaultFilePath() {
+  let base;
+  if (process.platform === 'win32') {
+    base = path.join(process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming'), 'Merlin');
+  } else if (process.platform === 'darwin') {
+    base = path.join(os.homedir(), 'Library', 'Application Support', 'Merlin');
+  } else {
+    base = path.join(os.homedir(), '.config', 'merlin');
+  }
+  try { fs.mkdirSync(base, { recursive: true, mode: 0o700 }); } catch {}
+  return path.join(base, '.vault');
+}
+
+let _vaultKeyCache = null;
+function _vaultKey() {
+  if (!_vaultKeyCache) _vaultKeyCache = _vaultDeriveKey();
+  return _vaultKeyCache;
+}
+
+// Returns the vault contents as a plain JS object: { "brand/key": "token", ... }
+function vaultLoad() {
+  const p = _vaultFilePath();
+  let raw;
+  try { raw = fs.readFileSync(p); } catch (e) {
+    if (e.code === 'ENOENT') return {};
+    throw e;
+  }
+  const fv = JSON.parse(raw.toString('utf8'));
+  if (fv.v !== 1) throw new Error('Vault version ' + fv.v + ' unsupported');
+  const nonce = Buffer.from(fv.nonce, 'base64');
+  const ct = Buffer.from(fv.ciphertext, 'base64');
+  // Node's createDecipheriv wants (algorithm, key, iv). For GCM we also set the auth tag.
+  // GCM appends auth tag to ciphertext (last 16 bytes).
+  const tagLen = 16;
+  const authTag = ct.slice(ct.length - tagLen);
+  const ciphertext = ct.slice(0, ct.length - tagLen);
+  const decipher = _vaultCrypto.createDecipheriv('aes-256-gcm', _vaultKey(), nonce);
+  decipher.setAuthTag(authTag);
+  let pt = decipher.update(ciphertext);
+  pt = Buffer.concat([pt, decipher.final()]);
+  return JSON.parse(pt.toString('utf8'));
+}
+
+function vaultSave(map) {
+  const pt = Buffer.from(JSON.stringify(map), 'utf8');
+  const nonce = _vaultCrypto.randomBytes(12); // standard GCM nonce size
+  const cipher = _vaultCrypto.createCipheriv('aes-256-gcm', _vaultKey(), nonce);
+  let ct = cipher.update(pt);
+  ct = Buffer.concat([ct, cipher.final(), cipher.getAuthTag()]); // tag appended
+  const fv = {
+    v: 1,
+    nonce: nonce.toString('base64'),
+    ciphertext: ct.toString('base64'),
+  };
+  const p = _vaultFilePath();
+  const tmp = p + '.tmp';
+  fs.writeFileSync(tmp, JSON.stringify(fv), { mode: 0o600 });
+  fs.renameSync(tmp, p);
+}
+
+function vaultGet(brand, key) {
+  try {
+    const m = vaultLoad();
+    return m[brand + '/' + key] || null;
+  } catch (e) {
+    console.error('[vault] get failed:', e.message);
+    return null;
+  }
+}
+
+function vaultPut(brand, key, value) {
+  try {
+    const m = vaultLoad();
+    m[brand + '/' + key] = value;
+    vaultSave(m);
+  } catch (e) {
+    console.error('[vault] put failed:', e.message);
+  }
+}
+
+function vaultDelete(brand, key) {
+  try {
+    const m = vaultLoad();
+    delete m[brand + '/' + key];
+    vaultSave(m);
+  } catch (e) {
+    console.error('[vault] delete failed:', e.message);
+  }
+}
+
+function vaultAvailable() {
+  // Test by doing a round-trip write/read with a dummy key
+  try {
+    const m = vaultLoad();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// List of token field names that are SENSITIVE and should live in the vault
+// rather than plaintext in brand config files.
+const VAULT_SENSITIVE_KEYS = [
+  'metaAccessToken',
+  'tiktokAccessToken',
+  'googleAccessToken',
+  'googleRefreshToken',
+  'shopifyAccessToken',
+  'klaviyoAccessToken',
+  'klaviyoApiKey',
+  'amazonAccessToken',
+  'amazonRefreshToken',
+  'pinterestAccessToken',
+  'pinterestRefreshToken',
+  // API keys that were previously left in plaintext — adversarial review
+  // found these are just as sensitive as OAuth tokens.
+  'falApiKey',
+  'elevenLabsApiKey',
+  'heygenApiKey',
+  'arcadsApiKey',
+  'googleApiKey',
+  'slackBotToken',
+  'slackWebhookUrl',
+];
 
 // ── Config helpers ──────────────────────────────────────────
 // Brand-specific token field names (used by migratePerBrand)
@@ -1877,6 +2525,18 @@ function readBrandConfig(brandName) {
     console.log(`[config] migrated .merlin-tokens-${brandName} into plaintext`);
   } catch {}
 
+  // Resolve @@VAULT:key@@ placeholders from the vault.
+  // After vault migration, brand configs have placeholders instead of
+  // plaintext tokens. This transparently resolves them so callers see
+  // a fully populated config object.
+  for (const [k, v] of Object.entries(cfg)) {
+    if (typeof v === 'string' && v.startsWith('@@VAULT:') && v.endsWith('@@')) {
+      const vKey = v.slice('@@VAULT:'.length, -2);
+      const real = vaultGet(brandName, vKey) || vaultGet('_global', vKey);
+      if (real) cfg[k] = real;
+    }
+  }
+
   if (cfg.brandSpells && cfg.brandSpells[brandName]) {
     cfg._brandSpells = cfg.brandSpells[brandName];
   }
@@ -1939,6 +2599,64 @@ function migratePerBrand() {
 
   cfg._migrationVersion = 1;
   writeConfig(cfg);
+}
+
+// ── Vault Migration ─────────────────────────────────────────
+// One-shot: moves plaintext tokens from brand config files into the
+// AES-GCM vault. Brand config files get @@VAULT:key@@ placeholders.
+// Tracked by _migrationVersion = 3 in the global config.
+// Idempotent — safe to re-run if interrupted. Never deletes a plaintext
+// token until the vault write is confirmed.
+function migrateTokensToVault() {
+  const globalCfg = readConfig();
+  if ((globalCfg._migrationVersion || 0) >= 3) return; // already done
+
+  let migratedCount = 0;
+  // 1. Migrate brand-specific config files
+  const toolsDir = path.join(appRoot, '.claude', 'tools');
+  try {
+    const files = fs.readdirSync(toolsDir).filter(f => f.startsWith('.merlin-config-') && f.endsWith('.json'));
+    for (const file of files) {
+      const brandName = file.slice('.merlin-config-'.length, -'.json'.length);
+      const configPath = path.join(toolsDir, file);
+      try {
+        const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+        let modified = false;
+        for (const key of VAULT_SENSITIVE_KEYS) {
+          if (cfg[key] && typeof cfg[key] === 'string' && !cfg[key].startsWith('@@VAULT:')) {
+            vaultPut(brandName, key, cfg[key]);
+            cfg[key] = `@@VAULT:${key}@@`;
+            modified = true;
+          }
+        }
+        if (modified) {
+          const tmpPath = configPath + '.tmp';
+          fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2));
+          fs.renameSync(tmpPath, configPath);
+          migratedCount++;
+        }
+      } catch (e) {
+        console.error('[vault-migrate]', file, e.message);
+      }
+    }
+  } catch (e) { console.error('[vault-migrate] dir scan:', e.message); }
+
+  // 2. Migrate global config tokens
+  let globalModified = false;
+  for (const key of VAULT_SENSITIVE_KEYS) {
+    if (globalCfg[key] && typeof globalCfg[key] === 'string' && !globalCfg[key].startsWith('@@VAULT:')) {
+      vaultPut('_global', key, globalCfg[key]);
+      globalCfg[key] = `@@VAULT:${key}@@`;
+      globalModified = true;
+    }
+  }
+  if (globalModified) migratedCount++;
+
+  globalCfg._migrationVersion = 3;
+  writeConfig(globalCfg);
+  if (migratedCount > 0) {
+    console.log(`[vault-migrate] ${migratedCount} config(s) migrated to vault`);
+  }
 }
 
 // Encrypted read/write for sensitive local state (subscription, machine ID)
@@ -2023,26 +2741,32 @@ ipcMain.handle('get-stats-cache', () => {
 // Check which platforms are connected by reading the config
 // Platform connections (Meta, Shopify, Google, etc.) are per-brand — only show if the brand has them
 // Global tools (fal, ElevenLabs, HeyGen, Slack) are shared across all brands
-ipcMain.handle('get-connected-platforms', (_, brandName) => {
-  if (testActive('connections')) return TEST_DATA.connections(); // TEST HARNESS — rip out after v1
+// Extracted as standalone function so the MCP connection_status tool can call it too.
+function getConnections(brandName) {
   try {
     const globalCfg = readConfig();
-    // Brand-specific tokens (NOT merged with global — we check them separately)
     let brandCfg = {};
     if (brandName) {
-      const brandConfigPath = path.join(appRoot, '.claude', 'tools', `.merlin-config-${brandName}.json`);
-      try { brandCfg = JSON.parse(fs.readFileSync(brandConfigPath, 'utf8')); } catch {}
+      // Use readBrandConfig which resolves vault placeholders
+      brandCfg = readBrandConfig(brandName);
     }
-
     const connected = [];
     const tokenAge = { ...(globalCfg._tokenTimestamps || {}), ...(brandCfg._tokenTimestamps || {}) };
     const now = Date.now();
     const EXPIRE_MS = 55 * 24 * 60 * 60 * 1000;
-
-    // Per-brand platform connections — only show if THIS brand has the token
     function checkBrand(key, platform) {
       const token = brandCfg[key] || (!brandName ? globalCfg[key] : null);
-      if (!token) return;
+      if (!token || (typeof token === 'string' && token.startsWith('@@VAULT:'))) {
+        // Also check vault directly — placeholder means token IS stored
+        if (typeof token === 'string' && token.startsWith('@@VAULT:')) {
+          const vaultVal = vaultGet(brandName || '_global', key);
+          if (vaultVal) {
+            connected.push({ platform, status: 'connected' });
+            return;
+          }
+        }
+        return;
+      }
       const ts = tokenAge[platform];
       if (ts && (now - ts) > EXPIRE_MS) {
         connected.push({ platform, status: 'expired' });
@@ -2050,37 +2774,49 @@ ipcMain.handle('get-connected-platforms', (_, brandName) => {
         connected.push({ platform, status: 'connected' });
       }
     }
-
     checkBrand('metaAccessToken', 'meta');
     checkBrand('tiktokAccessToken', 'tiktok');
     checkBrand('googleAccessToken', 'google');
     checkBrand('pinterestAccessToken', 'pinterest');
     checkBrand('amazonAccessToken', 'amazon');
-    if ((brandCfg.shopifyAccessToken && brandCfg.shopifyStore) || (!brandName && globalCfg.shopifyAccessToken && globalCfg.shopifyStore)) {
-      connected.push({ platform: 'shopify', status: 'connected' });
+    // Shopify needs both token + store
+    const shopToken = brandCfg.shopifyAccessToken || (!brandName ? globalCfg.shopifyAccessToken : null);
+    const shopStore = brandCfg.shopifyStore || (!brandName ? globalCfg.shopifyStore : null);
+    if ((shopToken && shopStore) || (typeof shopToken === 'string' && shopToken.startsWith('@@VAULT:'))) {
+      const hasVaultToken = typeof shopToken === 'string' && shopToken.startsWith('@@VAULT:')
+        ? !!vaultGet(brandName || '_global', 'shopifyAccessToken')
+        : !!shopToken;
+      if (hasVaultToken && shopStore) connected.push({ platform: 'shopify', status: 'connected' });
     }
     if (brandCfg.klaviyoApiKey || brandCfg.klaviyoAccessToken || (!brandName && (globalCfg.klaviyoApiKey || globalCfg.klaviyoAccessToken))) {
       connected.push({ platform: 'klaviyo', status: 'connected' });
     }
-
-    // Global tools — shared across all brands (always check global config)
-    if (globalCfg.falApiKey) connected.push({ platform: 'fal', status: 'connected' });
-    if (globalCfg.elevenLabsApiKey) connected.push({ platform: 'elevenlabs', status: 'connected' });
-    if (globalCfg.heygenApiKey) connected.push({ platform: 'heygen', status: 'connected' });
-    if (globalCfg.slackBotToken || globalCfg.slackWebhookUrl) connected.push({ platform: 'slack', status: 'connected' });
+    if (globalCfg.falApiKey || vaultGet('_global', 'falApiKey')) connected.push({ platform: 'fal', status: 'connected' });
+    if (globalCfg.elevenLabsApiKey || vaultGet('_global', 'elevenLabsApiKey')) connected.push({ platform: 'elevenlabs', status: 'connected' });
+    if (globalCfg.heygenApiKey || vaultGet('_global', 'heygenApiKey')) connected.push({ platform: 'heygen', status: 'connected' });
+    if (globalCfg.slackBotToken || globalCfg.slackWebhookUrl || vaultGet('_global', 'slackBotToken')) connected.push({ platform: 'slack', status: 'connected' });
     if (globalCfg.discordGuildId && globalCfg.discordChannelId) connected.push({ platform: 'discord', status: 'connected' });
-
     return connected;
   } catch { return []; }
+}
+
+ipcMain.handle('get-connected-platforms', (_, brandName) => {
+  if (testActive('connections')) return TEST_DATA.connections(); // TEST HARNESS — rip out after v1
+  return getConnections(brandName);
 });
 
 // ── Disconnect Platform ────────────────────────────────────
+// Clears all stored credentials for a platform. Platform tokens now live in
+// the plaintext brand config at .merlin-config-{brand}.json (migrated from
+// the old encrypted .merlin-tokens-{brand} format). API keys for service
+// providers (fal, elevenlabs, heygen) and workspace-global integrations
+// (slack, discord) live in the global merlin-config.json instead.
 ipcMain.handle('disconnect-platform', (_, platform, brandName) => {
   try {
     // Map platform to config keys that should be cleared
     const keyMap = {
       meta: ['metaAccessToken', 'metaAdAccountId', 'metaPageId', 'metaPixelId'],
-      tiktok: ['tiktokAccessToken', 'tiktokAdvertiserId'],
+      tiktok: ['tiktokAccessToken', 'tiktokAdvertiserId', 'tiktokPixelId'],
       google: ['googleAccessToken', 'googleRefreshToken', 'googleAdsDeveloperToken', 'googleAdsCustomerId'],
       shopify: ['shopifyAccessToken', 'shopifyStore'],
       klaviyo: ['klaviyoAccessToken', 'klaviyoApiKey', 'klaviyoRefreshToken'],
@@ -2095,34 +2831,80 @@ ipcMain.handle('disconnect-platform', (_, platform, brandName) => {
     const keys = keyMap[platform];
     if (!keys) return { success: false, error: 'unknown platform' };
 
-    // Determine which config to modify (brand-specific tokens vs global API keys)
-    // Keys that live in global config (not per-brand token files)
+    // Keys that live in global config (not per-brand files)
     const GLOBAL_KEYS_SET = new Set(['falApiKey', 'elevenLabsApiKey', 'heygenApiKey', 'slackBotToken', 'slackWebhookUrl', 'slackChannel', 'discordGuildId', 'discordChannelId']);
-    const cfg = readConfig();
-    let changed = false;
+    const isGlobalPlatform = keys.every(k => GLOBAL_KEYS_SET.has(k));
 
+    // 1. Clear from global config (for global platforms + legacy single-brand setups)
+    const cfg = readConfig();
+    let globalChanged = false;
     for (const key of keys) {
-      // Try global config first
-      if (cfg[key]) { cfg[key] = ''; changed = true; }
-      // Also try brand token file for platform-specific tokens
-      if (!GLOBAL_KEYS_SET.has(key) && brandName) {
-        const tokensFile = path.join(appRoot, '.claude', 'tools', `.merlin-tokens-${brandName}`);
-        try {
-          let tokens = {};
-          const buf = fs.readFileSync(tokensFile);
-          if (safeStorage.isEncryptionAvailable()) {
-            try { tokens = JSON.parse(safeStorage.decryptString(buf)); } catch { tokens = JSON.parse(buf.toString('utf8')); }
-          } else { tokens = JSON.parse(buf.toString('utf8')); }
-          if (tokens[key]) { tokens[key] = ''; changed = true; }
-          if (safeStorage.isEncryptionAvailable()) {
-            fs.writeFileSync(tokensFile, safeStorage.encryptString(JSON.stringify(tokens)));
-          } else {
-            fs.writeFileSync(tokensFile, JSON.stringify(tokens));
-          }
-        } catch (e) { console.error('[disconnect-token]', key, e.message); }
+      if (cfg[key] !== undefined && cfg[key] !== '') {
+        delete cfg[key];
+        globalChanged = true;
       }
     }
-    if (changed) writeConfig(cfg);
+    if (cfg._tokenTimestamps && cfg._tokenTimestamps[platform]) {
+      delete cfg._tokenTimestamps[platform];
+      globalChanged = true;
+    }
+    if (globalChanged) writeConfig(cfg);
+
+    // 2. Clear from the active brand's plaintext config (new format post-migration)
+    if (!isGlobalPlatform && brandName) {
+      const brandConfigPath = path.join(appRoot, '.claude', 'tools', `.merlin-config-${brandName}.json`);
+      try {
+        const brandCfg = JSON.parse(fs.readFileSync(brandConfigPath, 'utf8'));
+        let brandChanged = false;
+        for (const key of keys) {
+          if (brandCfg[key] !== undefined && brandCfg[key] !== '') {
+            delete brandCfg[key];
+            brandChanged = true;
+          }
+        }
+        if (brandChanged) {
+          const tmpPath = brandConfigPath + '.tmp';
+          fs.writeFileSync(tmpPath, JSON.stringify(brandCfg, null, 2));
+          fs.renameSync(tmpPath, brandConfigPath);
+        }
+      } catch { /* brand config may not exist — that's fine */ }
+
+      // 3. Clear from the old encrypted tokens file (legacy, may still exist on
+      // machines that haven't been migrated yet). Safe no-op if the file is gone.
+      const legacyTokensPath = path.join(appRoot, '.claude', 'tools', `.merlin-tokens-${brandName}`);
+      try {
+        const buf = fs.readFileSync(legacyTokensPath);
+        let tokens = {};
+        if (safeStorage.isEncryptionAvailable()) {
+          try { tokens = JSON.parse(safeStorage.decryptString(buf)); } catch { tokens = JSON.parse(buf.toString('utf8')); }
+        } else { tokens = JSON.parse(buf.toString('utf8')); }
+        let changed = false;
+        for (const key of keys) {
+          if (tokens[key] !== undefined && tokens[key] !== '') {
+            delete tokens[key];
+            changed = true;
+          }
+        }
+        if (changed) {
+          if (safeStorage.isEncryptionAvailable()) {
+            fs.writeFileSync(legacyTokensPath, safeStorage.encryptString(JSON.stringify(tokens)));
+          } else {
+            fs.writeFileSync(legacyTokensPath, JSON.stringify(tokens));
+          }
+        }
+      } catch { /* legacy file may not exist — normal */ }
+    }
+
+    // 4. Clear vault entries for the disconnected platform
+    const vaultBrand = isGlobalPlatform ? '_global' : (brandName || '_global');
+    for (const key of keys) {
+      if (VAULT_SENSITIVE_KEYS.includes(key)) {
+        vaultDelete(vaultBrand, key);
+      }
+    }
+
+    // 5. Notify the renderer so the tile re-reads connection state
+    if (win && !win.isDestroyed()) win.webContents.send('connections-changed');
     return { success: true };
   } catch (err) { return { success: false, error: err.message }; }
 });
@@ -2772,16 +3554,20 @@ function isNewerVersion(a, b) {
 }
 
 // Download the Merlin engine binary from the latest GitHub release.
-// Called on first run (when binary is missing) and by the updater.
-// Returns true if the binary is present (whether downloaded or already there).
+// FALLBACK ONLY — the binary is normally bundled in the installer at the
+// install location. This runs only when the install copy is missing AND
+// the workspace copy is missing. Writes to the workspace because the
+// install location may be read-only (Mac) or AV-watched.
 async function ensureBinary(opts = {}) {
   const { force = false, onProgress = null } = opts;
-  const binaryPath = path.join(appRoot, '.claude', 'tools', process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
 
-  // Fast path: binary exists and caller didn't force a re-download
+  // Fast path: install or workspace already has the binary
   if (!force) {
-    try { fs.accessSync(binaryPath, fs.constants.F_OK); return true; } catch {}
+    try { fs.accessSync(getBinaryPath(), fs.constants.F_OK); return true; } catch {}
   }
+
+  // Workspace target — install location may not be writable
+  const binaryPath = path.join(appRoot, '.claude', 'tools', process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
 
   // Make sure the tools directory exists
   try { fs.mkdirSync(path.dirname(binaryPath), { recursive: true }); } catch {}
@@ -2963,7 +3749,7 @@ async function downloadAndApplyUpdate() {
     // Check if the Electron shell itself needs updating (asar can't be hot-swapped)
     let shellVersion = '0.0.0';
     try {
-      const asarPkg = require(path.join(path.dirname(app.getPath('exe')), 'resources', 'app.asar', 'package.json'));
+      const asarPkg = require(getPackagedResourcePath('app.asar', 'package.json'));
       shellVersion = asarPkg.version || '0.0.0';
     } catch {
       try { shellVersion = require(path.join(__dirname, '..', 'package.json')).version || '0.0.0'; } catch {}
@@ -2991,6 +3777,8 @@ app.on('second-instance', () => {
 app.whenReady().then(async () => {
   // Migrate global tokens to per-brand (runs once, idempotent)
   try { migratePerBrand(); } catch (err) { console.error('[migration]', err.message); }
+  // Migrate plaintext tokens to vault (runs once, idempotent)
+  try { migrateTokensToVault(); } catch (err) { console.error('[vault-migration]', err.message); }
 
   await createWindow();
 

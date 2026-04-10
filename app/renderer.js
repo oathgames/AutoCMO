@@ -11,6 +11,19 @@ const sendBtn = document.getElementById('send-btn');
 const setup = document.getElementById('setup');
 const approval = document.getElementById('approval');
 
+function getSetupStatusText(result, fallback = 'Checking Claude...') {
+  if (result?.reason) return result.reason;
+  if (result?.ready) return 'Claude is ready. Starting Merlin...';
+  return fallback;
+}
+
+function resetSetupButton() {
+  const btn = document.getElementById('setup-auto-btn');
+  if (!btn) return;
+  btn.disabled = false;
+  btn.textContent = 'Open Claude Desktop';
+}
+
 // Platform-specific UI adjustments
 if (merlin.platform === 'darwin') {
   // Hide Windows-style controls on Mac (traffic lights are native)
@@ -24,7 +37,9 @@ let turnTokens = 0;
 let sessionTotalTokens = 0;
 
 // ── Inline Modal (replaces native prompt/alert) ────────────
-function showModal({ title, body, inputPlaceholder, confirmLabel, cancelLabel, onConfirm, onCancel }) {
+// Pass `body` for plain text (escaped) or `bodyHTML` for trusted HTML.
+// Never pass user input through bodyHTML — it bypasses escaping.
+function showModal({ title, body, bodyHTML, inputPlaceholder, confirmLabel, cancelLabel, onConfirm, onCancel }) {
   const modal = document.getElementById('merlin-modal');
   const titleEl = document.getElementById('merlin-modal-title');
   const bodyEl = document.getElementById('merlin-modal-body');
@@ -35,7 +50,11 @@ function showModal({ title, body, inputPlaceholder, confirmLabel, cancelLabel, o
   const closeBtn = document.getElementById('merlin-modal-close');
 
   titleEl.textContent = title || '';
-  bodyEl.textContent = body || '';
+  if (bodyHTML !== undefined) {
+    bodyEl.innerHTML = bodyHTML;
+  } else {
+    bodyEl.textContent = body || '';
+  }
   errorEl.textContent = '';
   confirmBtn.textContent = confirmLabel || 'OK';
   cancelBtn.textContent = cancelLabel || 'Cancel';
@@ -248,6 +267,7 @@ async function init() {
   // Auto-detect Claude — poll every 3 seconds until found
   async function detectClaude() {
     const result = await merlin.checkSetup();
+    document.getElementById('setup-status').textContent = getSetupStatusText(result);
     if (result.ready) {
       // Found! Clear polling and start session
       if (window._claudePoller) { clearInterval(window._claudePoller); window._claudePoller = null; }
@@ -276,13 +296,12 @@ async function init() {
     // Not found on first check — show setup screen and keep polling
     clearInterval(window._welcomeInterval);
     setup.classList.remove('hidden');
-    document.getElementById('setup-status').textContent = 'Looking for Claude...';
+    document.getElementById('setup-status').textContent = 'Checking Claude...';
     welcomeBubble.parentElement.remove();
 
     // Poll every 3 seconds — auto-continue when Claude is detected
     if (window._claudePoller) clearInterval(window._claudePoller);
     window._claudePoller = setInterval(async () => {
-      document.getElementById('setup-status').textContent = 'Looking for Claude...';
       const detected = await detectClaude();
       if (detected) {
         setup.style.animation = 'fadeOut .3s ease forwards';
@@ -297,46 +316,42 @@ async function init() {
 }
 
 
-// Setup: Auto-install Claude
+// Setup: Open Claude Desktop / download it if needed
 document.getElementById('setup-auto-btn')?.addEventListener('click', async () => {
   const status = document.getElementById('setup-status');
   const btn = document.getElementById('setup-auto-btn');
   btn.disabled = true;
-  btn.textContent = 'Installing...';
-  status.textContent = 'Downloading Claude CLI...';
+  btn.textContent = 'Opening...';
+  status.textContent = 'Opening Claude Desktop...';
 
   const result = await merlin.installClaude();
   if (result.success) {
-    status.textContent = 'Installed! Starting Merlin...';
+    status.textContent = 'Checking Claude...';
     setTimeout(async () => {
       const check = await merlin.checkSetup();
       if (check.ready) {
         setup.style.animation = 'fadeOut .3s ease forwards';
         setTimeout(() => { setup.classList.add('hidden'); merlin.startSession(); }, 300);
       } else {
-        status.textContent = 'Installed, but Claude needs to be signed in. Open Claude Desktop and sign in, then click retry.';
-        btn.disabled = false;
-        btn.textContent = 'Install Claude & Get Started';
+        status.textContent = getSetupStatusText(check, 'Claude is not ready yet.');
+        resetSetupButton();
       }
     }, 1000);
   } else {
-    status.textContent = result.reason || 'Auto-install failed.';
-    btn.disabled = false;
-    btn.textContent = 'Install Claude & Get Started';
-    // Open manual download as fallback
-    merlin.openClaudeDownload();
+    status.textContent = result.reason || 'Could not open Claude Desktop.';
+    resetSetupButton();
   }
 });
 
 // Setup: Manual retry
 document.getElementById('setup-manual-btn')?.addEventListener('click', async () => {
-  document.getElementById('setup-status').textContent = 'Checking...';
+  document.getElementById('setup-status').textContent = 'Checking Claude...';
   const result = await merlin.checkSetup();
   if (result.ready) {
     setup.style.animation = 'fadeOut .3s ease forwards';
     setTimeout(() => { setup.classList.add('hidden'); merlin.startSession(); }, 300);
   } else {
-    document.getElementById('setup-status').textContent = 'Claude not found. Make sure Claude Desktop is installed and running.';
+    document.getElementById('setup-status').textContent = getSetupStatusText(result, 'Claude is not ready yet.');
   }
 });
 
@@ -531,7 +546,7 @@ function scrollToBottom(force) {
 const MAX_VISIBLE_MESSAGES = 200;
 
 function pruneOldMessages() {
-  const allMsgs = messages.querySelectorAll('.msg, .stats-bar');
+  const allMsgs = messages.querySelectorAll('.msg, .turn-stats');
   if (allMsgs.length > MAX_VISIBLE_MESSAGES) {
     const toRemove = allMsgs.length - MAX_VISIBLE_MESSAGES;
     for (let i = 0; i < toRemove; i++) {
@@ -813,7 +828,7 @@ merlin.onSdkMessage((msg) => {
       if (turnStartTime) {
         const duration = ((Date.now() - turnStartTime) / 1000).toFixed(0);
         const statsDiv = document.createElement('div');
-        statsDiv.className = 'stats-bar';
+        statsDiv.className = 'turn-stats';
         // Try multiple paths for token count
         const tokens = msg.usage?.output_tokens
           || msg.result?.usage?.output_tokens
@@ -822,7 +837,8 @@ merlin.onSdkMessage((msg) => {
         let statsText = `${duration}s`;
         // Use turn token count from message_delta events
         const numTurns = msg.num_turns || '';
-        if (turnTokens > 0) statsText += ` · ${turnTokens} tokens`;
+        if (turnTokens > 0) statsText += ` \u00b7 ${turnTokens} tokens`;
+        statsText += ' \u00b7 Merlin can make mistakes';
         statsDiv.textContent = statsText;
         messages.appendChild(statsDiv);
         scrollToBottom();
@@ -1142,6 +1158,32 @@ merlin.onUpdateError((err) => {
   document.getElementById('update-dismiss').classList.remove('hidden');
 });
 
+// ── Security: bypass attempt toast ──────────────────────────
+// Surfaces when the hook or canUseTool blocks an API bypass attempt.
+// Tells the user something was blocked without alarming them — it's
+// expected behavior when Claude is exploring.
+let _bypassToastTimer = null;
+merlin.onBypassAttempt(({ reason }) => {
+  let toast = document.getElementById('bypass-toast');
+  if (!toast) {
+    toast = document.createElement('div');
+    toast.id = 'bypass-toast';
+    toast.style.cssText = 'position:fixed;bottom:20px;right:20px;max-width:360px;padding:12px 16px;background:rgba(20,20,24,0.96);border:1px solid rgba(251,191,36,0.4);border-radius:12px;color:#e4e4e7;font-size:12px;line-height:1.4;z-index:9999;box-shadow:0 8px 32px rgba(0,0,0,0.5);backdrop-filter:blur(12px);opacity:0;transform:translateY(10px);transition:all .3s ease';
+    toast.innerHTML = '<div style="font-weight:600;color:#fbbf24;margin-bottom:4px">✦ Merlin prevented an unsafe action</div><div id="bypass-toast-body" style="color:rgba(228,228,231,0.8)"></div>';
+    document.body.appendChild(toast);
+  }
+  document.getElementById('bypass-toast-body').textContent = reason || 'An unauthorized action was blocked.';
+  requestAnimationFrame(() => {
+    toast.style.opacity = '1';
+    toast.style.transform = 'translateY(0)';
+  });
+  if (_bypassToastTimer) clearTimeout(_bypassToastTimer);
+  _bypassToastTimer = setTimeout(() => {
+    toast.style.opacity = '0';
+    toast.style.transform = 'translateY(10px)';
+  }, 7000);
+});
+
 // ── Remote User Messages (from PWA) ─────────────────────────
 merlin.onRemoteUserMessage((text) => {
   addUserBubble('📱 ' + text);
@@ -1271,26 +1313,52 @@ function fmtMoney(n) {
 }
 
 function setStatsEmpty() {
-  ['stats-revenue','stats-ads','stats-winners','stats-roas','stats-spend'].forEach(id => {
+  ['stats-revenue','stats-roas','stats-spend'].forEach(id => {
     document.getElementById(id).textContent = '--';
   });
   document.getElementById('stats-period').textContent = 'No data yet — run a performance check first';
+  document.getElementById('stats-story').textContent = '';
+  document.getElementById('stats-bar-spend').style.width = '50%';
+  document.getElementById('stats-bar-revenue').style.width = '50%';
+  document.getElementById('stats-bar-spend').querySelector('.stats-bar-label').textContent = '';
+  document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = '';
+}
+
+function updateStatsBarAndStory(rev, spend, mer) {
+  const total = rev + spend;
+  if (total > 0) {
+    const spendPct = Math.max(10, Math.round((spend / total) * 100));
+    const revPct = 100 - spendPct;
+    document.getElementById('stats-bar-spend').style.width = spendPct + '%';
+    document.getElementById('stats-bar-revenue').style.width = revPct + '%';
+    document.getElementById('stats-bar-spend').querySelector('.stats-bar-label').textContent = fmtMoney(spend) + ' spent';
+    document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = fmtMoney(rev) + ' revenue';
+  } else {
+    document.getElementById('stats-bar-spend').style.width = '50%';
+    document.getElementById('stats-bar-revenue').style.width = '50%';
+    document.getElementById('stats-bar-spend').querySelector('.stats-bar-label').textContent = '';
+    document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = '';
+  }
+  if (mer > 0 && spend > 0) {
+    document.getElementById('stats-story').textContent = 'Every $1 you spent returned $' + mer.toFixed(2);
+  } else if (rev > 0) {
+    document.getElementById('stats-story').textContent = fmtMoney(rev) + ' in revenue tracked';
+  } else {
+    document.getElementById('stats-story').textContent = '';
+  }
 }
 
 function populateStatsCard(cache) {
-  // Revenue field names any platform might return
   const revenueKeys = ['totalRevenue', 'revenue', 'total_revenue', 'grossRevenue', 'gross_revenue', 'sales', 'totalSales'];
   const spendKeys = ['totalSpend', 'spend', 'total_spend', 'adSpend', 'ad_spend', 'cost', 'totalCost'];
   const roasKeys = ['blendedROAS', 'roas', 'blended_roas', 'ROAS', 'returnOnAdSpend'];
-  const adsKeys = ['totalAds', 'adsCreated', 'ads_created', 'adCount', 'total_ads', 'activeAds'];
-  const winnerKeys = ['winners', 'winnersFound', 'winners_found', 'winnerCount'];
 
   function findKey(obj, keys) {
     for (const k of keys) { if (obj[k] != null) return obj[k]; }
     return null;
   }
 
-  let revenue = null, spend = null, roas = null, ads = null, winners = null;
+  let revenue = null, spend = null, roas = null;
   let lastUpdated = null;
 
   if (!cache) {
@@ -1298,8 +1366,6 @@ function populateStatsCard(cache) {
     return;
   }
 
-  // Dashboard is the most complete — check it first
-  // Then scan ALL cached entries (any platform) for fallback values
   const priorityOrder = ['dashboard'];
   const allKeys = Object.keys(cache);
   allKeys.forEach(k => { if (k !== 'dashboard') priorityOrder.push(k); });
@@ -1312,19 +1378,19 @@ function populateStatsCard(cache) {
       if (revenue == null) revenue = findKey(d, revenueKeys);
       if (spend == null) spend = findKey(d, spendKeys);
       if (roas == null) roas = findKey(d, roasKeys);
-      if (ads == null) ads = findKey(d, adsKeys);
-      if (winners == null) winners = findKey(d, winnerKeys);
       if (!lastUpdated || entry.timestamp > lastUpdated) lastUpdated = entry.timestamp;
     } catch {}
   }
 
-  document.getElementById('stats-revenue').textContent = revenue != null ? fmtMoney(Number(revenue)) : '--';
-  document.getElementById('stats-spend').textContent = spend != null ? fmtMoney(Number(spend)) : '--';
-  document.getElementById('stats-roas').textContent = roas != null ? Number(roas).toFixed(1) + 'x' : '--';
-  document.getElementById('stats-ads').textContent = ads != null ? String(ads) : '--';
-  document.getElementById('stats-winners').textContent = winners != null ? String(winners) : '--';
+  const rev = revenue != null ? Number(revenue) : 0;
+  const sp = spend != null ? Number(spend) : 0;
+  const mer = roas != null ? Number(roas) : (sp > 0 ? rev / sp : 0);
 
-  // Show freshness
+  document.getElementById('stats-revenue').textContent = rev > 0 ? fmtMoney(rev) : '--';
+  document.getElementById('stats-spend').textContent = sp > 0 ? fmtMoney(sp) : '--';
+  document.getElementById('stats-roas').textContent = mer > 0 ? mer.toFixed(1) + 'x return' : '--';
+  updateStatsBarAndStory(rev, sp, mer);
+
   const period = document.getElementById('stats-period');
   if (lastUpdated) {
     const ago = Math.round((Date.now() - new Date(lastUpdated).getTime()) / 3600000);
@@ -1505,7 +1571,9 @@ document.getElementById('stats-share').addEventListener('click', async () => {
   const rev = document.getElementById('stats-revenue').textContent;
   const period = document.getElementById('stats-period').textContent;
   const roas = document.getElementById('stats-roas').textContent;
-  const text = `✦ Merlin Got Me\n${brand} — ${period}\n${rev} revenue · ${roas} ROAS\nmerlingotme.com`;
+  const story = document.getElementById('stats-story').textContent;
+  const spend = document.getElementById('stats-spend').textContent;
+  const text = `✦ Merlin Got Me\n${brand} — ${period}\n${rev} revenue\n${story ? story + '\n' : ''}${spend} spent · ${roas}\nmerlingotme.com`;
   try { await navigator.clipboard.writeText(text); } catch {}
   const orig = btn.innerHTML;
   btn.textContent = 'Copied!';
@@ -1647,9 +1715,26 @@ document.addEventListener('click', async (e) => {
   const apiDef = API_KEY_PLATFORMS[platform];
   if (apiDef) {
     // API key entry via modal — no chat
+    // Build body as DOM nodes (safer than innerHTML interpolation, no escaping bugs)
+    const bodyFrag = document.createDocumentFragment();
+    if (apiDef.url) {
+      bodyFrag.appendChild(document.createTextNode('Paste your API key below. '));
+      const link = document.createElement('a');
+      link.href = apiDef.url;
+      link.target = '_blank';
+      link.rel = 'noopener noreferrer';
+      link.style.color = 'var(--accent)';
+      link.textContent = 'Get your key here';
+      bodyFrag.appendChild(link);
+    } else {
+      bodyFrag.appendChild(document.createTextNode('Paste your API key or webhook URL below.'));
+    }
+    const wrapper = document.createElement('div');
+    wrapper.appendChild(bodyFrag);
+
     showModal({
       title: `Connect ${apiDef.label}`,
-      body: apiDef.url ? `Paste your API key below. <a href="${apiDef.url}" target="_blank" style="color:var(--accent)">Get your key here</a>` : 'Paste your API key or webhook URL below.',
+      bodyHTML: wrapper.innerHTML,
       inputPlaceholder: apiDef.placeholder,
       confirmLabel: 'Save',
       cancelLabel: 'Cancel',
@@ -2902,13 +2987,16 @@ document.getElementById('perf-bar').addEventListener('click', async (e) => {
     let perf = perfState.cache[brand]?.[days];
     if (!perf) perf = await fetchPerfData(days, brand);
     if (perf) {
-      document.getElementById('stats-revenue').textContent = perf.revenue > 0 ? fmtMoney(perf.revenue) : '--';
-      document.getElementById('stats-spend').textContent = perf.spend > 0 ? fmtMoney(perf.spend) : '--';
-      document.getElementById('stats-roas').textContent = perf.mer > 0 ? perf.mer.toFixed(1) + 'x' : '--';
-      document.getElementById('stats-ads').textContent = perf.platforms || '--';
-      document.getElementById('stats-winners').textContent = perf.trend !== null ? (perf.trend >= 0 ? '▲' : '▼') + Math.abs(perf.trend) + '%' : '--';
+      const rev = perf.revenue > 0 ? perf.revenue : 0;
+      const spend = perf.spend > 0 ? perf.spend : 0;
+      const mer = perf.mer > 0 ? perf.mer : (spend > 0 ? rev / spend : 0);
+
+      document.getElementById('stats-revenue').textContent = rev > 0 ? fmtMoney(rev) : '--';
+      document.getElementById('stats-spend').textContent = spend > 0 ? fmtMoney(spend) : '--';
+      document.getElementById('stats-roas').textContent = mer > 0 ? mer.toFixed(1) + 'x return' : '--';
       const periodLabels = { 1: 'Today', 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last 12 months' };
       document.getElementById('stats-period').textContent = periodLabels[days] || `Last ${days} days`;
+      updateStatsBarAndStory(rev, spend, mer);
     } else {
       // Fallback to stats cache for legacy compat
       const cache = await merlin.getStatsCache();

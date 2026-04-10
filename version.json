@@ -1,11 +1,13 @@
 {
-  "version": "0.8.7",
+  "version": "0.9.5",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
     ".claude/commands/cmo.md",
+    ".claude/commands/merlin.md",
     ".claude/commands/update.md",
     ".claude/settings.json",
+    ".claude/hooks/block-api-bypass.js",
     ".claude/tools/merlin-config.example.json",
     "assets/brands/example/",
     "version.json"
@@ -13,15 +15,18 @@
   "preserve": [
     "assets/brands/*/memory.md",
     ".claude/tools/merlin-config.json",
+    ".claude/tools/.merlin-vault",
+    ".claude/tools/.merlin-ratelimit*",
+    ".claude/tools/.merlin-audit*",
     "results/"
   ],
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v0.8.7: Real one-click in-app updates — installer downloads and runs automatically. Dismissable update toast. Manual update check via clickable version label. Faster auto-update polling (30 min).",
+  "notes": "v0.9.5: MCP server architecture, cross-vertical wisdom intelligence, landing page auditor, hardened rate limits on all API calls.",
   "whatsNew": [
-    "One-click in-app updates — no more browser hop",
-    "Click the version label to manually check for updates",
-    "Update toast is always dismissable, faster auto-check (30 min)"
+    "Landing page auditor — scans your product page for conversion killers",
+    "Cross-vertical wisdom — model performance tracking, ad intelligence rules",
+    "Every ad platform API call now rate-limited with zero bypasses"
   ]
 }

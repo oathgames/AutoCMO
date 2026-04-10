@@ -1169,7 +1169,15 @@ a:hover{text-decoration:underline}
 .stats-hero-number{text-align:center;margin-bottom:24px;position:relative;z-index:1}
 .stats-revenue{font-size:56px;font-weight:800;line-height:1;background:linear-gradient(135deg,#34d399,#a78bfa);-webkit-background-clip:text;-webkit-text-fill-color:transparent;display:block}
 .stats-revenue-label{font-size:13px;color:var(--text-muted);margin-top:6px;display:block}
-.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px;position:relative;z-index:1}
+.stats-bar-wrap{margin-bottom:20px;position:relative;z-index:1}
+.stats-bar{display:flex;height:32px;border-radius:8px;overflow:hidden;background:var(--surface);border:1px solid var(--border)}
+.stats-bar-segment{display:flex;align-items:center;justify-content:center;min-width:40px;transition:width .6s ease}
+.stats-bar-spend{background:rgba(167,139,250,.3)}
+.stats-bar-revenue{background:rgba(52,211,153,.3)}
+.stats-bar-label{font-size:10px;font-weight:600;color:var(--text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;padding:0 8px}
+.stats-story{text-align:center;font-size:17px;font-weight:600;color:var(--text);line-height:1.4;margin-bottom:20px;position:relative;z-index:1;min-height:24px}
+.stats-story:empty{display:none}
+.stats-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:16px;position:relative;z-index:1}
 .stats-cell{background:var(--surface);border:1px solid var(--border);border-radius:12px;padding:14px 16px;text-align:center}
 .stats-val{font-size:22px;font-weight:700;color:var(--text);display:block;line-height:1.2}
 .stats-label{font-size:11px;color:var(--text-muted);display:block;margin-top:4px}
@@ -1340,8 +1348,8 @@ a:hover{text-decoration:underline}
 }
 .status-line.visible{opacity:1}
 
-/* ── Stats Bar ───────────────────────────────────────────── */
-.stats-bar{
+/* ── Turn Stats (token count + time after each response) ── */
+.turn-stats{
   text-align:center;
   font-size:.7rem;
   color:var(--text-dim);

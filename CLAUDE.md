@@ -13,11 +13,13 @@ The `/merlin` command handles all setup on first run:
 
 ## Quick Reference
 
-**Invoke:** `.claude/tools/Merlin.exe --config .claude/tools/merlin-config.json --cmd '{"action":"NAME", ...}'` (use `Merlin` not `Merlin.exe` on Mac/Linux)
+**Invoke:** Use MCP tools: `mcp__merlin__meta_ads({action: "insights", brand: "X"})`, `mcp__merlin__dashboard({action: "dashboard"})`, etc.
 
-**Actions:** `dashboard`, `image`, `batch`, `meta-login/push/insights/kill/duplicate/discover`, `tiktok-login/push/insights/kill/duplicate`, `google-login/ads-push/ads-insights/ads-kill`, `shopify-login/import/products/orders/analytics/cohorts`, `amazon-login/ads-push/ads-insights/products/orders`, `klaviyo-login`, `email-audit`, `seo-audit/keywords/rankings/fix-alt`, `blog-post`, `social-post`, `clone-voice`, `discord-login/setup/post`, `competitor-scan`, `calendar`, `wisdom`, `api-key-setup`, `verify-key`
+**Tool categories:** `meta_ads`, `tiktok_ads`, `google_ads`, `amazon_ads`, `shopify`, `klaviyo`, `email`, `seo`, `content`, `video`, `voice`, `dashboard`, `discord`, `config`, `platform_login`, `connection_status`
 
-**Routing:** "How are my ads" / "What's my ROAS" / "How much spent" → `dashboard` (cross-platform). Only use platform-specific insights if user names a platform. "Make me an ad" → `image`, then ask which platform. "Pause all ads" → run kill for each connected platform. "What should I do next" → `dashboard` + check memory.md.
+**Actions per tool:** Each tool has an `action` enum. Example: `mcp__merlin__meta_ads({action: "push", adImagePath: "...", adHeadline: "..."})`. See the tool schema for all available actions and parameters.
+
+**Routing:** "How are my ads" / "What's my ROAS" / "How much spent" → `dashboard` (cross-platform). Only use platform-specific insights if user names a platform. "Make me an ad" → `image`, then ask which platform. "Pause all ads" → run kill for each connected platform. "What should I do next" → `dashboard` + check memory.md. "Why aren't my ads converting" / "audit my page" / "check my landing page" → `landing-audit`.
 
 **OAuth:** All `-login` actions use 5-min timeout. Check config for existing tokens before claiming disconnected.
 
