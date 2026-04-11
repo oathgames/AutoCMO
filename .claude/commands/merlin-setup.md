@@ -45,7 +45,7 @@ The goal: **WOW the user in 30 seconds.** Show their own content back to them �
    - Fetch `<website>/products.json` — if this works, it's a Shopify store. Save the `.myshopify.com` domain to config immediately:
      - Check the response headers or follow redirects to find the `X-ShopId` header or `.myshopify.com` redirect
      - Run: `curl -sI <website> | grep -i 'myshopify\|x-shopid\|shopify'` to detect the store
-     - If found, save to config: write `shopifyStore` field in `.claude/tools/merlin-config.json` (e.g., `"shopifyStore": "mad-chill"`)
+     - If found, note the Shopify store name for the connect step later
      - This enables instant Shopify OAuth later (no resolution step needed)
    - For each of the first 10 products:
      - Create the product folder + download the first image
@@ -95,8 +95,8 @@ The goal: **WOW the user in 30 seconds.** Show their own content back to them �
    - **prompt**:
      ```
      == SETUP ==
-     Read .claude/tools/merlin-config.json for budget limits and settings.
-     CONFIG = the parsed config JSON. Use it throughout.
+     Check connection status via mcp__merlin__connection_status.
+     Use MCP tools for all platform actions.
 
      == ERROR HANDLING (applies to ALL steps) ==
      If the app returns an error or non-zero exit code:
@@ -166,13 +166,13 @@ When the user later asks to publish ads, connect Shopify, etc., use one-click OA
 
 Example:
 ```
-Bash({ command: '.claude/tools/Merlin.exe --config .claude/tools/merlin-config.json --cmd \'{"action":"meta-login"}\'', timeout: 300000 })
+mcp__merlin__platform_login({platform: "meta", brand: "X"})
 ```
 
 When connecting any ad platform, ask the user ONE question:
    "How much do you want to spend per day on ads? (e.g., $20, $50, $100)"
 
-   Save their answer as `dailyAdBudget` in merlin-config.json. Merlin infers everything else:
+   Note their daily ad budget for platform setup. Merlin infers everything else:
    - Monthly cap = dailyAdBudget × 30
    - Testing budget = 60% of daily budget (split across test ads)
    - Scaling budget = 30% of daily budget (for winners only)
@@ -196,8 +196,8 @@ When connecting any ad platform, ask the user ONE question:
    - **prompt**:
      ```
      == SETUP ==
-     Read .claude/tools/merlin-config.json.
-     CONFIG = the parsed config JSON.
+     Check connection status via mcp__merlin__connection_status.
+     Use MCP tools for all platform actions.
      DAILY_BUDGET = CONFIG.dailyAdBudget (default $20 if not set)
 
      Derive all thresholds from DAILY_BUDGET — never hardcode:
@@ -332,7 +332,7 @@ When connecting any ad platform, ask the user ONE question:
 
      == STEP 5c: INVENTORY-AWARE AD PAUSING ==
      If Shopify is connected:
-       1. Run: .claude/tools/Merlin.exe --config .claude/tools/merlin-config.json --cmd '{"action":"shopify-products"}'
+       1. Run: mcp__merlin__shopify({action: "products", brand: "X"})
        2. For each product, check inventory count
        3. If any product has inventory <= 0 (out of stock):
           → Find all active ads promoting that product (match by product name in ad name)
@@ -386,12 +386,12 @@ When connecting any ad platform, ask the user ONE question:
 
      == STEP 6: DAILY DASHBOARD SNAPSHOT ==
      Run the unified dashboard to capture today's cross-platform metrics:
-       .claude/tools/Merlin.exe --config .claude/tools/merlin-config.json --cmd '{"action":"dashboard","batchCount":1}'
+       mcp__merlin__dashboard({action: "dashboard", brand: "X", batchCount: 1})
      This saves a timestamped JSON file locally (results/dashboard_YYYY-MM-DD.json).
      Over time, these accumulate into a full trend history — no cloud storage needed.
 
      Also run cohort analysis monthly (1st of each month only):
-       .claude/tools/Merlin.exe --config .claude/tools/merlin-config.json --cmd '{"action":"shopify-cohorts","batchCount":180}'
+       mcp__merlin__shopify({action: "cohorts", brand: "X", batchCount: 180})
      This captures LTV, repeat rate, and churn per monthly customer cohort.
 
      == STEP 6b: CHURN-TRIGGERED WIN-BACK ==
@@ -546,13 +546,13 @@ When the user wants to connect Shopify (for SEO blogs, product data, analytics):
 **One-click OAuth — no manual tokens:**
 Run the app's shopify-login action. It handles everything (use 5-minute timeout!):
 ```
-Bash({ command: '.claude/tools/Merlin.exe --config .claude/tools/merlin-config.json --cmd \'{"action":"shopify-login"}\'', timeout: 300000 })
+mcp__merlin__platform_login({platform: "shopify", brand: "X"})
 ```
 - The app auto-resolves the store name from the brand's website URL
 - Opens the browser to Shopify's OAuth approval screen
 - User clicks "Install" — one click
 - Token is exchanged automatically
-- Parse the JSON output, save `shopifyStore` and `shopifyAccessToken` to config
+- The MCP tool handles token storage automatically
 
 **NEVER ask users to create custom apps, copy tokens, or navigate Shopify admin settings.** The OAuth flow handles everything.
 

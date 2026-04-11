@@ -1380,7 +1380,7 @@ async function startSession() {
   try {
     for await (const msg of activeQuery) {
       if (win && !win.isDestroyed()) {
-        const serialized = JSON.parse(JSON.stringify(msg));
+        const serialized = structuredClone(msg);
         serialized._internal = _suppressNextResponse;
         // Clear suppression flag ONLY on 'result' (full turn complete, not partial 'assistant')
         if (_suppressNextResponse && msg.type === 'result') {

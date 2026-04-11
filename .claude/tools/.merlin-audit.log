@@ -16,3 +16,4 @@
 {"ts":"2026-04-10T14:16:28.733Z","src":"hook","event":"deny","reason":"Running script files is not allowed in Merlin sessions. Use the Merlin binary for all platform actions.","tool":"Bash","hash":"38d312b48c7cfd04","sample":"node /tmp/x.js"}
 {"ts":"2026-04-10T14:16:28.804Z","src":"hook","event":"deny","reason":"Protected Merlin credential file: app/mcp-tools.js","tool":"Read","hash":"1e5d89b87db9078e","sample":"app/mcp-tools.js"}
 {"ts":"2026-04-10T14:17:52.934Z","src":"hook","event":"deny","reason":"Grep/search of protected Merlin credential file is not allowed","tool":"Grep","hash":"3306fc666c4bcda1","sample":".claude/tools/"}
+{"ts":"2026-04-11T13:17:35.195Z","src":"main","event":"bypass_attempt","tool":"Read","reason":"D:\\autoCMO-claude\\autocmo-work\\.claude\\tools\\merlin-config.json is a protected Merlin credential file. Use the Merlin binary instead."}

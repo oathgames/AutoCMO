@@ -219,10 +219,15 @@ a:hover{text-decoration:underline}
 .msg-bubble .code-block:first-child pre{border-radius:8px}
 .msg-bubble .code-block:first-child .code-block-header+pre{border-radius:0 0 8px 8px}
 .msg-bubble pre code{background:none;padding:0;word-break:normal}
-.msg-bubble strong{font-weight:600}
+.msg-bubble p{margin:0 0 8px;line-height:1.6}
+.msg-bubble p:last-child{margin-bottom:0}
+.msg-bubble strong{font-weight:600;color:var(--text)}
 .msg-bubble em{font-style:italic;color:var(--text-muted)}
 .msg-bubble ul,.msg-bubble ol{padding-left:20px;margin:6px 0}
-.msg-bubble li{margin:3px 0;line-height:1.5}
+.msg-bubble li{margin:3px 0;line-height:1.6}
+.msg-bubble li p{margin:0}
+.msg-bubble blockquote{border-left:3px solid var(--accent);padding:4px 12px;margin:8px 0;color:var(--text-muted);font-style:italic}
+.msg-bubble blockquote p{margin:0}
 .msg-bubble h1{font-size:17px;font-weight:700;margin:12px 0 6px}
 .msg-bubble h2{font-size:15px;font-weight:700;margin:10px 0 4px}
 .msg-bubble h3{font-size:14px;font-weight:600;margin:8px 0 4px;color:var(--text-muted)}

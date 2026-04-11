@@ -470,7 +470,7 @@ function appendText(text) {
   if (!rafPending) {
     rafPending = true;
     requestAnimationFrame(() => {
-      if (currentBubble && textBuffer.length - lastRenderedLength > 20) {
+      if (currentBubble && textBuffer.length !== lastRenderedLength) {
         currentBubble.innerHTML = renderMarkdown(textBuffer);
         lastRenderedLength = textBuffer.length;
       }
@@ -600,141 +600,90 @@ function pruneOldMessages() {
 // Prune every 30 seconds to keep DOM lean
 setInterval(pruneOldMessages, 30000);
 
-// ── Markdown Renderer with Image Support ────────────────────
+// ── Markdown Renderer (marked.js) ────────────────────────────
+// Configure marked with custom renderers for Merlin-specific features
+const markedRenderer = new marked.Renderer();
+
+// Custom image renderer — local paths use merlin:// protocol
+markedRenderer.image = function({ href, title, text }) {
+  const alt = text || title || 'Image';
+  if (href && href.includes('/') && !href.startsWith('http') && !href.startsWith('data:')) {
+    return `<img src="merlin://${href}" alt="${alt}" loading="lazy">`;
+  }
+  return `<img src="${href}" alt="${alt}" loading="lazy">`;
+};
+
+// Custom link renderer — external links open in new tab, local file links use merlin://
+markedRenderer.link = function({ href, title, tokens }) {
+  const text = this.parser.parseInline(tokens);
+  if (/^(https?:\/\/|mailto:)/i.test(href)) {
+    return `<a href="${href}" target="_blank" rel="noopener noreferrer"${title ? ` title="${title}"` : ''}>${text}</a>`;
+  }
+  if (href && href.includes('/') && /\.(jpg|jpeg|png|gif|webp|pdf|mp4)$/i.test(href)) {
+    return `<a href="merlin://${href}" target="_blank">${text}</a>`;
+  }
+  return `<a href="${href}"${title ? ` title="${title}"` : ''}>${text}</a>`;
+};
+
+// Custom code renderer — add copy button + language label for fenced blocks
+markedRenderer.code = function({ text, lang }) {
+  const langLabel = lang || 'text';
+  const encoded = encodeURIComponent(text.replace(/\n$/, ''));
+  return `<div class="code-block"><div class="code-block-header"><span>${langLabel}</span><button class="copy-btn" data-copy="${encoded}">Copy</button></div><pre><code class="lang-${langLabel}">${escapeHtml(text)}</code></pre></div>`;
+};
+
+// Custom inline code renderer — add copy button for long/actionable content
+markedRenderer.codespan = function({ text }) {
+  const decoded = text.replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+  const isActionable = decoded.length > 20 || /^(https?:|\/|npm |curl |pip |brew |apt |git |cd |mkdir |xattr )/.test(decoded);
+  if (isActionable) {
+    return `<code>${text}</code><button class="copy-btn inline-copy" data-copy="${encodeURIComponent(decoded)}">⧉</button>`;
+  }
+  return `<code>${text}</code>`;
+};
+
+marked.setOptions({
+  renderer: markedRenderer,
+  breaks: true,
+  gfm: true,
+});
+
 function renderMarkdown(text) {
   if (!text) return '';
 
   // Strip mascot prefix if Claude prepends it
   text = text.replace(/^\s*✦\s*/g, '');
 
-  let html = escapeHtml(text);
-
-  // HTML artifacts (```html blocks rendered as iframes)
+  // Extract HTML artifacts (```html blocks → sandboxed iframes) before marked processes them
   const artifacts = [];
-  html = html.replace(/```html\n([\s\S]*?)```/g, (_, code) => {
-    const id = `artifact-${Date.now()}-${artifacts.length}`;
-    artifacts.push({ id, code });
+  text = text.replace(/```html\n([\s\S]*?)```/g, (_, code) => {
+    artifacts.push(code);
     return `%%ARTIFACT_${artifacts.length - 1}%%`;
   });
 
-  // Code blocks (triple backtick) — with copy button + language label
-  const codeBlocks = [];
-  html = html.replace(/```(\w*)\n([\s\S]*?)```/g, (_, lang, code) => {
-    const langLabel = lang || 'text';
-    const blockId = `cb-${Date.now()}-${codeBlocks.length}`;
-    codeBlocks.push(
-      `<div class="code-block"><div class="code-block-header"><span>${langLabel}</span><button class="copy-btn" data-copy="${encodeURIComponent(code.replace(/\n$/, ''))}">Copy</button></div><pre><code class="lang-${langLabel}">${code}</code></pre></div>`
-    );
-    return `%%CODEBLOCK_${codeBlocks.length - 1}%%`;
-  });
+  // Parse markdown with marked
+  let html = marked.parse(text);
 
-  // Inline code — add copy button for long or actionable content (URLs, commands, keys)
-  html = html.replace(/`([^`]+)`/g, (match, content) => {
-    const isActionable = content.length > 20 || /^(https?:|\/|npm |curl |pip |brew |apt |git |cd |mkdir |xattr )/.test(content);
-    if (isActionable) {
-      return `<code>${content}</code><button class="copy-btn inline-copy" data-copy="${encodeURIComponent(content)}">⧉</button>`;
-    }
-    return `<code>${content}</code>`;
-  });
-  // Bold — markdown **text** and escaped <strong> tags from Claude
-  html = html.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  html = html.replace(/&lt;strong&gt;(.*?)&lt;\/strong&gt;/g, '<strong>$1</strong>');
-  // Italic — markdown *text* and escaped <em> tags
-  html = html.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  html = html.replace(/&lt;em&gt;(.*?)&lt;\/em&gt;/g, '<em>$1</em>');
-  // Headers
-  html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
-  html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
-  html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
-  // Bullet lists
-  html = html.replace(/^- (.+)$/gm, '<li>$1</li>');
-  html = html.replace(/(<li>.*<\/li>\n?)+/g, '<ul>$&</ul>');
-  // Numbered lists
-  html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
-  // Horizontal rules
-  html = html.replace(/^---$/gm, '<hr>');
-  // Markdown images: ![alt](path) — render inline
-  html = html.replace(/!\[([^\]]*)\]\(([^)]+)\)/g, (match, alt, src) => {
-    // Local file path → use merlin:// protocol
-    if (src.includes('/') && !src.startsWith('http')) {
-      return `<img src="merlin://${src}" alt="${alt || 'Image'}" loading="lazy">`;
-    }
-    // Remote URL or data URI
-    if (src.startsWith('http') || src.startsWith('data:')) {
-      return `<img src="${src}" alt="${alt || 'Image'}" loading="lazy">`;
-    }
-    return match;
-  });
-
-  // Links
-  html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (match, text, url) => {
-    if (/^(https?:\/\/|mailto:)/i.test(url)) {
-      return `<a href="${url}" target="_blank" rel="noopener noreferrer">${text}</a>`;
-    }
-    // Local file links → render as merlin:// links
-    if (url.includes('/') && /\.(jpg|jpeg|png|gif|webp|pdf|mp4)$/i.test(url)) {
-      return `<a href="merlin://${url}" target="_blank">${text}</a>`;
-    }
-    return match;
-  });
-
-  // Normalize Windows backslash paths to forward slashes before matching
+  // Normalize Windows backslash paths to forward slashes
   html = html.replace(/([a-zA-Z0-9_\-\.]+)\\([a-zA-Z0-9_\-\.\\]+\.(?:jpg|jpeg|png|gif|webp|mp4|webm|mov))/gi, (m, a, b) => `${a}/${b.replace(/\\/g, '/')}`);
 
-  // Image file paths → inline <img>
-  html = html.replace(/(?:\.\/)?([a-zA-Z0-9_\-\.\/]+\.(?:jpg|jpeg|png|gif|webp))/gi, (match, p1) => {
+  // Bare image file paths (not already in <img> tags) → inline <img>
+  html = html.replace(/(?<!src="|href="|">)(?:\.\/)?([a-zA-Z0-9_\-\.\/]+\.(?:jpg|jpeg|png|gif|webp))(?![^<]*<\/(?:img|a|code))/gi, (match, p1) => {
     if (p1.includes('/')) return `<img src="merlin://${p1}" alt="Image" loading="lazy">`;
     return match;
   });
 
-  // Video file paths → inline <video>
-  html = html.replace(/(?:\.\/)?([a-zA-Z0-9_\-\.\/]+\.(?:mp4|webm|mov))/gi, (match, p1) => {
+  // Bare video file paths → inline <video>
+  html = html.replace(/(?<!src="|href="|">)(?:\.\/)?([a-zA-Z0-9_\-\.\/]+\.(?:mp4|webm|mov))(?![^<]*<\/(?:video|a|code))/gi, (match, p1) => {
     if (p1.includes('/')) return `<div class="video-wrap" data-file="${p1}"><video src="merlin://${p1}" controls playsinline preload="metadata" style="max-width:100%;border-radius:10px"></video></div>`;
     return match;
   });
 
-  // Tables (markdown pipe tables)
-  html = html.replace(/((?:^\|.+\|$\n?){2,})/gm, (table) => {
-    const rows = table.trim().split('\n').filter(r => r.trim());
-    if (rows.length < 2) return table;
-    // Check if row 2 is a separator (|---|---|)
-    const isSep = /^\|[\s\-:]+\|/.test(rows[1]);
-    let thead = '', tbody = '';
-    const parseRow = (row) => row.split('|').slice(1, -1).map(c => c.trim());
-    if (isSep && rows.length >= 2) {
-      const headers = parseRow(rows[0]);
-      thead = '<thead><tr>' + headers.map(h => `<th>${escapeHtml(h)}</th>`).join('') + '</tr></thead>';
-      const bodyRows = rows.slice(2);
-      tbody = '<tbody>' + bodyRows.map(r => '<tr>' + parseRow(r).map(c => `<td>${escapeHtml(c)}</td>`).join('') + '</tr>').join('') + '</tbody>';
-    } else {
-      tbody = '<tbody>' + rows.map(r => '<tr>' + parseRow(r).map(c => `<td>${escapeHtml(c)}</td>`).join('') + '</tr>').join('') + '</tbody>';
-    }
-    return `<table>${thead}${tbody}</table>`;
-  });
-
-  // Line breaks
-  html = html.replace(/\n/g, '<br>');
-  // Clean up
-  html = html.replace(/<\/li><br>/g, '</li>');
-  html = html.replace(/<\/ul><br>/g, '</ul>');
-  html = html.replace(/<\/pre><br>/g, '</pre>');
-  html = html.replace(/<\/h[123]><br>/g, (m) => m.replace('<br>', ''));
-  html = html.replace(/<hr><br>/g, '<hr>');
-  html = html.replace(/<\/table><br>/g, '</table>');
-  html = html.replace(/<\/tr><br>/g, '</tr>');
-  html = html.replace(/<\/td><br>/g, '</td>');
-  html = html.replace(/<\/th><br>/g, '</th>');
-
-  // Restore code blocks
-  codeBlocks.forEach((block, i) => {
-    html = html.replace(`%%CODEBLOCK_${i}%%`, block);
-  });
-
   // Restore HTML artifacts as sandboxed iframes
-  artifacts.forEach((art, i) => {
-    const encoded = encodeURIComponent(art.code);
+  artifacts.forEach((code, i) => {
+    const encoded = encodeURIComponent(code);
     html = html.replace(`%%ARTIFACT_${i}%%`,
-      `<div class="artifact"><div class="code-block-header"><span>preview</span><button class="copy-btn" data-copy="${encoded}">Copy HTML</button></div><iframe sandbox="allow-scripts" srcdoc="${art.code.replace(/"/g, '&quot;').replace(/'/g, '&#39;')}" style="width:100%;min-height:200px;border:1px solid var(--border);border-radius:0 0 8px 8px;background:#fff"></iframe></div>`
+      `<div class="artifact"><div class="code-block-header"><span>preview</span><button class="copy-btn" data-copy="${encoded}">Copy HTML</button></div><iframe sandbox="allow-scripts" srcdoc="${code.replace(/"/g, '&quot;').replace(/'/g, '&#39;')}" style="width:100%;min-height:200px;border:1px solid var(--border);border-radius:0 0 8px 8px;background:#fff"></iframe></div>`
     );
   });
 
@@ -2586,10 +2535,20 @@ chatEl.addEventListener('drop', (e) => {
 });
 
 // ── Help Nudge (frustration detection) ──────────────────────
+// Cooldown: once dismissed or shown, don't show again for 7 days
+const NUDGE_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
 let _nudgeShown = false;
 let _errorCount = 0;
 let _rapidMessageCount = 0;
 let _lastMessageTime = 0;
+
+// Check if nudge is in cooldown from a previous session
+(function initNudgeCooldown() {
+  try {
+    const lastShown = parseInt(localStorage.getItem('merlin-nudge-last') || '0');
+    if (Date.now() - lastShown < NUDGE_COOLDOWN_MS) _nudgeShown = true;
+  } catch {}
+})();
 
 function checkFrustration(text) {
   if (_nudgeShown) return;
@@ -2597,19 +2556,19 @@ function checkFrustration(text) {
   const t = (text || '').toLowerCase();
   const now = Date.now();
 
-  // Detect rapid repeated messages (3+ messages within 15 seconds)
-  if (now - _lastMessageTime < 15000) {
+  // Detect rapid repeated messages (5+ messages within 20 seconds — genuine frustration, not normal pace)
+  if (now - _lastMessageTime < 20000) {
     _rapidMessageCount++;
   } else {
     _rapidMessageCount = 0;
   }
   _lastMessageTime = now;
 
-  // Frustration signals
+  // Only trigger on strong frustration signals — not common words like "help" or "error"
   const frustrated =
-    _rapidMessageCount >= 3 ||
-    _errorCount >= 2 ||
-    /\b(help|stuck|broken|not working|doesn'?t work|error|why won'?t|can'?t|wtf|wrong)\b/i.test(t);
+    _rapidMessageCount >= 5 ||
+    _errorCount >= 3 ||
+    /\b(broken|not working|doesn'?t work|why won'?t|wtf|this is wrong|nothing happens|keeps failing)\b/i.test(t);
 
   if (frustrated) showHelpNudge();
 }
@@ -2617,14 +2576,16 @@ function checkFrustration(text) {
 function showHelpNudge() {
   if (_nudgeShown) return;
   _nudgeShown = true;
+  try { localStorage.setItem('merlin-nudge-last', String(Date.now())); } catch {}
   const nudge = document.getElementById('help-nudge');
   nudge.classList.remove('hidden');
-  // Auto-hide after 15 seconds
-  setTimeout(() => nudge.classList.add('hidden'), 15000);
+  // Auto-hide after 10 seconds
+  setTimeout(() => nudge.classList.add('hidden'), 10000);
 }
 
 document.getElementById('help-nudge-close').addEventListener('click', () => {
   document.getElementById('help-nudge').classList.add('hidden');
+  try { localStorage.setItem('merlin-nudge-last', String(Date.now())); } catch {}
 });
 
 // ── Image Lightbox (click to zoom, click/Esc to close) ──────
