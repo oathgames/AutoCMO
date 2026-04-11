@@ -84,10 +84,18 @@ function showModal({ title, body, bodyHTML, inputPlaceholder, confirmLabel, canc
   }
   document.addEventListener('keydown', escHandler);
 
-  confirmBtn.onclick = () => {
+  confirmBtn.onclick = async () => {
     const value = inputPlaceholder !== undefined ? inputEl.value.trim() : true;
+    // Run onConfirm BEFORE cleanup — validation may call showModalError()
+    // which needs the modal visible. Only cleanup if onConfirm doesn't throw.
+    if (onConfirm) {
+      try {
+        await onConfirm(value);
+      } catch {
+        return; // validation failed — modal stays open with error visible
+      }
+    }
     cleanup();
-    if (onConfirm) onConfirm(value);
   };
   cancelBtn.onclick = () => {
     cleanup();
@@ -1794,7 +1802,6 @@ const API_KEY_PLATFORMS = {
   fal:        { key: 'falApiKey', label: 'fal.ai', placeholder: 'fal-xxxx...', url: 'https://fal.ai/dashboard/keys' },
   elevenlabs: { key: 'elevenLabsApiKey', label: 'ElevenLabs', placeholder: 'xi_xxxx...', url: 'https://elevenlabs.io/app/settings/api-keys' },
   heygen:     { key: 'heygenApiKey', label: 'HeyGen', placeholder: 'your-api-key', url: 'https://app.heygen.com/settings?nav=API' },
-  slack:      { key: 'slackWebhookUrl', label: 'Slack', placeholder: 'https://hooks.slack.com/services/...', url: null },
 };
 
 document.addEventListener('click', async (e) => {
@@ -1846,10 +1853,22 @@ document.addEventListener('click', async (e) => {
       confirmLabel: 'Save',
       cancelLabel: 'Cancel',
       onConfirm: async (value) => {
-        if (!value || value.trim().length < 5) { showModalError('Key is too short'); return; }
+        if (!value || value.trim().length < 5) { showModalError('Key is too short'); throw new Error('validation'); }
         const result = await merlin.saveConfigField(apiDef.key, value.trim(), activeBrand);
-        if (result.success) loadConnections();
-        else showModal({ title: 'Error', body: result.error || 'Failed to save', confirmLabel: 'OK', onConfirm: () => {} });
+        if (result.success) {
+          loadConnections();
+          // Meta: after saving the access token, auto-discover the ad account,
+          // page, and pixel IDs. Without these, meta-push fails with
+          // "metaAdAccountId required". Run discover in the background.
+          if (platform === 'meta') {
+            try {
+              merlin.sendMessage(`Run meta discover for ${activeBrand || 'this brand'} to find the ad account, page, and pixel. Save the discovered IDs to the brand config. Do this silently — don't ask the user anything.`, { silent: true });
+            } catch {}
+          }
+        } else {
+          showModal({ title: 'Error', body: result.error || 'Failed to save', confirmLabel: 'OK', onConfirm: () => {} });
+          throw new Error('save-failed');
+        }
       },
     });
     return;
