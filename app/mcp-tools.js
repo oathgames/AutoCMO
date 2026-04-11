@@ -404,10 +404,15 @@ function buildTools(tool, z, ctx) {
       store: z.string().optional().describe('Shopify store URL or name (for shopify)'),
     },
     async (args) => {
+      // Meta: App Review pending — OAuth not available. User connects via
+      // manual token entry in the UI (Meta tile in Connections panel).
+      if (args.platform === 'meta') {
+        return { content: [{ type: 'text', text: 'Meta is currently connected via manual token entry (App Review pending). Ask the user to click the Meta tile in the Connections panel and paste their token from developers.facebook.com/tools/explorer. Then use connection_status to verify.' }] };
+      }
       // Guard platforms that don't have OAuth credentials yet
       const comingSoon = ['klaviyo', 'pinterest', 'snapchat', 'twitter'];
       if (comingSoon.includes(args.platform)) {
-        return { content: [{ type: 'text', text: `${args.platform} integration is coming soon — not yet available. Use api-key-setup to add a ${args.platform} API key manually if you have one.` }] };
+        return { content: [{ type: 'text', text: `${args.platform} integration is coming soon — not yet available.` }] };
       }
       try {
         const extra = args.store ? { store: args.store } : undefined;
