@@ -866,6 +866,9 @@ merlin.onSdkMessage((msg) => {
       isStreaming = false;
       setInputDisabled(false);
       stopTickingTimer();
+      // Refresh brand dropdown after each turn — Claude may have created a
+      // new brand, imported products, or changed connections during this turn.
+      try { loadBrands().then(() => loadConnections()); } catch {}
       // Clean up empty response bubbles (session died before producing output)
       if (currentBubble && currentBubble.textContent.trim() === '' && currentBubble.innerHTML.trim() === '') {
         const wrapper = currentBubble.closest('.msg');

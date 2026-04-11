@@ -8,6 +8,12 @@ The goal: **WOW the user in 30 seconds.** Show their own content back to them �
 **A) Brand + Product setup:**
 1. Ask: "What's your brand's website?" — that's the ONLY question. Everything else is automatic.
 
+**VERTICAL AWARENESS:** After detecting the brand's vertical (ecommerce, saas, agency, etc.):
+- **Ecommerce/DTC brands:** Suggest Shopify connection, product import, ad creation
+- **SaaS/Software brands:** Skip Shopify entirely. Focus on ad platforms (Meta, Google, TikTok), landing page audits, blog/SEO, and social content. Products = features or plans, not physical items.
+- **Agency/Service brands:** Skip Shopify. Focus on lead generation ads, landing pages, email.
+- NEVER suggest "import from Shopify" for non-ecommerce brands. It confuses users.
+
 2. **Do all of this silently — no step narration, just show results:**
 
    **Brand + Colors + Voice:**

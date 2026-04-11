@@ -3356,8 +3356,13 @@ ipcMain.handle('get-brands', () => {
           const statusMatch = content.match(/status[:\s]+(active|paused|archived)/i);
           if (statusMatch) status = statusMatch[1].toLowerCase();
           const h1Match = content.match(/^#\s+(.+)$/m);
-          if (h1Match) { displayName = h1Match[1].trim(); }
-          else {
+          if (h1Match) {
+            displayName = h1Match[1].trim()
+              // Strip common prefixes Claude adds to brand.md headings
+              .replace(/^Brand\s*Profile\s*[-—:]\s*/i, '')
+              .replace(/^Brand\s*[-—:]\s*/i, '')
+              .trim();
+          } else {
             const fieldMatch = content.match(/^(?:Brand|Name)[:\s]+["']?([^\n"']+)/im);
             if (fieldMatch) displayName = fieldMatch[1].trim();
           }
