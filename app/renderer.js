@@ -269,6 +269,38 @@ async function init() {
     // Guard against double-start from poller + retry button racing
     if (sessionActive) return true;
     const result = await merlin.checkSetup();
+
+    // Mac: probe detected missing credentials — trigger browser login
+    // immediately instead of showing a confusing setup screen for 30+ seconds.
+    if (result.needsLogin && !window._loginTriggered) {
+      window._loginTriggered = true;
+      document.getElementById('setup-status').textContent = 'Signing in to Claude — a browser window will open...';
+      if (window._claudePoller) { clearInterval(window._claudePoller); window._claudePoller = null; }
+      try {
+        if (merlin.triggerClaudeLogin) {
+          const loginResult = await merlin.triggerClaudeLogin();
+          if (loginResult.success) {
+            // Login succeeded — retry probe immediately
+            document.getElementById('setup-status').textContent = 'Signed in! Connecting...';
+            window._loginTriggered = false;
+            // Resume polling — next probe should find the new credentials
+            window._claudePoller = setInterval(async () => {
+              const detected = await detectClaude();
+              if (detected) {
+                setup.style.animation = 'fadeOut .3s ease forwards';
+                setTimeout(() => { setup.classList.add('hidden'); setup.style.animation = ''; }, 300);
+              }
+            }, 3000);
+            return false; // not ready yet, but login completed — next poll will succeed
+          }
+        }
+      } catch (e) { console.error('[auto-login]', e); }
+      // Login failed — fall through to show setup screen with retry
+      window._loginTriggered = false;
+      document.getElementById('setup-status').textContent = 'Sign in to Claude to continue. Click Retry after signing in.';
+      return false;
+    }
+
     document.getElementById('setup-status').textContent = getSetupStatusText(result);
     if (result.ready) {
       // Found! Clear polling and start session
@@ -1049,7 +1081,7 @@ merlin.onSdkError((err) => {
           const result = await merlin.triggerClaudeLogin();
           if (result.success) {
             // Login succeeded — retry session immediately
-            bubble.querySelector('.msg-text').textContent = 'Signed in! Starting Merlin...';
+            bubble.textContent = 'Signed in! Starting Merlin...';
             setTimeout(() => {
               _restartAttempts = 0;
               sessionActive = true;
@@ -1063,7 +1095,7 @@ merlin.onSdkError((err) => {
       }
 
       // Login failed or not available — show manual buttons
-      bubble.querySelector('.msg-text').textContent = 'Sign in to your Claude account to use Merlin.\n\nClick the button below to open the sign-in page in your browser.';
+      bubble.textContent = 'Sign in to your Claude account to use Merlin.\n\nClick the button below to open the sign-in page in your browser.';
 
       const loginBtn = document.createElement('button');
       loginBtn.textContent = 'Sign In to Claude';

@@ -122,36 +122,53 @@ try { fs.mkdirSync(appRoot, { recursive: true }); } catch {}
 // users don't have Node.js installed, so `node` isn't on PATH and the SDK fails
 // with ENOENT. Fix: create a wrapper script at a known PATH location that uses
 // Electron's own embedded Node via ELECTRON_RUN_AS_NODE=1.
-if (app.isPackaged && process.platform !== 'win32') {
+// The Claude Agent SDK spawns `node cli.js` as a subprocess. Non-developer
+// users don't have Node.js installed, so `node` isn't on PATH. Fix: create
+// a wrapper that re-execs Electron's own binary with ELECTRON_RUN_AS_NODE=1,
+// which strips all Chromium/GUI behavior and makes it act as pure Node.js.
+// Works on BOTH Mac and Windows — same technique, different script format.
+if (app.isPackaged) {
   try {
-    const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
-    const nodeWrapper = path.join(nodeWrapperDir, 'node');
-    fs.mkdirSync(nodeWrapperDir, { recursive: true });
-    // Write a shell script that re-execs the Electron binary in Node-only mode.
-    // ELECTRON_RUN_AS_NODE=1 strips all Electron/Chromium behavior and makes it
-    // act as a pure Node.js runtime — exactly what the SDK's cli.js needs.
     const electronBin = process.execPath;
-    const script = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${electronBin}" "$@"\n`;
-    // Only write if missing or stale (different Electron binary path)
-    let needsWrite = true;
-    try {
-      const existing = fs.readFileSync(nodeWrapper, 'utf8');
-      if (existing.includes(electronBin)) needsWrite = false;
-    } catch {}
-    if (needsWrite) {
-      fs.writeFileSync(nodeWrapper, script, { mode: 0o755 });
-    }
-    // Ensure ~/.claude/bin is on PATH (fixPath already adds it, but confirm)
-    if (!process.env.PATH.includes(nodeWrapperDir)) {
-      process.env.PATH = nodeWrapperDir + ':' + process.env.PATH;
+    if (process.platform === 'win32') {
+      // Windows: .cmd wrapper at %USERPROFILE%\.claude\bin\node.cmd
+      const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
+      const nodeWrapper = path.join(nodeWrapperDir, 'node.cmd');
+      fs.mkdirSync(nodeWrapperDir, { recursive: true });
+      const script = `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${electronBin}" %*\r\n`;
+      let needsWrite = true;
+      try {
+        const existing = fs.readFileSync(nodeWrapper, 'utf8');
+        if (existing.includes(electronBin)) needsWrite = false;
+      } catch {}
+      if (needsWrite) {
+        fs.writeFileSync(nodeWrapper, script);
+      }
+      if (!process.env.PATH.includes(nodeWrapperDir)) {
+        process.env.PATH = nodeWrapperDir + ';' + process.env.PATH;
+      }
+    } else {
+      // Mac/Linux: shell wrapper at ~/.claude/bin/node
+      const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
+      const nodeWrapper = path.join(nodeWrapperDir, 'node');
+      fs.mkdirSync(nodeWrapperDir, { recursive: true });
+      const script = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${electronBin}" "$@"\n`;
+      let needsWrite = true;
+      try {
+        const existing = fs.readFileSync(nodeWrapper, 'utf8');
+        if (existing.includes(electronBin)) needsWrite = false;
+      } catch {}
+      if (needsWrite) {
+        fs.writeFileSync(nodeWrapper, script, { mode: 0o755 });
+      }
+      if (!process.env.PATH.includes(nodeWrapperDir)) {
+        process.env.PATH = nodeWrapperDir + ':' + process.env.PATH;
+      }
     }
   } catch (e) {
     console.error('[node-wrapper] Failed to create node wrapper:', e.message);
   }
 }
-// Windows: Electron ships with an embedded Node but `node` is typically available
-// via the user's system install. If not, electron-builder's NSIS installer adds
-// the app to PATH. The wrapper approach isn't needed on Windows.
 
 // Resolve the Merlin engine binary. We prefer the INSTALL location because
 // files placed there by the trusted installer don't get quarantined by
@@ -313,6 +330,11 @@ async function probeClaudeSetup(force = false) {
               const oauth = creds.claudeAiOauth || creds;
               if (oauth.accessToken) probeEnv.CLAUDE_CODE_OAUTH_TOKEN = oauth.accessToken;
             } catch {}
+          } else {
+            // No credentials anywhere — tell the UI so it can start the
+            // login flow immediately instead of waiting for the session to
+            // fail with "Not logged in". This saves ~10 seconds of delay.
+            console.log('[setup-probe] No Mac credentials found — needs login');
           }
         } catch {}
       }
@@ -364,14 +386,21 @@ async function probeClaudeSetup(force = false) {
 
       if (/app\.asar\.unpacked|Cannot find module|Cannot find package/i.test(errorMessage)) {
         reason = 'Merlin could not load its Claude integration. Please reinstall Merlin.';
-      } else if (isClaudeAuthError(errorMessage)) {
-        if (desktop.running) {
-          reason = 'Claude Desktop is open, but Merlin still needs you to finish signing in.';
-        } else if (desktop.installed) {
-          reason = 'Claude Desktop is installed. Open it and sign in to continue.';
-        } else {
-          reason = 'Claude Desktop is not installed yet. Install it to continue, or use an API key.';
-        }
+      } else if (/not logged in|please run \/login|login required/i.test(errorMessage) || isClaudeAuthError(errorMessage)) {
+        // Mac: no Claude Code credentials — needs one-time browser login.
+        // Return needsLogin so the renderer triggers auto-login immediately
+        // instead of showing a confusing "open Claude Desktop" message.
+        result = {
+          ready: false,
+          needsLogin: true,
+          desktopInstalled: desktop.installed,
+          desktopRunning: desktop.running,
+          desktopPath: desktop.path,
+          reason: 'Signing in to your Claude account...',
+          error: errorMessage,
+        };
+        cachedClaudeSetup = { at: Date.now(), result };
+        return result;
       } else if (/timed? ?out/i.test(errorMessage)) {
         // SDK timed out connecting to Claude Desktop. Most common cause on Mac:
         // Claude Desktop is open but still initializing, or user hasn't completed
@@ -1506,19 +1535,58 @@ ipcMain.handle('start-session', () => { startSession(); return { success: true }
 ipcMain.handle('trigger-claude-login', async () => {
   if (process.platform !== 'darwin') return { success: true };
   try {
-    const { execSync } = require('child_process');
+    const { spawn } = require('child_process');
     const nodeWrapper = path.join(os.homedir(), '.claude', 'bin', 'node');
     const sdkDir = app.isPackaged
       ? path.join(path.dirname(app.getPath('exe')), '..', 'Resources', 'app.asar.unpacked', 'node_modules', '@anthropic-ai', 'claude-agent-sdk')
       : path.join(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
     const cliJs = path.join(sdkDir, 'cli.js');
-    // Run the login command — this opens a browser for OAuth
-    execSync(`"${nodeWrapper}" "${cliJs}" auth login`, {
-      timeout: 120000, // 2 min for user to complete browser flow
-      stdio: 'inherit', // show in Electron's terminal output
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+
+    // Spawn async (don't block main process) and capture stdout to
+    // extract the auth URL. The CLI prints the URL before opening the
+    // browser — we open it ourselves via shell.openExternal which
+    // properly foregrounds the browser window on macOS.
+    return new Promise((resolve) => {
+      const child = spawn(nodeWrapper, [cliJs, 'auth', 'login'], {
+        env: { ...process.env, ELECTRON_RUN_AS_NODE: '1', BROWSER: 'none' }, // BROWSER=none stops CLI from opening browser itself
+        stdio: ['ignore', 'pipe', 'pipe'],
+        timeout: 120000,
+      });
+
+      let stdout = '';
+      child.stdout.on('data', (d) => {
+        stdout += d.toString();
+        // The CLI prints the auth URL — find it and open ourselves
+        const urlMatch = stdout.match(/(https:\/\/claude\.ai\/[^\s]+|https:\/\/[^\s]*oauth[^\s]*|https:\/\/[^\s]*auth[^\s]*login[^\s]*)/i);
+        if (urlMatch) {
+          shell.openExternal(urlMatch[0]); // foregrounds browser on macOS
+        }
+      });
+
+      child.on('close', (code) => {
+        if (code === 0) {
+          console.log('[claude-login] Login completed successfully');
+          resolve({ success: true });
+        } else {
+          console.error('[claude-login] Exit code:', code);
+          // Even if CLI exits non-zero, check if credentials were created
+          try {
+            const { execSync } = require('child_process');
+            const creds = execSync('security find-generic-password -s "Claude Code-credentials" -w 2>/dev/null', { encoding: 'utf8', timeout: 3000 }).trim();
+            if (creds) {
+              resolve({ success: true });
+              return;
+            }
+          } catch {}
+          resolve({ success: false, error: `Login process exited with code ${code}` });
+        }
+      });
+
+      child.on('error', (e) => {
+        console.error('[claude-login] Spawn error:', e.message);
+        resolve({ success: false, error: e.message });
+      });
     });
-    return { success: true };
   } catch (e) {
     console.error('[trigger-claude-login]', e.message);
     return { success: false, error: e.message };
