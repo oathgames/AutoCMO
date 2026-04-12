@@ -137,6 +137,37 @@ function buildTools(tool, z, ctx) {
     async (args) => {
       const action = 'meta-' + (args.action === 'setup-retargeting' ? 'setup-retargeting' : args.action);
       const result = await runBinary(ctx, action, args);
+
+      // After discover: parse the JSON output and auto-save the discovered
+      // ad account, page, and pixel IDs to the brand config. The binary
+      // prints these for "Claude to parse and write into config" — but Claude
+      // can't write config files (hooks block it). So we do it here.
+      if (args.action === 'discover' && !result.error && result.text) {
+        try {
+          // Extract JSON from the output (binary prints status lines then JSON)
+          const jsonMatch = result.text.match(/\{[\s\S]*"adAccountId"[\s\S]*\}/);
+          if (jsonMatch) {
+            const discovered = JSON.parse(jsonMatch[0]);
+            const brandName = args.brand || '';
+            const updates = {};
+            if (discovered.adAccountId) updates.metaAdAccountId = discovered.adAccountId;
+            if (discovered.pageId) updates.metaPageId = discovered.pageId;
+            if (discovered.pixelId) updates.metaPixelId = discovered.pixelId;
+            if (Object.keys(updates).length > 0) {
+              if (brandName) {
+                ctx.writeBrandTokens(brandName, updates);
+              } else {
+                const cfg = ctx.readConfig();
+                Object.assign(cfg, updates);
+                ctx.writeConfig(cfg);
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[meta-discover] Failed to auto-save IDs:', e.message);
+        }
+      }
+
       return { content: [{ type: 'text', text: result.text }], isError: result.error };
     },
     { annotations: { destructive: true } }

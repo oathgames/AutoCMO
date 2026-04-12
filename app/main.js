@@ -755,8 +755,9 @@ async function createWindow() {
   wsServer.setHandlers({
     onSendMessage: (text) => {
       if (typeof text !== 'string' || text.length > 50000) return; // validate input
+      const content = injectActiveBrand(text);
       if (resolveNextMessage) {
-        resolveNextMessage({ type: 'user', message: { role: 'user', content: text } });
+        resolveNextMessage({ type: 'user', message: { role: 'user', content } });
       }
       if (win && !win.isDestroyed()) {
         win.webContents.send('remote-user-message', text);
@@ -1937,7 +1938,9 @@ ipcMain.handle('send-message', (_, text, options = {}) => {
     // Safety: auto-clear after 30 seconds in case 'result' event never fires
     setTimeout(() => { _suppressNextResponse = false; }, 30000);
   }
-  const msg = { type: 'user', message: { role: 'user', content: text } };
+  // Inject current active brand so Claude always knows which brand the user selected
+  const content = injectActiveBrand(text);
+  const msg = { type: 'user', message: { role: 'user', content } };
   if (resolveNextMessage) {
     resolveNextMessage(msg);
   } else {
@@ -2509,6 +2512,16 @@ const stateFile = path.join(appRoot, '.merlin-state.json');
 
 function readState() {
   try { return JSON.parse(fs.readFileSync(stateFile, 'utf8')); } catch { return {}; }
+}
+
+// Prepend the current active brand to every user message so Claude always
+// operates on the brand the user selected in the dropdown, not the one
+// that was active when the session started.
+function injectActiveBrand(text) {
+  const state = readState();
+  const brand = state.activeBrand;
+  if (!brand) return text;
+  return `[ACTIVE_BRAND: ${brand}] ${text}`;
 }
 
 function writeState(data) {
