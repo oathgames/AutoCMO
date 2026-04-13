@@ -28,16 +28,21 @@ const { redactOutput } = require('./mcp-redact');
  * @param {object} opts - { timeout?: number }
  * @returns {Promise<{text: string, error?: boolean}>}
  */
-function runBinary(ctx, action, args, opts = {}) {
-  return new Promise((resolve) => {
-    const binaryPath = ctx.getBinaryPath();
-    if (!binaryPath || !fs.existsSync(binaryPath)) {
-      return resolve({ text: 'Merlin engine not found. Try reinstalling or running /update.', error: true });
-    }
+async function runBinary(ctx, action, args, opts = {}) {
+  const binaryPath = ctx.getBinaryPath();
+  if (!binaryPath || !fs.existsSync(binaryPath)) {
+    return { text: 'Merlin engine not found. Try reinstalling or running /update.', error: true };
+  }
 
-    // Build merged config with vault-resolved tokens
-    const brandName = args.brand || '';
-    const cfg = brandName ? ctx.readBrandConfig(brandName) : ctx.readConfig();
+  // Build merged config with vault-resolved tokens
+  const brandName = args.brand || '';
+  const cfg = brandName ? ctx.readBrandConfig(brandName) : ctx.readConfig();
+
+  // OAuth client secrets are handled server-side (BFF pattern).
+  // The Go binary calls merlingotme.com/api/oauth/exchange directly.
+  // No secrets are injected into the config from the Electron app.
+
+  return new Promise((resolve) => {
     if (!cfg || Object.keys(cfg).length === 0) {
       return resolve({ text: 'No configuration found. Connect a platform first.', error: true });
     }
@@ -121,7 +126,7 @@ function buildTools(tool, z, ctx) {
     'meta_ads',
     'Manage Meta/Facebook ad campaigns — create ads, check performance, pause/scale ads, discover accounts.',
     {
-      action: z.enum(['push', 'insights', 'kill', 'activate', 'duplicate', 'setup', 'discover', 'warmup', 'retarget', 'lookalike', 'setup-retargeting', 'adlib', 'catalog']).describe('The operation to perform'),
+      action: z.enum(['push', 'insights', 'kill', 'activate', 'duplicate', 'setup', 'discover', 'warmup', 'retarget', 'lookalike', 'setup-retargeting', 'adlib', 'catalog', 'budget']).describe('The operation to perform'),
       brand: z.string().optional().describe('Brand name'),
       adId: z.string().optional().describe('Ad ID (for kill/duplicate)'),
       campaignId: z.string().optional().describe('Target campaign ID'),
@@ -132,7 +137,10 @@ function buildTools(tool, z, ctx) {
       adBody: z.string().optional().describe('Ad primary text'),
       adLink: z.string().optional().describe('Destination URL'),
       dailyBudget: z.number().optional().describe('Daily budget in dollars'),
-      batchCount: z.number().optional().describe('Days of data (for insights)'),
+      batchCount: z.number().optional().describe('Days of data (-1=today, 7=last week, 30=last month)'),
+      sortBy: z.string().optional().describe('Sort results by: spend, roas, ctr, clicks, impressions, cpc, purchases'),
+      sortOrder: z.string().optional().describe('Sort order: desc (default) or asc'),
+      limit: z.number().optional().describe('Max results to return (e.g. 5 for top 5)'),
     },
     async (args) => {
       const action = 'meta-' + (args.action === 'setup-retargeting' ? 'setup-retargeting' : args.action);
@@ -188,7 +196,9 @@ function buildTools(tool, z, ctx) {
       adHeadline: z.string().optional(),
       adBody: z.string().optional(),
       adLink: z.string().optional(),
-      batchCount: z.number().optional().describe('Days of data (for insights)'),
+      batchCount: z.number().optional().describe('Days of data (-1=today, 7=last week, 30=last month)'),
+      sortBy: z.string().optional().describe('Sort results by: spend, roas, ctr, clicks'),
+      limit: z.number().optional().describe('Max results to return'),
     },
     async (args) => {
       const result = await runBinary(ctx, 'tiktok-' + args.action, args);
@@ -210,6 +220,9 @@ function buildTools(tool, z, ctx) {
       adBody: z.string().optional(),
       adLink: z.string().optional().describe('Final URL'),
       dailyBudget: z.number().optional(),
+      batchCount: z.number().optional().describe('Days of data (-1=today, 7=last week, 30=last month)'),
+      sortBy: z.string().optional().describe('Sort results by: spend, roas, ctr, clicks, conversions'),
+      limit: z.number().optional().describe('Max results to return'),
     },
     async (args) => {
       const result = await runBinary(ctx, 'google-ads-' + args.action, args);

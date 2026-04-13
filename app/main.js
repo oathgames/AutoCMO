@@ -7,87 +7,11 @@ const { generateQRDataUri } = require('./qr');
 
 Menu.setApplicationMenu(null);
 
-// ── Cloud Credentials Cache (in-memory + encrypted disk) ─────
-// Fetches OAuth client secrets from api.merlingotme.com on startup.
-// Never writes secrets to unencrypted disk. safeStorage encrypts the disk cache.
-const _credentialsCache = { data: null, fetchedAt: 0, promise: null };
-const CREDENTIALS_TTL_MS = 60 * 60 * 1000; // 1 hour
-const CREDENTIALS_URL = 'https://api.merlingotme.com/api/credentials';
-const CREDENTIALS_APP_TOKEN = 'd4c3a2dff4582d1ddb727dbe34e40c726a23e57a8aa65fc06f8b8c051080c409';
-
-async function fetchCredentials() {
-  // Return cached if fresh
-  if (_credentialsCache.data && (Date.now() - _credentialsCache.fetchedAt) < CREDENTIALS_TTL_MS) {
-    return _credentialsCache.data;
-  }
-  // Deduplicate concurrent requests
-  if (_credentialsCache.promise) return _credentialsCache.promise;
-
-  _credentialsCache.promise = (async () => {
-    try {
-      const https = require('https');
-      const data = await new Promise((resolve, reject) => {
-        const req = https.request(CREDENTIALS_URL, {
-          method: 'GET',
-          headers: { 'Authorization': `Bearer ${CREDENTIALS_APP_TOKEN}` },
-          timeout: 10000,
-        }, (res) => {
-          let body = '';
-          res.on('data', (chunk) => { body += chunk; });
-          res.on('end', () => {
-            if (res.statusCode === 200) {
-              try { resolve(JSON.parse(body)); } catch { reject(new Error('invalid JSON')); }
-            } else {
-              reject(new Error(`HTTP ${res.statusCode}`));
-            }
-          });
-        });
-        req.on('error', reject);
-        req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-        req.end();
-      });
-
-      _credentialsCache.data = data;
-      _credentialsCache.fetchedAt = Date.now();
-      console.log('[credentials] Fetched from server');
-
-      // Persist encrypted to disk for offline fallback
-      try {
-        if (safeStorage.isEncryptionAvailable()) {
-          const encrypted = safeStorage.encryptString(JSON.stringify(data));
-          const cachePath = path.join(os.homedir(), '.claude', '.merlin-creds-cache');
-          fs.mkdirSync(path.dirname(cachePath), { recursive: true });
-          fs.writeFileSync(cachePath, encrypted);
-        }
-      } catch {}
-
-      return data;
-    } catch (err) {
-      console.warn('[credentials] Fetch failed:', err.message);
-
-      // Try encrypted disk cache
-      try {
-        if (safeStorage.isEncryptionAvailable()) {
-          const cachePath = path.join(os.homedir(), '.claude', '.merlin-creds-cache');
-          const encrypted = fs.readFileSync(cachePath);
-          const decrypted = safeStorage.decryptString(encrypted);
-          const data = JSON.parse(decrypted);
-          _credentialsCache.data = data;
-          _credentialsCache.fetchedAt = Date.now() - CREDENTIALS_TTL_MS + 300000; // expire in 5 min
-          console.log('[credentials] Loaded from encrypted disk cache');
-          return data;
-        }
-      } catch {}
-
-      // Return stale in-memory cache if available
-      return _credentialsCache.data || null;
-    } finally {
-      _credentialsCache.promise = null;
-    }
-  })();
-
-  return _credentialsCache.promise;
-}
+// ── BFF Architecture ─────────────────────────────────────────
+// OAuth client secrets are NEVER in the Electron app. Token exchange
+// and refresh happen server-side via merlingotme.com/api/oauth/exchange
+// and /api/oauth/refresh. The Go binary calls these endpoints directly.
+// Discord API calls are proxied via api.merlingotme.com/api/discord/proxy.
 
 // ── Fix PATH for Electron launched from installers/shortcuts ──────────
 // Electron doesn't inherit the user's full shell PATH when launched from
@@ -113,7 +37,16 @@ async function fetchCredentials() {
     try {
       const { execSync } = require('child_process');
       const shell = process.env.SHELL || '/bin/bash';
-      const shellPath = execSync(`${shell} -lc 'echo "$PATH"' 2>/dev/null`, {
+      // Detect non-POSIX shells that need different invocation
+      let pathCmd;
+      if (shell.endsWith('/fish')) {
+        pathCmd = `${shell} -l -c 'string join : $PATH' 2>/dev/null`;
+      } else if (shell.endsWith('/nu') || shell.endsWith('/nushell')) {
+        pathCmd = `${shell} -l -c '$env.PATH | str join ":"' 2>/dev/null`;
+      } else {
+        pathCmd = `${shell} -lc 'echo "$PATH"' 2>/dev/null`;
+      }
+      const shellPath = execSync(pathCmd, {
         timeout: 5000,
         encoding: 'utf8',
         stdio: ['ignore', 'pipe', 'ignore'],
@@ -209,44 +142,50 @@ try { fs.mkdirSync(appRoot, { recursive: true }); } catch {}
 // a wrapper that re-execs Electron's own binary with ELECTRON_RUN_AS_NODE=1,
 // which strips all Chromium/GUI behavior and makes it act as pure Node.js.
 // Works on BOTH Mac and Windows — same technique, different script format.
+// Extracted into a function so it can be re-invoked on each session start (C5 fix)
+function createNodeWrapper() {
+  const electronBin = process.execPath;
+  if (process.platform === 'win32') {
+    const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
+    const nodeWrapper = path.join(nodeWrapperDir, 'node.cmd');
+    fs.mkdirSync(nodeWrapperDir, { recursive: true });
+    const script = `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${electronBin}" %*\r\n`;
+    let needsWrite = true;
+    try { if (fs.readFileSync(nodeWrapper, 'utf8').includes(electronBin)) needsWrite = false; } catch {}
+    if (needsWrite) fs.writeFileSync(nodeWrapper, script);
+    if (!process.env.PATH.includes(nodeWrapperDir)) process.env.PATH = nodeWrapperDir + ';' + process.env.PATH;
+  } else {
+    const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
+    const nodeWrapper = path.join(nodeWrapperDir, 'node');
+    fs.mkdirSync(nodeWrapperDir, { recursive: true });
+    const script = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${electronBin}" "$@"\n`;
+    let needsWrite = true;
+    try { if (fs.readFileSync(nodeWrapper, 'utf8').includes(electronBin)) needsWrite = false; } catch {}
+    if (needsWrite) fs.writeFileSync(nodeWrapper, script, { mode: 0o755 });
+    if (!process.env.PATH.includes(nodeWrapperDir)) process.env.PATH = nodeWrapperDir + ':' + process.env.PATH;
+  }
+}
+
+// Validates the node wrapper points to current Electron binary — called on each session start
+function validateNodeWrapper() {
+  try {
+    const wrapperPath = process.platform === 'win32'
+      ? path.join(os.homedir(), '.claude', 'bin', 'node.cmd')
+      : path.join(os.homedir(), '.claude', 'bin', 'node');
+    if (fs.existsSync(wrapperPath)) {
+      const content = fs.readFileSync(wrapperPath, 'utf8');
+      if (content.includes(process.execPath)) return; // Still valid
+    }
+    createNodeWrapper();
+  } catch (err) {
+    console.error('[node-wrapper] Validation failed, recreating:', err.message);
+    try { createNodeWrapper(); } catch (e) { console.error('[node-wrapper] Cannot create:', e.message); }
+  }
+}
+
 if (app.isPackaged) {
   try {
-    const electronBin = process.execPath;
-    if (process.platform === 'win32') {
-      // Windows: .cmd wrapper at %USERPROFILE%\.claude\bin\node.cmd
-      const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
-      const nodeWrapper = path.join(nodeWrapperDir, 'node.cmd');
-      fs.mkdirSync(nodeWrapperDir, { recursive: true });
-      const script = `@echo off\r\nset ELECTRON_RUN_AS_NODE=1\r\n"${electronBin}" %*\r\n`;
-      let needsWrite = true;
-      try {
-        const existing = fs.readFileSync(nodeWrapper, 'utf8');
-        if (existing.includes(electronBin)) needsWrite = false;
-      } catch {}
-      if (needsWrite) {
-        fs.writeFileSync(nodeWrapper, script);
-      }
-      if (!process.env.PATH.includes(nodeWrapperDir)) {
-        process.env.PATH = nodeWrapperDir + ';' + process.env.PATH;
-      }
-    } else {
-      // Mac/Linux: shell wrapper at ~/.claude/bin/node
-      const nodeWrapperDir = path.join(os.homedir(), '.claude', 'bin');
-      const nodeWrapper = path.join(nodeWrapperDir, 'node');
-      fs.mkdirSync(nodeWrapperDir, { recursive: true });
-      const script = `#!/bin/sh\nELECTRON_RUN_AS_NODE=1 exec "${electronBin}" "$@"\n`;
-      let needsWrite = true;
-      try {
-        const existing = fs.readFileSync(nodeWrapper, 'utf8');
-        if (existing.includes(electronBin)) needsWrite = false;
-      } catch {}
-      if (needsWrite) {
-        fs.writeFileSync(nodeWrapper, script, { mode: 0o755 });
-      }
-      if (!process.env.PATH.includes(nodeWrapperDir)) {
-        process.env.PATH = nodeWrapperDir + ':' + process.env.PATH;
-      }
-    }
+    createNodeWrapper();
   } catch (e) {
     console.error('[node-wrapper] Failed to create node wrapper:', e.message);
   }
@@ -556,7 +495,10 @@ async function probeClaudeSetup(force = false) {
 
     try {
       const { query } = await importClaudeAgentSdk();
-      const probeEnv = { ...process.env };
+      // ELECTRON_RUN_AS_NODE prevents the subprocess from launching as a macOS GUI app
+      // (which causes dock bouncing and hangs). Without it, the Electron binary registers
+      // with the window server instead of running as headless Node.
+      const probeEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1', BROWSER: 'none' };
       if (process.platform === 'darwin' && !probeEnv.CLAUDE_CODE_OAUTH_TOKEN && !probeEnv.ANTHROPIC_API_KEY) {
         const token = await readMacCredentials();
         if (token) {
@@ -1514,7 +1456,9 @@ async function startSession() {
   }
 
   // If user has an API key, pass it via env so Claude Code uses it instead of subscription
-  const sessionEnv = { ...process.env };
+  // ELECTRON_RUN_AS_NODE prevents the SDK subprocess from launching as a macOS GUI app
+  // (dock bouncing + hang). The login flow at trigger-claude-login already sets this.
+  const sessionEnv = { ...process.env, ELECTRON_RUN_AS_NODE: '1', BROWSER: 'none' };
   try {
     const storedKey = readSecureFile(path.join(appRoot, '.merlin-api-key'));
     if (storedKey && storedKey.startsWith('sk-ant-')) {
@@ -1558,7 +1502,6 @@ async function startSession() {
       activeChildProcesses,
       appendAudit,
       sdkModule,
-      fetchCredentials,
     });
     mcpConfig = { merlin: merlinMcp };
   } catch (err) {
@@ -1804,7 +1747,11 @@ ipcMain.handle('install-claude', async () => {
   };
 });
 
-ipcMain.handle('start-session', () => { startSession(); return { success: true }; });
+ipcMain.handle('start-session', () => {
+  if (app.isPackaged) validateNodeWrapper(); // C5: ensure wrapper points to current binary
+  startSession();
+  return { success: true };
+});
 
 // macOS: trigger the bundled CLI's login flow. Opens a browser for OAuth,
 // creates the "Claude Code-credentials" Keychain entry (or writes
@@ -3249,7 +3196,10 @@ function writeBrandTokens(brandName, tokens) {
     let existing = {};
     try { existing = JSON.parse(fs.readFileSync(tokenPath, 'utf8')); } catch {}
     Object.assign(existing, tokens);
-    fs.writeFileSync(tokenPath, JSON.stringify(existing, null, 2));
+    // Atomic write: tmp + rename prevents corruption on crash (S11-02)
+    const tmpPath = tokenPath + '.tmp';
+    fs.writeFileSync(tmpPath, JSON.stringify(existing, null, 2));
+    fs.renameSync(tmpPath, tokenPath);
   } catch (err) { console.error('[brand-config] write failed:', err.message); }
 }
 
@@ -4349,7 +4299,21 @@ async function ensureBinary(opts = {}) {
       }
     } catch (e) {
       if (e.message.includes('checksum mismatch')) throw e;
-      // Checksum file couldn't be fetched — continue without verification
+      // Retry checksum fetch up to 2 more times before hard-failing (S4-05 hardening)
+      let verified = false;
+      for (let attempt = 0; attempt < 2 && !verified; attempt++) {
+        await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        try {
+          const retryFile = (await httpsGet(checksumAsset.browser_download_url)).toString();
+          const retryHash = retryFile.split('\n').map(l => l.trim().split(/\s+/)).find(p => p[1] === assetName)?.[0];
+          if (retryHash) {
+            const ah = require('crypto').createHash('sha256').update(binary).digest('hex');
+            if (ah !== retryHash) throw new Error('Engine checksum mismatch on retry');
+            verified = true;
+          }
+        } catch (re) { if (re.message.includes('checksum mismatch')) throw re; }
+      }
+      if (!verified) throw new Error('Cannot verify engine integrity — checksum unavailable after 3 attempts. Aborted for security.');
     }
   }
 
@@ -4453,7 +4417,21 @@ async function downloadAndApplyUpdate() {
           }
         } catch (e) {
           if (e.message.includes('checksum mismatch')) throw e;
-          // Checksum file couldn't be fetched — continue without verification
+          // Retry checksum fetch up to 2 more times before hard-failing (S4-05 hardening)
+          let verified = false;
+          for (let attempt = 0; attempt < 2 && !verified; attempt++) {
+            await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+            try {
+              const retryFile = (await httpsGet(checksumAsset.browser_download_url)).toString();
+              const retryHash = retryFile.split('\n').map(l => l.trim().split(/\s+/)).find(p => p[1] === binaryName)?.[0];
+              if (retryHash) {
+                const ah = require('crypto').createHash('sha256').update(binary).digest('hex');
+                if (ah !== retryHash) throw new Error('Binary checksum mismatch on retry');
+                verified = true;
+              }
+            } catch (re) { if (re.message.includes('checksum mismatch')) throw re; }
+          }
+          if (!verified) throw new Error('Cannot verify update integrity — checksum unavailable after 3 attempts. Update aborted for security.');
         }
       }
       const binaryPath = path.join(appRoot, '.claude', 'tools', process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
@@ -4579,9 +4557,6 @@ app.whenReady().then(async () => {
   try { migrateTokensToVault(); } catch (err) { console.error('[vault-migration]', err.message); }
 
   await createWindow();
-
-  // Pre-fetch OAuth credentials from cloud vault (non-blocking)
-  fetchCredentials().catch(() => {});
 
   // Bootstrap workspace AFTER window is visible (prevents "Not Responding" on first launch)
   setTimeout(bootstrapWorkspace, 500);
