@@ -1,5 +1,5 @@
 {
-  "version": "1.0.3",
+  "version": "1.0.4",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -23,10 +23,10 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.0.3: Meta insights now blazingly fast — 7 API calls reduced to 1-2 per pull.",
+  "notes": "v1.0.4: Production-grade batching across every ad platform — every API call now batched or parallelised.",
   "whatsNew": [
-    "Fixed 'rate limited' errors on back-to-back Meta insights pulls",
-    "Cut Meta API calls per insights pull by 70% — now 1-2 calls instead of 7",
-    "Raised internal rate limit headroom so interactive use no longer hits the ceiling"
+    "Native Meta batch API: 5 hot paths refactored — lockdown is 10× faster, setup + discover + insights all use batched reads",
+    "All 9 ad platforms now batch-execute via a shared core: Meta native, everyone else via bounded parallel fetch",
+    "34 new unit tests covering ChunkRequests, ParallelFetch, BatchSuccess/Failures, and Meta native batch with mock HTTP server"
   ]
 }
