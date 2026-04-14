@@ -8,21 +8,7 @@ const messages = document.getElementById('messages');
 const chat = document.getElementById('chat');
 const input = document.getElementById('input');
 const sendBtn = document.getElementById('send-btn');
-const setup = document.getElementById('setup');
 const approval = document.getElementById('approval');
-
-function getSetupStatusText(result, fallback = 'Checking Claude...') {
-  if (result?.reason) return result.reason;
-  if (result?.ready) return 'Claude is ready. Starting Merlin...';
-  return fallback;
-}
-
-function resetSetupButton() {
-  const btn = document.getElementById('setup-auto-btn');
-  if (!btn) return;
-  btn.disabled = false;
-  btn.textContent = 'Open Claude Desktop';
-}
 
 // Platform-specific UI adjustments
 if (merlin.platform === 'darwin') {
@@ -245,9 +231,7 @@ async function init() {
     });
   }
 
-  // Show chat immediately with a welcome message — no blank screen
-  setup.classList.add('hidden');
-
+  // Show chat immediately with a welcome message — no blank screen, no setup overlay
   const welcomeBubble = addClaudeBubble();
   // Instant animated welcome — shows before SDK even connects
   welcomeBubble.classList.remove('streaming');
@@ -296,159 +280,11 @@ async function init() {
     welcomeBubble.innerHTML = 'Hey — I\'m Merlin, your AI marketing wizard.<br>Drop your website below and I\'ll work some magic.';
   }
 
-  // Auto-detect Claude — poll every 3 seconds until found
-  async function detectClaude(force) {
-    // Guard against double-start from poller + retry button racing
-    if (sessionActive) return true;
-    const result = await merlin.checkSetup(force);
-
-    // Mac: probe detected missing credentials — trigger browser login
-    // immediately instead of showing a confusing setup screen for 30+ seconds.
-    if (result.needsLogin && !window._loginTriggered) {
-      window._loginTriggered = true;
-      document.getElementById('setup-status').textContent = 'Signing in to Claude — a browser window will open...';
-      // Show cancel + API key options so user isn't trapped
-      const setupMain = document.getElementById('setup-main');
-      if (setupMain) {
-        setupMain.innerHTML = `
-          <p class="setup-explain">Completing a one-time sign-in to your Claude account...</p>
-          <button id="setup-login-cancel" class="btn-secondary" style="width:100%;margin-bottom:6px">Cancel</button>
-          <button id="setup-login-apikey" class="btn-secondary" style="width:100%;">Use API key instead</button>
-        `;
-        document.getElementById('setup-login-cancel')?.addEventListener('click', () => {
-          window._loginTriggered = false;
-          document.getElementById('setup-status').textContent = 'Sign-in cancelled. Click Retry when ready.';
-          setupMain.innerHTML = `
-            <button id="setup-auto-btn" class="btn-primary" style="width:100%;margin-bottom:6px">Retry Sign In</button>
-            <button id="setup-apikey-btn" class="btn-secondary" style="width:100%;">Use API key instead</button>
-          `;
-          document.getElementById('setup-auto-btn')?.addEventListener('click', () => detectClaude());
-          document.getElementById('setup-apikey-btn')?.addEventListener('click', () => {
-            document.getElementById('setup-main').style.display = 'none';
-            document.getElementById('setup-apikey-form').style.display = '';
-          });
-        });
-        document.getElementById('setup-login-apikey')?.addEventListener('click', () => {
-          window._loginTriggered = false;
-          setupMain.style.display = 'none';
-          document.getElementById('setup-apikey-form').style.display = '';
-        });
-      }
-      if (window._claudePoller) { clearInterval(window._claudePoller); window._claudePoller = null; }
-      try {
-        if (merlin.triggerClaudeLogin) {
-          const loginResult = await merlin.triggerClaudeLogin();
-          if (loginResult.success) {
-            document.getElementById('setup-status').textContent = 'Signed in! Starting Merlin...';
-            window._loginTriggered = false;
-            // Dismiss paste dialog if it was open
-            const authDialog = document.getElementById('auth-code-dialog');
-            if (authDialog) authDialog.remove();
-            // Credentials are now persisted — start session directly instead of
-            // polling probeClaudeSetup every 3s (each poll takes 2-12s).
-            if (window._claudePoller) { clearInterval(window._claudePoller); window._claudePoller = null; }
-            setup.style.animation = 'fadeOut .3s ease forwards';
-            setTimeout(() => { setup.classList.add('hidden'); setup.style.animation = ''; }, 300);
-            turnStartTime = Date.now();
-            sessionActive = true;
-            merlin.startSession();
-            setTimeout(updateProgressBar, 2000);
-            return true;
-          }
-          // Login timed out or failed — show retry with actual buttons
-          const msg = loginResult.timedOut
-            ? 'Sign-in timed out.'
-            : (loginResult.error || 'Sign-in failed.');
-          document.getElementById('setup-status').textContent = msg;
-          const setupMain = document.getElementById('setup-main');
-          if (setupMain) {
-            setupMain.innerHTML = `
-              <button id="setup-retry-btn" class="btn-primary" style="width:100%;margin-bottom:6px">Retry Sign In</button>
-              <button id="setup-apikey-btn2" class="btn-secondary" style="width:100%">Use API key instead</button>
-            `;
-            document.getElementById('setup-retry-btn')?.addEventListener('click', () => {
-              window._loginTriggered = false;
-              detectClaude();
-            });
-            document.getElementById('setup-apikey-btn2')?.addEventListener('click', () => {
-              setupMain.style.display = 'none';
-              document.getElementById('setup-apikey-form').style.display = '';
-            });
-          }
-        }
-      } catch (e) { console.error('[auto-login]', e); }
-      window._loginTriggered = false;
-      // If no buttons were rendered by the timeout/failure path above, add them
-      if (!document.getElementById('setup-retry-btn') && !document.getElementById('setup-login-cancel')) {
-        document.getElementById('setup-status').textContent = 'Sign in to Claude to continue.';
-        const setupMain = document.getElementById('setup-main');
-        if (setupMain) {
-          setupMain.innerHTML = `
-            <button id="setup-retry-fallback" class="btn-primary" style="width:100%;margin-bottom:6px">Retry Sign In</button>
-            <button id="setup-apikey-fallback" class="btn-secondary" style="width:100%">Use API key instead</button>
-          `;
-          document.getElementById('setup-retry-fallback')?.addEventListener('click', () => {
-            window._loginTriggered = false;
-            detectClaude();
-          });
-          document.getElementById('setup-apikey-fallback')?.addEventListener('click', () => {
-            setupMain.style.display = 'none';
-            document.getElementById('setup-apikey-form').style.display = '';
-          });
-        }
-      }
-      return false;
-    }
-
-    document.getElementById('setup-status').textContent = getSetupStatusText(result);
-    if (result.ready) {
-      // Found! Clear polling and start session
-      if (window._claudePoller) { clearInterval(window._claudePoller); window._claudePoller = null; }
-      setup.classList.add('hidden');
-      turnStartTime = Date.now();
-      sessionActive = true;
-      merlin.startSession();
-      setTimeout(updateProgressBar, 2000);
-      return true;
-    }
-    return false;
-  }
-
-  // Check for API key fallback first — skip Claude check if key exists
-  const apiKeyCheck = await merlin.hasApiKey().catch(() => ({ hasKey: false }));
-  if (apiKeyCheck.hasKey) {
-    setup.classList.add('hidden');
-    turnStartTime = Date.now();
-    sessionActive = true;
-    merlin.startSession();
-    return;
-  }
-
-  const found = await detectClaude();
-  if (!found) {
-    // Not found on first check — show setup screen and keep polling
-    clearInterval(window._welcomeInterval);
-    setup.classList.remove('hidden');
-    document.getElementById('setup-status').textContent = 'Checking Claude...';
-    welcomeBubble.parentElement.remove();
-
-    // Poll for Claude — wait for each probe to finish before scheduling the next
-    if (window._claudePoller) clearInterval(window._claudePoller);
-    let _polling = false;
-    window._claudePoller = setInterval(async () => {
-      if (_polling) return; // Previous probe still running — skip this tick
-      _polling = true;
-      try {
-        const detected = await detectClaude();
-        if (detected) {
-          clearInterval(window._claudePoller);
-          window._claudePoller = null;
-          setup.style.animation = 'fadeOut .3s ease forwards';
-          setTimeout(() => { setup.classList.add('hidden'); setup.style.animation = ''; }, 300);
-        }
-      } finally { _polling = false; }
-    }, 3000);
-  }
+  // Don't start the SDK session here. The user sees the chat immediately and can
+  // explore the UI freely. On their first send, main.js kicks off startSession() —
+  // if Claude isn't connected, the SDK failure is translated into a friendly
+  // "Please connect your Claude account to continue" bubble in the chat.
+  // No polling, no setup overlay, no hard blockers.
 
   // When SDK sends first real message, DON'T remove the welcome —
   // let the conversation continue naturally below it
@@ -456,79 +292,8 @@ async function init() {
 }
 
 
-// Setup: Open Claude Desktop / download it if needed
-document.getElementById('setup-auto-btn')?.addEventListener('click', async () => {
-  const status = document.getElementById('setup-status');
-  const btn = document.getElementById('setup-auto-btn');
-  btn.disabled = true;
-  btn.textContent = 'Opening...';
-  status.textContent = 'Opening Claude Desktop...';
-
-  const result = await merlin.installClaude();
-  if (result.success) {
-    status.textContent = 'Checking Claude...';
-    setTimeout(async () => {
-      const check = await merlin.checkSetup();
-      if (check.ready) {
-        setup.style.animation = 'fadeOut .3s ease forwards';
-        setTimeout(() => { setup.classList.add('hidden'); merlin.startSession(); }, 300);
-      } else {
-        status.textContent = getSetupStatusText(check, 'Claude is not ready yet.');
-        resetSetupButton();
-      }
-    }, 1000);
-  } else {
-    status.textContent = result.reason || 'Could not open Claude Desktop.';
-    resetSetupButton();
-  }
-});
-
-// Setup: Manual retry
-document.getElementById('setup-manual-btn')?.addEventListener('click', async () => {
-  document.getElementById('setup-status').textContent = 'Checking Claude...';
-  const result = await merlin.checkSetup();
-  if (result.ready) {
-    setup.style.animation = 'fadeOut .3s ease forwards';
-    setTimeout(() => { setup.classList.add('hidden'); merlin.startSession(); }, 300);
-  } else {
-    document.getElementById('setup-status').textContent = getSetupStatusText(result, 'Claude is not ready yet.');
-  }
-});
-
-// Setup: API key fallback
-document.getElementById('setup-apikey-btn')?.addEventListener('click', () => {
-  document.getElementById('setup-main').style.display = 'none';
-  document.getElementById('setup-apikey-form').style.display = 'block';
-  document.getElementById('setup-status').textContent = 'API key mode (advanced)';
-});
-
-document.getElementById('setup-apikey-back')?.addEventListener('click', () => {
-  document.getElementById('setup-main').style.display = 'block';
-  document.getElementById('setup-apikey-form').style.display = 'none';
-  document.getElementById('setup-status').textContent = '';
-});
-
-document.getElementById('setup-apikey-save')?.addEventListener('click', async () => {
-  const key = document.getElementById('setup-apikey-input').value.trim();
-  const err = document.getElementById('setup-apikey-error');
-  err.textContent = '';
-  if (!key || !key.startsWith('sk-ant-')) {
-    err.textContent = 'Key must start with sk-ant-';
-    return;
-  }
-  const result = await merlin.setApiKey(key);
-  if (result.success) {
-    setup.style.animation = 'fadeOut .3s ease forwards';
-    setTimeout(() => { setup.classList.add('hidden'); merlin.startSession(); }, 300);
-  } else {
-    err.textContent = result.error || 'Invalid key.';
-  }
-});
-
-// Legacy fallback
-document.getElementById('setup-install-btn')?.addEventListener('click', () => {
-  merlin.openClaudeDownload();
-});
+// Setup overlay was deleted — no setup event handlers needed.
+// Claude auth is now checked on message send (see main.js send-message handler).
 
 // ── Message Rendering ───────────────────────────────────────
 function addUserBubble(text) {
@@ -1328,6 +1093,34 @@ merlin.onSdkError((err) => {
   }, delay);
 });
 
+// ── Inline System Messages ──────────────────────────────────
+// Fired by main.js via sendInlineMessage() for non-SDK chat bubbles:
+// auth prompts, engine download status, etc. Completely resets the
+// UI turn state so the user can immediately try again without a
+// stuck typing indicator or dangling session timer.
+merlin.onInlineMessage(({ text, kind }) => {
+  // Clear any in-flight turn state
+  if (typingTimeout) { clearTimeout(typingTimeout); typingTimeout = null; }
+  removeTypingIndicator();
+  stopTickingTimer();
+  finalizeBubble(); // commits any streaming bubble, then resets currentBubble/textBuffer
+  sessionActive = false;
+  isStreaming = false;
+  setInputDisabled(false);
+
+  // Render the inline bubble
+  const bubble = addClaudeBubble();
+  textBuffer = String(text || '');
+  finalizeBubble();
+
+  // Style auth prompts with a subtle amber accent so the user notices
+  if (kind === 'auth') {
+    bubble.style.borderColor = 'rgba(251,191,36,.3)';
+  }
+
+  input.focus();
+});
+
 // ── Update Toast ────────────────────────────────────────────
 merlin.onUpdateAvailable(({ current, latest }) => {
   // Double-check: don't show if versions are equal
@@ -1433,32 +1226,60 @@ if (merlin.onAuthCodePrompt) {
     const btn = document.getElementById('auth-code-submit-btn');
     input.focus();
 
-    function submit() {
+    async function submit() {
       const code = input.value.trim();
       if (!code) return;
       btn.textContent = 'Submitting...';
       btn.disabled = true;
       input.disabled = true;
-      merlin.submitAuthCode(code);
-      // Re-enable after 3s for retry if code was wrong.
-      // Dialog stays open until Cancel, Escape, or successful login.
-      setTimeout(() => {
-        if (!document.getElementById('auth-code-dialog')) return;
+
+      // Use the invoke path so we get feedback on whether the paste actually
+      // reached the CLI subprocess. The legacy `submitAuthCode` fire-and-forget
+      // path silently failed when child.stdin was closed, leaving users with
+      // no indication why their click did nothing.
+      let result = { ok: false, reason: 'no-handler' };
+      if (merlin.submitAuthCodeWithResult) {
+        try {
+          result = await merlin.submitAuthCodeWithResult(code);
+        } catch (e) {
+          result = { ok: false, reason: e && e.message ? e.message : 'invoke-threw' };
+        }
+      } else if (merlin.submitAuthCode) {
+        // Older preload — fall back to fire-and-forget, hope for the best
+        merlin.submitAuthCode(code);
+        result = { ok: true };
+      }
+
+      // Show real feedback instead of the old 3-second-silent-spinner.
+      if (!document.getElementById('auth-code-dialog')) return;
+      let hint = document.getElementById('auth-code-hint');
+      if (!hint) {
+        hint = document.createElement('div');
+        hint.id = 'auth-code-hint';
+        hint.style.cssText = 'font-size:11px;margin-bottom:8px;line-height:1.4';
+        input.parentNode.insertBefore(hint, input.nextSibling);
+      }
+
+      if (result.ok) {
+        hint.style.color = 'var(--text-muted)';
+        hint.textContent = 'Sent to Claude — waiting for it to exchange the code for a token...';
         btn.textContent = 'Submit';
         btn.disabled = false;
         input.disabled = false;
         input.value = '';
         input.focus();
-        // Add hint so user knows they can retry
-        let hint = document.getElementById('auth-code-hint');
-        if (!hint) {
-          hint = document.createElement('div');
-          hint.id = 'auth-code-hint';
-          hint.style.cssText = 'font-size:11px;color:var(--text-muted);margin-bottom:8px';
-          input.parentNode.insertBefore(hint, input.nextSibling);
-        }
-        hint.textContent = 'Code submitted. If it didn\'t work, paste a new one.';
-      }, 3000);
+      } else {
+        hint.style.color = '#ef4444';
+        const reason = result.reason === 'child-stdin-destroyed'
+          ? 'The Claude login process already exited. Close this dialog and click Sign In again to restart.'
+          : result.reason === 'empty'
+          ? 'Please paste the code first.'
+          : 'Could not send the code (' + (result.reason || 'unknown') + '). Close and click Sign In again.';
+        hint.textContent = reason;
+        btn.textContent = 'Submit';
+        btn.disabled = false;
+        input.disabled = false;
+      }
     }
 
     function dismissDialog() {
@@ -1487,80 +1308,43 @@ if (merlin.onAuthCodeDismiss) {
   });
 }
 
-// ── Auth Required Notification ───────────────────────────────
-// Fired when startSession() finds no credentials and returns early
-// (instead of letting the SDK open a browser with no paste dialog).
-// Trigger the explicit login flow, which HAS paste-code support.
-if (merlin.onAuthRequired) {
-  merlin.onAuthRequired(async () => {
-    console.log('[auth] No credentials — triggering explicit login flow');
-
-    // Show inline message so the user isn't staring at a blank loading state
-    const bubble = addClaudeBubble();
-    textBuffer = 'Connecting to your Claude account...\n\nA browser window will open for a quick sign-in. This only happens once.';
-    finalizeBubble();
-    bubble.style.borderColor = 'rgba(251,191,36,.3)';
-
-    try {
-      if (merlin.triggerClaudeLogin) {
-        const result = await merlin.triggerClaudeLogin();
-        if (result.success) {
-          // Dismiss paste dialog if it was open
-          const authDialog = document.getElementById('auth-code-dialog');
-          if (authDialog) authDialog.remove();
-          bubble.textContent = 'Signed in! Starting Merlin...';
-          setTimeout(() => {
-            _restartAttempts = 0;
-            sessionActive = true;
-            merlin.startSession();
-          }, 1000);
-          return;
-        }
-        // Login failed — show message + retry
-        bubble.textContent = result.timedOut
-          ? 'Sign-in timed out. Try again or use an API key.'
-          : (result.error || 'Sign-in failed.');
-      }
-    } catch (e) {
-      console.error('[auth-required] Login error:', e);
-      bubble.textContent = 'Sign-in failed. Try again below.';
-    }
-
-    // Add retry + API key buttons
-    const btnWrap = document.createElement('div');
-    btnWrap.style.cssText = 'display:flex;gap:8px;margin-top:12px';
-    const retryBtn = document.createElement('button');
-    retryBtn.textContent = 'Retry Sign In';
-    retryBtn.className = 'btn-action btn-approve-style';
-    retryBtn.style.cssText = 'width:auto;padding:8px 20px;font-size:13px';
-    retryBtn.onclick = () => {
-      _restartAttempts = 0;
-      sessionActive = true;
-      merlin.startSession();
-    };
-    const apiKeyBtn = document.createElement('button');
-    apiKeyBtn.textContent = 'Use API Key';
-    apiKeyBtn.className = 'btn-action btn-deny-style';
-    apiKeyBtn.style.cssText = 'width:auto;padding:8px 20px;font-size:13px';
-    apiKeyBtn.onclick = () => {
-      // Show API key form if available
-      const apiForm = document.getElementById('setup-apikey-form');
-      if (apiForm) {
-        document.getElementById('setup-container')?.classList.remove('hidden');
-        apiForm.style.display = '';
-      }
-    };
-    btnWrap.appendChild(retryBtn);
-    btnWrap.appendChild(apiKeyBtn);
-    bubble.appendChild(btnWrap);
-  });
-}
+// (onAuthRequired handler removed — the no-credentials path now goes
+// through sendInlineMessage() in main.js, which renders via onInlineMessage
+// above. No setup overlay, no hard blocker.)
 
 // ── Engine Status (binary download progress) ─────────────────
+// Renders the engine download status into a persistent toast at the bottom
+// of the screen. The toast is reused across updates so progress appears to
+// "tick" rather than spamming new bubbles. Auto-dismisses 4s after a
+// "complete" / "ready" message.
+let _engineToast = null;
+let _engineToastTimer = null;
 merlin.onEngineStatus((msg) => {
-  const status = document.getElementById('setup-status');
-  if (status) status.textContent = msg;
   console.log('[engine]', msg);
+  if (!msg) return;
+
+  if (!_engineToast) {
+    _engineToast = document.createElement('div');
+    _engineToast.id = 'engine-toast';
+    _engineToast.style.cssText = 'position:fixed;bottom:20px;left:50%;transform:translateX(-50%) translateY(10px);max-width:420px;padding:10px 16px;background:rgba(20,20,24,0.96);border:1px solid rgba(167,139,250,0.4);border-radius:10px;color:#e4e4e7;font-size:12px;line-height:1.4;z-index:9998;box-shadow:0 8px 32px rgba(0,0,0,0.5);backdrop-filter:blur(12px);opacity:0;transition:all .3s ease';
+    document.body.appendChild(_engineToast);
+  }
+  _engineToast.textContent = '✦ ' + msg;
+  requestAnimationFrame(() => {
+    _engineToast.style.opacity = '1';
+    _engineToast.style.transform = 'translateX(-50%) translateY(0)';
+  });
+
+  // Auto-dismiss on terminal states
+  if (_engineToastTimer) clearTimeout(_engineToastTimer);
+  if (/ready|complete|done|failed/i.test(msg)) {
+    _engineToastTimer = setTimeout(() => {
+      if (!_engineToast) return;
+      _engineToast.style.opacity = '0';
+      _engineToast.style.transform = 'translateX(-50%) translateY(10px)';
+      setTimeout(() => { _engineToast?.remove(); _engineToast = null; }, 300);
+    }, 4000);
+  }
 });
 
 // ── Security: bypass attempt toast ──────────────────────────

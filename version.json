@@ -1,5 +1,5 @@
 {
-  "version": "1.0.4",
+  "version": "1.0.5",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -23,10 +23,10 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.0.4: Production-grade batching across every ad platform — every API call now batched or parallelised.",
+  "notes": "v1.0.5: Claude sign-in fix — no more copy/paste required, no more silent failures.",
   "whatsNew": [
-    "Native Meta batch API: 5 hot paths refactored — lockdown is 10× faster, setup + discover + insights all use batched reads",
-    "All 9 ad platforms now batch-execute via a shared core: Meta native, everyone else via bounded parallel fetch",
-    "34 new unit tests covering ChunkRequests, ParallelFetch, BatchSuccess/Failures, and Meta native batch with mock HTTP server"
+    "Removed BROWSER=none bug that forced users onto the copy/paste fallback page",
+    "Claude Code CLI's built-in localhost callback now works — sign in via browser, done",
+    "Real feedback in the paste dialog when the CLI subprocess exits early (used to silently do nothing)"
   ]
 }

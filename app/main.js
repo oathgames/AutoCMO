@@ -582,6 +582,26 @@ function isClaudeAuthError(message = '') {
   return /auth|authorization|token|sign in|signin|logged in|login|account/i.test(message);
 }
 
+// sendInlineMessage renders a system-generated chat bubble in the renderer
+// without going through the SDK message pipeline. Used for auth prompts,
+// engine download status, etc. — anything that needs to appear in the chat
+// but isn't an SDK response.
+//
+// The renderer-side handler (onInlineMessage) is responsible for:
+//  - Clearing the typing indicator
+//  - Adding a Claude bubble with the text
+//  - Resetting sessionActive + stopping the ticking timer
+//  - Re-enabling the input
+function sendInlineMessage(text, opts = {}) {
+  const payload = { text: String(text || ''), kind: opts.kind || 'info' };
+  if (win && !win.isDestroyed()) {
+    win.webContents.send('inline-message', payload);
+  }
+  if (wsServer && typeof wsServer.broadcast === 'function') {
+    wsServer.broadcast('inline-message', payload);
+  }
+}
+
 async function probeClaudeSetup(force = false) {
   if (!force && cachedClaudeSetup.result && (Date.now() - cachedClaudeSetup.at) < CLAUDE_SETUP_CACHE_MS) {
     return cachedClaudeSetup.result;
@@ -782,7 +802,6 @@ const activeChildProcesses = new Set(); // track spawned Merlin.exe for cleanup
 let pendingMessageQueue = []; // Queue messages sent before SDK is ready
 let pendingApprovals = new Map();
 let activeQuery = null;
-let _awaitingAuth = false; // True while waiting for login flow after auth-required
 let _suppressNextResponse = false; // Suppress SDK responses for internal actions (spell toggle/create)
 
 
@@ -1470,16 +1489,13 @@ async function startSession() {
       sessionEnv.CLAUDE_CODE_OAUTH_TOKEN = token;
       console.log('[auth] Injected OAuth token into session env');
     } else {
-      // CRITICAL: Do NOT proceed to query() without credentials.
-      // The SDK subprocess will attempt interactive auth, open a browser,
-      // and land on a paste-code page with no dialog — stranding the user.
-      // Instead, return early and let the renderer trigger the explicit
-      // login flow (which HAS paste-code dialog support).
-      console.warn('[auth] No credentials found — blocking session, triggering login');
-      if (!_awaitingAuth && win && !win.isDestroyed()) {
-        _awaitingAuth = true;
-        win.webContents.send('auth-required');
-      }
+      // No credentials found. Don't proceed to query() (SDK would open a browser
+      // and strand the user on a paste-code page). Instead, emit a friendly
+      // inline message in the chat and return — the user can explore the UI
+      // freely and re-send when they've connected Claude.
+      console.warn('[auth] No credentials found — sending inline prompt');
+      sendInlineMessage('Please connect your Claude account to continue.');
+      pendingMessageQueue = []; // Drop queued messages — user will re-send after connecting
       return;
     }
   }
@@ -1688,8 +1704,17 @@ async function startSession() {
     // Write to error log for production debugging (no DevTools in packaged builds)
     try { fs.appendFileSync(path.join(appRoot, '.merlin-errors.log'), `${new Date().toISOString()} SDK: ${errMsg}\n${err.stack || ''}\n`); } catch {}
     if (win && !win.isDestroyed()) {
-      win.webContents.send('sdk-error', errMsg);
-      wsServer.broadcast('sdk-error', errMsg);
+      // Auth-related failures get a friendly inline bubble instead of a raw error.
+      // This is the replacement for the deleted setup overlay — we let the user
+      // into the chat unconditionally, then show this when they try to send.
+      const isAuth = isClaudeAuthError(errMsg)
+        || /not logged in|please run \/login|login required|no credentials|account information/i.test(errMsg);
+      if (isAuth) {
+        sendInlineMessage('Please connect your Claude account to continue.', { kind: 'auth' });
+      } else {
+        win.webContents.send('sdk-error', errMsg);
+        wsServer.broadcast('sdk-error', errMsg);
+      }
     }
   } finally {
     // Always reset so session can be restarted after error or completion
@@ -1754,10 +1779,31 @@ ipcMain.handle('start-session', () => {
   return { success: true };
 });
 
-// macOS: trigger the bundled CLI's login flow. Opens a browser for OAuth,
-// creates the "Claude Code-credentials" Keychain entry (or writes
-// ~/.claude/.credentials.json as fallback). Required when the user has
-// Claude Desktop signed in but has never run `claude login` from terminal.
+// Trigger the bundled Claude Agent SDK's `auth login` subprocess. The CLI:
+//   1. Starts its own localhost HTTP listener on a random high port
+//   2. Builds an OAuth URL with code_challenge + state + port params
+//   3. Opens the URL in the user's default browser via its built-in opener
+//      (`open URL` on Mac, `rundll32 url,OpenURL` on Windows, `xdg-open URL`
+//      on Linux — see the SDK's `p3()` function in cli.js)
+//   4. User signs in at claude.ai/oauth/authorize
+//   5. Claude redirects to http://localhost:<port>/callback?code=...
+//   6. The CLI's listener catches the callback, exchanges the code for a
+//      token, writes it to ~/.claude/.credentials.json, exits with code 0
+//
+// What we do in Merlin's main process:
+//   - Spawn the CLI with piped stdio so we can watch its output
+//   - Leave BROWSER unset so the CLI's native opener runs (earlier versions
+//     set BROWSER=none, which BROKE the happy path — the CLI tried to run a
+//     command literally named "none" to open URLs, failed silently, and fell
+//     back to the paste-code page at platform.claude.com that required the
+//     user to manually copy+paste a code that our UI wasn't prompting for)
+//   - Watch ~/.claude for a credentials file appearing (belt-and-suspenders
+//     success detection that catches cases where the CLI writes the file but
+//     doesn't exit cleanly)
+//   - Keep a paste-dialog as a genuine fallback for when the CLI's localhost
+//     listener fails (e.g. a firewall blocks it). Only shown if the CLI
+//     explicitly asks for paste input via stdout.
+//   - Extensive logging so next time something breaks we can actually see why
 ipcMain.handle('trigger-claude-login', async () => {
   try {
     const { spawn } = require('child_process');
@@ -1771,17 +1817,28 @@ ipcMain.handle('trigger-claude-login', async () => {
       : path.join(__dirname, '..', 'node_modules', '@anthropic-ai', 'claude-agent-sdk');
     const cliJs = path.join(sdkDir, 'cli.js');
 
-    // Spawn the CLI's login flow. Prefer bundled Node (invisible, no Dock bounce).
-    // Fall back to ELECTRON_RUN_AS_NODE wrapper if bundled binary not available.
+    console.log('[claude-login] starting — bundledNode:', !!bundledNode, 'sdkDir:', sdkDir);
+
     return new Promise((resolve) => {
       let resolved = false;
-      const finish = (result) => { if (!resolved) { resolved = true; _awaitingAuth = false; resolve(result); } };
+      const finish = (result) => {
+        if (!resolved) {
+          resolved = true;
+          console.log('[claude-login] finish:', JSON.stringify(result));
+          resolve(result);
+        }
+      };
 
-      const loginEnv = { ...process.env, BROWSER: 'none' };
+      // Build the env for the CLI subprocess. Critical details:
+      //   - BROWSER is NOT set to "none" (historical bug — it broke the
+      //     CLI's browser opener). Left unset so the CLI falls through to
+      //     the OS default (`open`, `rundll32`, `xdg-open`).
+      //   - ELECTRON_RUN_AS_NODE is set only when we're using the wrapper
+      //     script fallback, not the bundled real Node binary.
+      const loginEnv = { ...process.env };
+      delete loginEnv.BROWSER; // defensive: clear any inherited BROWSER=none
       if (!bundledNode) loginEnv.ELECTRON_RUN_AS_NODE = '1';
-      // When using bundled Node (real binary), spawn directly — no shell layer needed.
-      // When falling back to the wrapper (shell script on Mac, .cmd on Windows),
-      // shell: true is needed for macOS to execute the script via /bin/sh.
+
       const useBundled = !!bundledNode;
       const child = spawn(nodeExe, [cliJs, 'auth', 'login'], {
         env: loginEnv,
@@ -1790,8 +1847,11 @@ ipcMain.handle('trigger-claude-login', async () => {
         windowsHide: true,
       });
 
-      // Backup signal: watch for credential file creation.
-      // If the CLI writes credentials but doesn't exit cleanly, this catches it.
+      console.log('[claude-login] spawned child pid:', child.pid);
+
+      // Belt-and-suspenders: watch ~/.claude for a credentials file appearing.
+      // Catches cases where the CLI writes credentials but doesn't exit cleanly
+      // (SIGPIPE on stdin close, slow teardown, etc.).
       let credWatcher = null;
       try {
         const claudeDir = path.join(os.homedir(), '.claude');
@@ -1803,148 +1863,157 @@ ipcMain.handle('trigger-claude-login', async () => {
               const raw = fs.readFileSync(path.join(claudeDir, filename), 'utf8').trim();
               const tok = extractToken(raw);
               if (tok) {
-                console.log('[claude-login] Credential file detected via fs.watch');
+                console.log('[claude-login] credential file detected via fs.watch');
                 try { credWatcher.close(); } catch {}
                 credWatcher = null;
                 try { child.kill(); } catch {}
                 finish({ success: true });
               }
-            } catch {}
+            } catch (e) {
+              console.log('[claude-login] fs.watch read error:', e.message);
+            }
           }
         });
       } catch (e) {
         console.warn('[claude-login] fs.watch setup failed:', e.message);
       }
 
-      // 3-minute timeout — accounts for user signing in, potentially 2FA,
-      // copying the code from the browser, and pasting into our dialog
+      // 3-minute timeout — accounts for slow browsers, 2FA prompts, user
+      // typing codes, and corporate SSO redirect chains.
       const uxTimeout = setTimeout(() => {
-        console.error('[claude-login] Timed out after 180s');
+        console.error('[claude-login] timed out after 180s');
         try { credWatcher?.close(); } catch {}
         try { child.kill(); } catch {}
+        if (win && !win.isDestroyed()) win.webContents.send('auth-code-dismiss');
         finish({ success: false, timedOut: true, error: 'Login timed out. Try again or use an API key.' });
       }, 180000);
 
       let stdout = '';
       let stderr = '';
-      let urlOpened = false;
       let pastePromptShown = false;
 
-      // Auth flow (all platforms):
-      //
-      //   1. Spawn `claude auth login` subprocess → prints auth URL to stdout
-      //   2. We detect the URL and open it in the user's default browser via
-      //      shell.openExternal. The system browser handles sign-in — password
-      //      managers, 2FA, SSO, and corporate proxies all work out of the box.
-      //   3. Claude's OAuth redirects to either:
-      //      a) http://localhost:<port>/callback?code=... — the CLI's built-in
-      //         HTTP listener captures this internally and exits cleanly.
-      //      b) https://platform.claude.com/oauth/code/callback?code=... — the
-      //         paste-code fallback page when localhost isn't reachable.
-      //   4. We show the paste-code dialog in the Merlin window IMMEDIATELY
-      //      when we see the auth URL, so the user always has a place to paste
-      //      the code. If the CLI's localhost path (3a) succeeds first, the
-      //      process exits and the renderer dismisses the dialog automatically.
-      //      If the user ends up on the paste page (3b), they copy the code and
-      //      paste it into our dialog, which forwards to child.stdin and the CLI
-      //      exchanges it for a token.
-      //
-      // Why this approach and not an in-app BrowserWindow:
-      //   Past versions tried to intercept the OAuth redirect inside an Electron
-      //   BrowserWindow via webRequest.onBeforeRequest. This worked sometimes but
-      //   was fragile across Electron versions and blocked users on platforms
-      //   where interception silently failed. The system browser is universally
-      //   reliable and matches how every other CLI auth flow works (gh, aws,
-      //   gcloud, kubectl, etc).
-      function openAuthWindow(authUrl) {
-        if (urlOpened) return;
-        urlOpened = true;
-        console.log('[claude-login] Opening auth URL in system browser');
-        shell.openExternal(authUrl);
-        // Show the paste dialog immediately. If CLI captures via localhost first,
-        // the renderer dismisses the dialog on success. Otherwise the user has
-        // somewhere to paste the code from the browser's fallback page.
-        if (!pastePromptShown && win && !win.isDestroyed()) {
-          pastePromptShown = true;
-          win.webContents.send('auth-code-prompt');
-        }
-      }
-
-      function handleOutput(combined) {
-        if (!urlOpened) {
-          // Match any Claude OAuth URL the CLI prints. Patterns we've seen:
-          //   https://claude.ai/oauth/authorize?...
-          //   https://console.anthropic.com/oauth/authorize?...
-          //   https://platform.claude.com/oauth/authorize?...
-          const urlMatch = combined.match(/https:\/\/(?:claude\.ai|console\.anthropic\.com|platform\.claude\.com)\/[^\s\n\r]+/i)
-            || combined.match(/https:\/\/[^\s\n\r]*oauth[^\s\n\r]*/i);
-          if (urlMatch) {
-            openAuthWindow(urlMatch[0]);
-          }
-        }
+      // Detect whether the CLI wants manual paste input. The CLI's auth flow
+      // emits "Paste code here if prompted > " ONLY when its localhost callback
+      // failed and it's falling back to manual entry. If we see this prompt,
+      // show the in-app paste dialog so the user can enter the code from the
+      // browser's platform.claude.com/oauth/code/callback fallback page.
+      function maybeShowPasteDialog(combined) {
+        if (pastePromptShown) return;
+        if (!/paste code|paste the code|authorization code/i.test(combined)) return;
+        pastePromptShown = true;
+        console.log('[claude-login] CLI is asking for manual paste — showing dialog');
+        if (win && !win.isDestroyed()) win.webContents.send('auth-code-prompt');
       }
 
       child.stdout.on('data', (d) => {
         const chunk = d.toString();
         stdout += chunk;
-        console.log('[claude-login] stdout received');
-        handleOutput(stdout + stderr);
+        // Log a redacted preview — first 300 chars, no repeated noise. Tokens
+        // themselves are NEVER printed to stdout by the CLI; the URL contains
+        // only a public client_id and PKCE challenge, so logging the prefix
+        // is safe for debugging without leaking secrets.
+        const preview = chunk.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (preview) console.log('[claude-login] stdout:', preview);
+        maybeShowPasteDialog(stdout + stderr);
       });
 
       child.stderr.on('data', (d) => {
         const chunk = d.toString();
         stderr += chunk;
-        console.log('[claude-login] stderr:', chunk.trim());
-        handleOutput(stdout + stderr);
+        const preview = chunk.replace(/\s+/g, ' ').trim().slice(0, 300);
+        if (preview) console.log('[claude-login] stderr:', preview);
+        maybeShowPasteDialog(stdout + stderr);
       });
 
-      // Listen for the user's pasted auth code from the renderer
-      const pasteHandler = (_, code) => {
-        if (child.stdin && !child.stdin.destroyed && code) {
-          child.stdin.write(code + '\n');
+      // Track the last stdin write result so the renderer can tell the user
+      // whether their paste actually made it into the CLI subprocess. Returned
+      // via the auth-code-submit invoke handler below.
+      let lastPasteResult = null;
+      const pasteHandler = (code) => {
+        if (!code) {
+          lastPasteResult = { ok: false, reason: 'empty' };
+          return lastPasteResult;
+        }
+        if (!child.stdin || child.stdin.destroyed) {
+          console.warn('[claude-login] paste received but child.stdin is destroyed — CLI already exited');
+          lastPasteResult = { ok: false, reason: 'child-stdin-destroyed' };
+          return lastPasteResult;
+        }
+        try {
+          const wrote = child.stdin.write(code + '\n', 'utf8');
+          console.log('[claude-login] wrote', code.length, 'chars to child.stdin, buffered=' + !wrote);
+          lastPasteResult = { ok: true };
+          return lastPasteResult;
+        } catch (e) {
+          console.error('[claude-login] child.stdin.write failed:', e.message);
+          lastPasteResult = { ok: false, reason: e.message };
+          return lastPasteResult;
         }
       };
-      // Use .on (not .once) so the user can retry with a different code
-      ipcMain.on('auth-code-submit', pasteHandler);
+      // Legacy fire-and-forget path (kept for compatibility with older renderers)
+      const legacyPasteHandler = (_, code) => { pasteHandler(code); };
+      ipcMain.on('auth-code-submit', legacyPasteHandler);
+      // New invoke-based path (renderer gets success/failure back)
+      const invokePasteHandler = async (_, code) => pasteHandler(code);
+      ipcMain.handle('auth-code-submit-invoke', invokePasteHandler);
 
       child.on('close', async (code) => {
         clearTimeout(uxTimeout);
         try { credWatcher?.close(); } catch {}
-        // Dismiss the paste dialog in the renderer on CLI exit (success path)
         if (win && !win.isDestroyed()) win.webContents.send('auth-code-dismiss');
-        ipcMain.removeListener('auth-code-submit', pasteHandler);
-        if (resolved) return; // Timeout already fired — don't block with more I/O
+        ipcMain.removeListener('auth-code-submit', legacyPasteHandler);
+        ipcMain.removeHandler('auth-code-submit-invoke');
+        if (resolved) return;
+        console.log('[claude-login] child exited code=' + code + ' stdout-len=' + stdout.length + ' stderr-len=' + stderr.length);
         if (code === 0) {
-          console.log('[claude-login] Login completed successfully');
-          // Mac: persist Keychain credentials to file for instant future launches
+          console.log('[claude-login] login completed successfully');
           if (process.platform === 'darwin') await readMacCredentials();
           finish({ success: true });
         } else {
-          console.error('[claude-login] Exit code:', code);
-          // Even if CLI exits non-zero, check if credentials were created
+          console.error('[claude-login] exit code:', code);
+          // CLI can write credentials and still exit non-zero (race with kill,
+          // stdin close, etc.). Check for a valid credential file anyway.
           const credFile = path.join(os.homedir(), '.claude', '.credentials.json');
           try {
             const raw = fs.readFileSync(credFile, 'utf8').trim();
             if (raw && JSON.parse(raw)) {
+              console.log('[claude-login] credentials file found despite non-zero exit — treating as success');
               finish({ success: true });
               return;
             }
           } catch {}
-          // Mac: also check Keychain
           if (process.platform === 'darwin') {
             const token = await readMacCredentials();
             if (token) { finish({ success: true }); return; }
           }
-          finish({ success: false, error: `Login process exited with code ${code}` });
+          // Include a redacted stderr preview in the error so the renderer can
+          // surface something useful when the user hits "try again".
+          const stderrPreview = stderr.replace(/\s+/g, ' ').trim().slice(0, 200);
+          finish({
+            success: false,
+            error: `Login process exited with code ${code}${stderrPreview ? ': ' + stderrPreview : ''}`,
+          });
         }
       });
 
       child.on('error', (e) => {
         clearTimeout(uxTimeout);
         if (win && !win.isDestroyed()) win.webContents.send('auth-code-dismiss');
-        console.error('[claude-login] Spawn error:', e.message);
+        console.error('[claude-login] spawn error:', e.message);
         finish({ success: false, error: e.message });
       });
+
+      // Small diagnostic: after 5 seconds, log whether we've seen the CLI
+      // print anything. If not, the spawn or the bundled node is probably
+      // broken. This shows up in logs before the 180s timeout fires.
+      setTimeout(() => {
+        if (resolved) return;
+        if (!stdout && !stderr) {
+          console.warn('[claude-login] 5s elapsed with no CLI output — check bundled Node + SDK path');
+        } else {
+          console.log('[claude-login] 5s check: stdout-len=' + stdout.length + ' stderr-len=' + stderr.length);
+        }
+      }, 5000);
     });
   } catch (e) {
     console.error('[trigger-claude-login]', e.message);

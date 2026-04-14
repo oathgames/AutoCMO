@@ -21,7 +21,12 @@ function assertPlatform(v) {
   if (typeof v !== 'string' || !PLATFORM_RE.test(v)) throw new Error('invalid platform');
   return v;
 }
-function assertInt(v) {
+function assertInt(v, defaultValue) {
+  // Undefined → use default (no silent coercion of valid 0 values).
+  if (v === undefined || v === null) {
+    if (defaultValue !== undefined) return defaultValue;
+    throw new Error('missing integer argument');
+  }
   if (typeof v !== 'number' || !Number.isInteger(v) || v < 0) throw new Error('invalid integer');
   return v;
 }
@@ -85,10 +90,10 @@ contextBridge.exposeInMainWorld('merlin', {
   getStatsCache: () => ipcRenderer.invoke('get-stats-cache'),
 
   // Performance + Activity
-  getPerfSummary: (days, brand) => ipcRenderer.invoke('get-perf-summary', assertInt(days || 7), assertBrand(brand)),
+  getPerfSummary: (days, brand) => ipcRenderer.invoke('get-perf-summary', assertInt(days, 7), assertBrand(brand)),
   refreshPerf: (brand) => ipcRenderer.invoke('refresh-perf', assertBrand(brand)),
   getPerfUpdated: (brand) => ipcRenderer.invoke('get-perf-updated', assertBrand(brand)),
-  getActivityFeed: (brand, limit) => ipcRenderer.invoke('get-activity-feed', assertBrand(brand), assertInt(limit || 50)),
+  getActivityFeed: (brand, limit) => ipcRenderer.invoke('get-activity-feed', assertBrand(brand), assertInt(limit, 50)),
 
   // Archive
   getArchiveItems: (filters) => ipcRenderer.invoke('get-archive-items', assertObj(filters)),
@@ -164,6 +169,10 @@ contextBridge.exposeInMainWorld('merlin', {
     const h = (_, err) => cb(err); ipcRenderer.on('sdk-error', h);
     return () => ipcRenderer.removeListener('sdk-error', h);
   },
+  onInlineMessage: (cb) => {
+    const h = (_, data) => cb(data); ipcRenderer.on('inline-message', h);
+    return () => ipcRenderer.removeListener('inline-message', h);
+  },
   onRemoteUserMessage: (cb) => {
     const h = (_, text) => cb(text); ipcRenderer.on('remote-user-message', h);
     return () => ipcRenderer.removeListener('remote-user-message', h);
@@ -221,10 +230,11 @@ contextBridge.exposeInMainWorld('merlin', {
     const h = () => cb(); ipcRenderer.on('auth-code-dismiss', h);
     return () => ipcRenderer.removeListener('auth-code-dismiss', h);
   },
-  onAuthRequired: (cb) => {
-    const h = () => cb(); ipcRenderer.on('auth-required', h);
-    return () => ipcRenderer.removeListener('auth-required', h);
-  },
+  // Two paths:
+  //   - send:   fire-and-forget (legacy, no feedback)
+  //   - invoke: returns { ok, reason? } so the dialog can show the user
+  //             whether the paste actually reached the CLI subprocess
   submitAuthCode: (code) => ipcRenderer.send('auth-code-submit', assertStr(code, 500)),
+  submitAuthCodeWithResult: (code) => ipcRenderer.invoke('auth-code-submit-invoke', assertStr(code, 500)),
   openExternal: (url) => ipcRenderer.invoke('open-external-url', assertStr(url, 2000)),
 });
