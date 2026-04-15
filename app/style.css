@@ -436,7 +436,14 @@ a:hover{text-decoration:underline}
   outline:none;
   max-height:120px;
   transition:border-color .2s;
-  overflow-y:auto;
+  /* REGRESSION GUARD (2026-04-15, input-scrollbar incident): overflow-y
+     starts HIDDEN and autoResize() in renderer.js flips it to `auto` only
+     when scrollHeight > max-height. Chromium on Windows always reserves
+     a vertical scrollbar column when overflow-y is `auto` (even with
+     `scrollbar-gutter: stable: never`), which left a persistent gray
+     track in the input even with a single line of text. The JS-toggled
+     approach eliminates the track entirely when scrolling isn't needed. */
+  overflow-y:hidden;
   scrollbar-width:thin;
   scrollbar-color:rgba(255,255,255,.1) transparent;
 }
@@ -562,9 +569,51 @@ a:hover{text-decoration:underline}
   justify-content:center;
   padding:24px;
 }
-/* .setup-* classes removed — the setup overlay was deleted. Users now
-   go straight to chat after ToS; auth prompts render inline via the
-   sendInlineMessage() path. */
+/* REGRESSION GUARD (2026-04-14, Codex P2 #3 — broken first-launch ToS):
+   These .setup-* classes were fully removed in v1.0.6 along with the
+   old setup overlay. That was a mistake: three other overlays still
+   depend on them, and deleting the CSS left them completely unstyled.
+     - index.html #tos-overlay       (first-launch Terms of Service)
+     - renderer.js #agency-overlay   (agency report card)
+     - renderer.js #trial-overlay    (trial expired)
+   Without these rules the ToS card had no max-width, no centered text,
+   and the mascot rendered as plain "✦" glyph — the first thing a brand-
+   new user saw on install. Partial restoration: only the classes that
+   are still referenced live here. Do NOT delete any of these again
+   without grepping for every consumer in index.html and renderer.js. */
+.setup-card{
+  text-align:center;
+  max-width:340px;
+  width:100%;
+  position:relative;
+}
+.setup-mascot{
+  font-size:24px;
+  margin-bottom:16px;
+  background:linear-gradient(135deg,var(--accent),var(--success));
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+}
+.setup-card h1{
+  font-size:28px;
+  font-weight:800;
+  letter-spacing:-.03em;
+  margin-bottom:4px;
+  background:linear-gradient(135deg,var(--accent),var(--success));
+  -webkit-background-clip:text;
+  -webkit-text-fill-color:transparent;
+}
+.setup-sub{
+  font-size:14px;
+  color:var(--text-muted);
+  margin-bottom:24px;
+}
+.setup-explain{
+  font-size:11px;
+  color:var(--text-dim);
+  margin-bottom:16px;
+  line-height:1.5;
+}
 .btn-secondary{
   width:100%;
   padding:12px;
@@ -909,10 +958,44 @@ body.platform-mac .titlebar-drag{
 .tile-name{font-size:11px;color:var(--text-muted);font-weight:500}
 .tile-credits{font-size:9px;color:var(--success);font-weight:500;margin-top:1px}
 
+/* Tile states (2026-04-15 sidebar segmentation rework):
+   - default          → light gray, brand icon in color (not connected yet)
+   - .connected       → green border + green label (the good state)
+   - .expired         → amber border (token reached its TTL, needs reconnect)
+   - .unavailable     → dark gray, non-interactive, "coming soon" tile
+   The old `[data-stubbed]` attribute is still honored as a shortcut for
+   `.unavailable` so existing markup stays backwards-compatible. */
 .magic-tile.connected{border-color:var(--success-border);background:var(--success-bg)}
 .magic-tile.connected .tile-name{color:var(--success)}
-.magic-tile[data-stubbed]{opacity:.35;pointer-events:none}
-.magic-tile[data-stubbed] .tile-name::after{content:' ·';opacity:.5}
+.magic-tile.expired{border-color:#b45309;background:rgba(180,83,9,.08)}
+.magic-tile.expired .tile-name{color:#f59e0b}
+.magic-tile.expired .tile-name::after{content:' · expired';font-size:9px;opacity:.8}
+
+.magic-tile.unavailable,
+.magic-tile[data-stubbed]{
+  opacity:.38;
+  cursor:not-allowed;
+  pointer-events:auto; /* keep the tooltip reachable on hover */
+  background:rgba(255,255,255,.015);
+  border-color:rgba(255,255,255,.04);
+}
+.magic-tile.unavailable:hover,
+.magic-tile[data-stubbed]:hover{
+  /* Override the generic hover rule so dark gray stays dark gray. */
+  border-color:rgba(255,255,255,.04);
+  background:rgba(255,255,255,.015);
+}
+.magic-tile.unavailable .tile-icon,
+.magic-tile[data-stubbed] .tile-icon{filter:saturate(0) brightness(.75)}
+.magic-tile.unavailable .tile-name,
+.magic-tile[data-stubbed] .tile-name{color:var(--text-dim)}
+.magic-tile.unavailable .tile-name::after,
+.magic-tile[data-stubbed] .tile-name::after{
+  content:' · soon';
+  font-size:9px;
+  opacity:.8;
+  letter-spacing:.02em;
+}
 
 .magic-empty{
   font-size:12px;color:var(--text-dim);

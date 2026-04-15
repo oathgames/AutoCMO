@@ -1,5 +1,5 @@
 {
-  "version": "1.0.9",
+  "version": "1.1.0",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -23,13 +23,10 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.0.9: Wisdom panel now actually renders server data, version notes tooltip no longer overflows the window, scrollbars hide when there's nothing to scroll, deferred-update safety net completes stale asar swaps on next launch, ffmpeg missing error now tells you where to get it, and a sweeping security hardening pass covering billing portal auth, auto-update integrity verification, OAuth relay, encrypted local state on macOS, and preview-API gating.",
+  "notes": "v1.1.0: Platforms regrouped into Universal vs Brand Specific, voice input works on macOS, and every binary call now carries a signed license token.",
   "whatsNew": [
-    "Wisdom panel now reliably shows Top Hooks / Best Formats / Best Timing from the collective network — the old client-server contract was off (every field name) so data-rich responses rendered as 'Collecting...' and 'undefinedx'; every field now matches the actual server shape",
-    "Version notes tooltip no longer overflows the window on long release notes — wraps at word boundaries with a sensible max width",
-    "Scrollbars in the Wisdom panel and archive sidebar now hide when there's nothing to scroll (auto instead of always-scroll)",
-    "Deferred-update safety net: if you auto-update to a new version but close Merlin before clicking the 'Restart' button in the toast, the pending asar swap now completes automatically on the next launch — no more half-updated installs where the titlebar says a new version but features from that version are missing",
-    "Missing-ffmpeg error for voice input now points you at the exact download URL and target path instead of the misleading 'install may be corrupted' message",
-    "Security hardening pass: billing portal and GDPR delete now verify your account email in addition to machine identity, auto-updater verifies SHA-256 checksums for every downloaded artifact with rollback on failure, Meta OAuth relay now forwards the CSRF state and works on any localhost port (not just 8392), sensitive local state files (subscription info, API keys) now use AES-256-GCM encryption on macOS instead of plaintext, preview-quality Amazon SP-API endpoints are now gated behind an opt-in config flag so half-implemented paths no longer surface confusing errors, and a handful of admin / Wisdom API endpoints got tightened auth and IP-based abuse controls"
+    "Platforms split: Universal (one key everywhere) vs Brand Specific (per-brand OAuth)",
+    "Voice input now works on macOS — microphone entitlement shipped",
+    "Signed license token on every binary call — subscription enforced end-to-end"
   ]
 }

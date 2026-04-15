@@ -1,6 +1,6 @@
 {
   "name": "Merlin",
-  "version": "1.0.9",
+  "version": "1.1.0",
   "description": "Merlin — Your AI CMO",
   "main": "app/main.js",
   "scripts": {
@@ -79,7 +79,10 @@
       "hardenedRuntime": true,
       "gatekeeperAssess": false,
       "entitlements": "build/entitlements.mac.plist",
-      "entitlementsInherit": "build/entitlements.mac.plist"
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "extendInfo": {
+        "NSMicrophoneUsageDescription": "Merlin uses your microphone for voice input — transcribing what you say into messages. Audio is processed locally on your device and never uploaded."
+      }
     },
     "dmg": {
       "writeUpdateInfo": false

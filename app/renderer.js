@@ -1115,11 +1115,18 @@ merlin.onSdkError((err) => {
   const bubble = addClaudeBubble();
 
   if (_restartAttempts > MAX_RESTART_ATTEMPTS) {
+    // REGRESSION GUARD (2026-04-14, Codex P3 #6 — stale Desktop nudges):
+    // Merlin no longer requires Claude Desktop — auth runs through the
+    // in-app OAuth flow (triggerClaudeLogin above). These recovery
+    // messages used to tell users to "open Claude Desktop and make
+    // sure you're logged in", which was dead advice that pointed at
+    // the wrong app. Phrase recoveries in terms of the in-app sign-in
+    // the user has already seen.
     let reason;
     if (isClaudeNotFound) {
-      reason = 'Claude CLI is not installed. Install it from claude.ai/download, then click Retry.';
+      reason = 'Merlin could not find its Claude connection. Please reinstall Merlin.';
     } else if (isAuthError) {
-      reason = 'Please open Claude Desktop and make sure you\'re logged in, then click Retry.';
+      reason = 'Your Claude session has expired. Click Retry to sign in again.';
     } else {
       reason = 'Check your internet connection and click Retry when ready.';
     }
@@ -1464,13 +1471,38 @@ if (merlin.onAuthRequired) {
       }
       const result = await merlin.triggerClaudeLogin();
       if (result && result.success) {
-        // Token is verified by main (readCredentials retry loop). Replay.
+        // REGRESSION GUARD (2026-04-14, Codex P1 #1 — duplicate replay):
+        // Do NOT call addUserBubble() here. The original user bubble
+        // is already in the DOM from the first sendMessage() call
+        // (renderer.js line ~3071) — calling addUserBubble again
+        // creates a visible duplicate of the same prompt.
+        //
+        // The renderer IS still responsible for replaying via
+        // merlin.sendMessage(): there are two auth-failure scenarios
+        // and they have different queue states.
+        //
+        //   A) Pre-session auth fail (no creds at startSession):
+        //      message sits in pendingMessageQueue, frozen.
+        //   B) Mid-session auth fail (SDK throws 401 while running):
+        //      message was consumed via resolveNextMessage() and is
+        //      NOT in the queue — nothing would replay without us.
+        //
+        // Main's send-message handler is the single source of truth
+        // for de-duplication: when _queueFrozenForAuth is set, it
+        // clears any stale belt-and-suspenders copy before pushing
+        // the renderer's authoritative replay. So calling sendMessage
+        // here is safe for BOTH scenarios and results in exactly one
+        // delivery to Claude.
+        //
+        // Do NOT "simplify" this to call startSession() — that loses
+        // scenario B (mid-session). Do NOT re-add addUserBubble —
+        // that visibly duplicates scenario A.
         if (pendingMessage) {
-          setStatus('Signed in — replaying your request...');
+          setStatus('Signed in — continuing your request...');
           // Small delay so the user sees the transition
           await new Promise(r => setTimeout(r, 250));
+          bubble.remove(); // remove the "signing in" status bubble
           _lastUserMessage = pendingMessage;
-          addUserBubble(pendingMessage);
           showTypingIndicator();
           turnStartTime = Date.now();
           turnTokens = 0;
@@ -1514,8 +1546,15 @@ function addRetryButton(bubble) {
     try {
       const result = await merlin.triggerClaudeLogin();
       if (result && result.success && _lastUserMessage) {
+        // REGRESSION GUARD (2026-04-14, Codex P1 #1): see the long
+        // comment in the onAuthRequired handler above. DO NOT
+        // addUserBubble — the original is still in the DOM and we'd
+        // visibly duplicate it. sendMessage is still the right replay
+        // path; main.js's send-message handler clears the stale
+        // belt-and-suspenders queue copy (via the _queueFrozenForAuth
+        // check) before pushing, so Claude receives the prompt exactly
+        // once.
         bubble.remove();
-        addUserBubble(_lastUserMessage);
         showTypingIndicator();
         sessionActive = true;
         turnStartTime = Date.now();
@@ -1758,57 +1797,12 @@ function updateStatsBarAndStory(rev, spend, mer) {
   }
 }
 
-function populateStatsCard(cache) {
-  const revenueKeys = ['totalRevenue', 'revenue', 'total_revenue', 'grossRevenue', 'gross_revenue', 'sales', 'totalSales'];
-  const spendKeys = ['totalSpend', 'spend', 'total_spend', 'adSpend', 'ad_spend', 'cost', 'totalCost'];
-  const roasKeys = ['blendedROAS', 'roas', 'blended_roas', 'ROAS', 'returnOnAdSpend'];
-
-  function findKey(obj, keys) {
-    for (const k of keys) { if (obj[k] != null) return obj[k]; }
-    return null;
-  }
-
-  let revenue = null, spend = null, roas = null;
-  let lastUpdated = null;
-
-  if (!cache) {
-    setStatsEmpty();
-    return;
-  }
-
-  const priorityOrder = ['dashboard'];
-  const allKeys = Object.keys(cache);
-  allKeys.forEach(k => { if (k !== 'dashboard') priorityOrder.push(k); });
-
-  for (const key of priorityOrder) {
-    const entry = cache[key];
-    if (!entry?.data) continue;
-    try {
-      const d = JSON.parse(entry.data);
-      if (revenue == null) revenue = findKey(d, revenueKeys);
-      if (spend == null) spend = findKey(d, spendKeys);
-      if (roas == null) roas = findKey(d, roasKeys);
-      if (!lastUpdated || entry.timestamp > lastUpdated) lastUpdated = entry.timestamp;
-    } catch {}
-  }
-
-  const rev = revenue != null ? Number(revenue) : 0;
-  const sp = spend != null ? Number(spend) : 0;
-  const mer = roas != null ? Number(roas) : (sp > 0 ? rev / sp : 0);
-
-  document.getElementById('stats-revenue').textContent = rev > 0 ? fmtMoney(rev) : '--';
-  document.getElementById('stats-spend').textContent = sp > 0 ? fmtMoney(sp) : '--';
-  document.getElementById('stats-roas').textContent = mer > 0 ? mer.toFixed(1) + 'x return' : '--';
-  updateStatsBarAndStory(rev, sp, mer);
-
-  const period = document.getElementById('stats-period');
-  if (lastUpdated) {
-    const ago = Math.round((Date.now() - new Date(lastUpdated).getTime()) / 3600000);
-    period.textContent = ago < 1 ? 'Updated just now' : ago < 24 ? `Updated ${ago}h ago` : `Updated ${Math.round(ago / 24)}d ago`;
-  } else {
-    setStatsEmpty();
-  }
-}
+// populateStatsCard was removed on 2026-04-15 alongside the action-keyed
+// legacy fallback in the revenue overlay click handler. The perf bar is now
+// the single source of truth for brand-scoped revenue/spend/ROAS, and the
+// overlay reads perfState.cache directly. See the REGRESSION GUARD on the
+// #perf-bar click handler (codex audit finding #3) before reintroducing any
+// action-keyed aggregation on the renderer.
 
 // brand-stats-btn removed — revenue tracker opens via perf bar click
 
@@ -1845,27 +1839,56 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
   const sample = w.sample_size || 0;
   sampleEl.textContent = sample > 0 ? `From ${sample.toLocaleString()} anonymized ads` : 'Collecting data...';
 
-  // Wisdom server schema (wisdom-api/worker.js:aggregate):
+  // Wisdom server schema — the client reads BOTH the current and legacy
+  // shapes so it keeps working during a worker redeploy window.
+  //
+  // Current (autocmo-core/wisdom-api/worker.js:aggregate):
   //   hooks:     { [name]: {ctr, cpc, roas, win, cpa?, n} }
   //   formats?:  { [name]: {ctr, roas, win, n} }
   //   timing:    { days: [topDowIndexes], hours: [topHourIndexes] }
   //   platforms: { [name]: {ctr, roas?, n} }
   //   models?:   { [name]: {roas, win, n} }   (min 2 samples)
   //
-  // Old client code read `w.patterns.top_hooks`, `f.avg_roas`, `m.win_rate`,
-  // `timing.best_days`, etc. — NONE of those keys exist in the server
-  // response, so every panel showed "Collecting..." even with server data
-  // present (and the one partial render showed "undefinedx" / "0% wins").
-  // Every field-name below matches the actual server shape.
+  // Legacy (older deployed worker, still live as of 2026-04-15):
+  //   timing:    { best_days: [...], best_hours: [...] }
+  //   platforms: { [name]: {avg_ctr, sample} }
+  //   quality:   { avg_pass_rate, top_fail_reasons }
+  //
+  // REGRESSION GUARD (2026-04-15, wisdom-collecting incident):
+  // The deployed wisdom API worker is a version behind the source tree —
+  // the 2026-04-14 rewrite that renamed `best_days`→`days`, `avg_ctr`→`ctr`,
+  // and `sample`→`n` hasn't hit production yet. Shipping a client that
+  // only understood the NEW keys made every panel show "Collecting..."
+  // even when the API returned real numbers. The normalizers below read
+  // the new key first and fall back to the legacy name so both worker
+  // versions render the same UI. Don't remove the fallbacks until the
+  // server redeploy has been verified live (curl the endpoint, confirm
+  // `days` not `best_days`).
   const hooksObj = (w.hooks && typeof w.hooks === 'object') ? w.hooks : {};
   const formatsObj = (w.formats && typeof w.formats === 'object') ? w.formats : {};
   const modelsObj = (w.models && typeof w.models === 'object') ? w.models : {};
+  const platformsObj = (w.platforms && typeof w.platforms === 'object') ? w.platforms : {};
   const timing = w.timing || {};
+
+  // Key-name normalizer: copy legacy field names onto their new equivalents
+  // if only the old one is present. Leaves new-shape objects untouched.
+  const normalizeRow = (row) => {
+    if (!row || typeof row !== 'object') return {};
+    const out = { ...row };
+    if (out.ctr === undefined && row.avg_ctr !== undefined) out.ctr = row.avg_ctr;
+    if (out.cpc === undefined && row.avg_cpc !== undefined) out.cpc = row.avg_cpc;
+    if (out.roas === undefined && row.avg_roas !== undefined) out.roas = row.avg_roas;
+    if (out.win === undefined && row.win_rate !== undefined) out.win = row.win_rate;
+    if (out.cpa === undefined && row.avg_cpa !== undefined) out.cpa = row.avg_cpa;
+    if (out.n === undefined && row.sample !== undefined) out.n = row.sample;
+    if (out.n === undefined && row.samples !== undefined) out.n = row.samples;
+    return out;
+  };
 
   // Object-keyed → sorted array by roas desc. Fall through defensively on
   // partial rows (e.g. server adds a new field later).
   const objToSortedArray = (obj, nameKey) => Object.entries(obj)
-    .map(([name, v]) => ({ [nameKey]: name, ...(v || {}) }))
+    .map(([name, v]) => ({ [nameKey]: name, ...normalizeRow(v) }))
     .sort((a, b) => (b.roas || 0) - (a.roas || 0));
 
   const topHooks = objToSortedArray(hooksObj, 'hook').slice(0, 4);
@@ -1890,19 +1913,23 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
   const imageModels = allModels.filter(m => !isVideoModel(m.model)).slice(0, 3);
   const videoModels = allModels.filter(m => isVideoModel(m.model)).slice(0, 3);
 
-  // Top scenes / creative styles aren't currently produced by the server
-  // aggregation (no `scene` dimension on ads yet). Keep the slot reserved so
-  // a future server update lights it up automatically without another client
-  // shipping, but for now it stays empty (legitimately "Collecting...").
-  const topScenes = [];
+  // (Removed dead "Creative Styles" slot — the server has no `scene`
+  // dimension and the card was always empty. Replaced with "Top Platforms"
+  // in the grid below, which renders real data from `w.platforms`.)
 
   const dayNames = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   // topKeys in wisdom-api returns numeric day-of-week (0-6) / hour (0-23);
   // defensively coerce in case a stray string slips through.
-  const bestDays = (Array.isArray(timing.days) ? timing.days : [])
+  // Accept both the new (`days`, `hours`) and legacy (`best_days`,
+  // `best_hours`) field names — see REGRESSION GUARD at top of wisdom block.
+  const timingDays = Array.isArray(timing.days) ? timing.days
+    : Array.isArray(timing.best_days) ? timing.best_days : [];
+  const timingHours = Array.isArray(timing.hours) ? timing.hours
+    : Array.isArray(timing.best_hours) ? timing.best_hours : [];
+  const bestDays = timingDays
     .map(i => dayNames[Number(i)] || String(i))
     .join(', ');
-  const bestHours = (Array.isArray(timing.hours) ? timing.hours : [])
+  const bestHours = timingHours
     .map(h => {
       const hh = Number(h);
       if (!Number.isFinite(hh)) return '';
@@ -1911,6 +1938,11 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
     })
     .filter(Boolean)
     .join(', ');
+
+  // Platform breakdown — render a card even when hooks/formats/models
+  // aren't populated, so users see SOME data instead of all-"Collecting..."
+  // tiles. Uses the same old/new key tolerance as everything else.
+  const platformItems = objToSortedArray(platformsObj, 'platform').slice(0, 4);
 
   const empty = '<div style="color:var(--text-dim);font-size:12px">Collecting...</div>';
 
@@ -1935,11 +1967,15 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
   const fmtRoas = (r) => (Number(r) || 0).toFixed(2) + 'x';
   const fmtWinPct = (w) => Math.round((Number(w) || 0) * 100) + '% wins';
 
+  // Prettify raw platform IDs for display ("meta" → "Meta", "tiktok" → "TikTok")
+  const prettyPlatform = (p) => {
+    if (!p) return '';
+    const map = { meta: 'Meta', tiktok: 'TikTok', google: 'Google', amazon: 'Amazon', reddit: 'Reddit', linkedin: 'LinkedIn', shopify: 'Shopify' };
+    return map[String(p).toLowerCase()] || String(p).charAt(0).toUpperCase() + String(p).slice(1);
+  };
+
   const hookItems = topHooks.map(h => ({
     label: h.hook, display: fmtRoas(h.roas), sub: (h.n || 0) + ' ads', val: h.roas || 0,
-  }));
-  const sceneItems = topScenes.map(s => ({
-    label: s.scene, display: fmtRoas(s.roas), sub: (s.n || 0) + ' ads', val: s.roas || 0,
   }));
   const imgItems = imageModels.map(m => ({
     label: m.model, display: fmtRoas(m.roas), sub: fmtWinPct(m.win) + ' · ' + (m.n || 0) + ' ads', val: m.roas || 0,
@@ -1950,6 +1986,20 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
   const fmtItems = formatList.map(f => ({
     label: f.name, display: fmtRoas(f.roas), sub: fmtWinPct(f.win), val: f.roas || 0,
   }));
+  // Platform rows — prefer ROAS as the bar value, fall back to CTR for the
+  // legacy schema where most platform rows have no ROAS field.
+  const platformHasRoas = platformItems.some(p => (p.roas || 0) > 0);
+  const platItems = platformItems.map(p => {
+    const ctrDisplay = p.ctr !== undefined ? (Number(p.ctr) || 0).toFixed(2) + '% CTR' : '—';
+    const display = platformHasRoas ? fmtRoas(p.roas) : ctrDisplay;
+    const sub = (p.n || 0) + ' ads' + (platformHasRoas && p.ctr !== undefined ? ` · ${ctrDisplay}` : '');
+    return {
+      label: prettyPlatform(p.platform),
+      display,
+      sub,
+      val: platformHasRoas ? (p.roas || 0) : (Number(p.ctr) || 0),
+    };
+  });
 
   // Benchmark: compare user's brand to collective averages
   const brand = document.getElementById('brand-select')?.value || '';
@@ -1968,12 +2018,16 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
     </div>`;
   }
 
-  // Creative intelligence: actionable insight from top data
+  // Creative intelligence: actionable insight from top data.
+  // (Fixed field name — old code read `avg_roas` which never existed on the
+  // current server shape, so this block was dead for every user.)
   let intelHtml = '';
   if (topHooks.length >= 2) {
     const best = topHooks[0];
     const worst = topHooks[topHooks.length - 1];
-    const diff = best.avg_roas > 0 && worst.avg_roas > 0 ? Math.round(((best.avg_roas - worst.avg_roas) / worst.avg_roas) * 100) : 0;
+    const bestR = Number(best.roas) || 0;
+    const worstR = Number(worst.roas) || 0;
+    const diff = bestR > 0 && worstR > 0 ? Math.round(((bestR - worstR) / worstR) * 100) : 0;
     if (diff > 10) {
       intelHtml = `<div style="grid-column:1/-1;padding:10px 14px;background:rgba(139,92,246,.06);border:1px solid rgba(139,92,246,.15);border-radius:8px;margin-bottom:8px">
         <span style="font-size:12px;color:var(--text-muted)">✦ <strong>${escapeHtml(best.hook)}</strong> hooks outperform <strong>${escapeHtml(worst.hook)}</strong> by ${diff}% in your vertical right now.</span>
@@ -2002,8 +2056,8 @@ document.getElementById('wisdom-header-btn').addEventListener('click', async () 
       ${rankRows(hookItems, i => i.val, '#22c55e', hookItems.length ? Math.max(...hookItems.map(i => i.val)) : 1)}
     </div>
     <div>
-      <div class="wisdom-card-title">Creative Styles</div>
-      ${rankRows(sceneItems, i => i.val, '#8b5cf6', sceneItems.length ? Math.max(...sceneItems.map(i => i.val)) : 1)}
+      <div class="wisdom-card-title">Top Platforms</div>
+      ${rankRows(platItems, i => i.val, '#8b5cf6', platItems.length ? Math.max(...platItems.map(i => i.val)) : 1)}
     </div>
     <div>
       <div class="wisdom-card-title">Best Formats</div>
@@ -2051,59 +2105,79 @@ document.getElementById('stats-share').addEventListener('click', async () => {
   setTimeout(() => { btn.innerHTML = orig; btn.style.background = ''; }, 2000);
 });
 
+// Paint the Universal + Brand Specific tile groups with connection state.
+//
+// Previously the sidebar had separate "Connected" and "Available" sections
+// and connected tiles were cloned into the Connected list while the original
+// was hidden. The groups-by-scope layout keeps tiles in place — we just
+// toggle a `.connected` class on each tile so the visual indicator (green
+// accent) shows without re-parenting the DOM. Stubbed / unavailable tiles
+// stay in their original position and render dark gray via `.unavailable`.
 function loadConnections() {
   const brand = document.getElementById('brand-select')?.value;
   merlin.getConnectedPlatforms(brand).then((connected) => {
-    const connectedSection = document.getElementById('connected-tiles');
-    const noConnections = document.getElementById('no-connections');
-    const availableTiles = document.getElementById('available-tiles');
+    const allTiles = document.querySelectorAll('#universal-tiles .magic-tile, #brand-tiles .magic-tile');
 
-    // Always reset: show all available tiles, clear connected section
-    connectedSection.innerHTML = '';
-    availableTiles.querySelectorAll('.magic-tile').forEach(t => {
-      t.style.display = '';
-      t.classList.remove('connected');
-    });
-
-    if (!connected || connected.length === 0) {
-      noConnections.style.display = 'block';
-      return;
-    }
-
-    noConnections.style.display = 'none';
-
-    connected.forEach(conn => {
-      // Support both old format (string) and new format ({ platform, status })
-      const platform = typeof conn === 'string' ? conn : conn.platform;
-      const status = typeof conn === 'string' ? 'connected' : (conn.status || 'connected');
-      const tile = availableTiles.querySelector(`.magic-tile[data-platform="${platform}"]`);
-      if (tile) {
-        const clone = tile.cloneNode(true);
-        clone.classList.add('connected');
-        if (status === 'expired') clone.classList.add('expired');
-        // Right-click to disconnect
-        clone.addEventListener('contextmenu', (e) => {
-          e.preventDefault();
-          const name = clone.querySelector('.tile-name')?.textContent || platform;
-          showContextMenu(e, [
-            { label: 'Disconnect', danger: true, action: () => {
-              showModal({
-                title: `Disconnect ${name}?`,
-                body: 'You can reconnect anytime from the sidebar.',
-                confirmLabel: 'Disconnect',
-                cancelLabel: 'Keep',
-                onConfirm: async () => {
-                  await merlin.disconnectPlatform(platform, document.getElementById('brand-select')?.value || '');
-                  loadConnections();
-                },
-              });
-            }},
-          ]);
-        });
-        connectedSection.appendChild(clone);
-        tile.style.display = 'none';
+    // Reset every tile to its default state first. Stubbed platforms get
+    // `.unavailable` sticky-applied so they stay dark gray regardless of
+    // connection state — you can't be "connected" to something that isn't
+    // shipped yet.
+    allTiles.forEach(t => {
+      t.classList.remove('connected', 'expired');
+      if (t.dataset.stubbed === 'true') {
+        t.classList.add('unavailable');
+      } else {
+        t.classList.remove('unavailable');
       }
     });
+
+    if (!connected || connected.length === 0) return;
+
+    // Build a lookup for quick access by platform name.
+    const state = new Map();
+    connected.forEach(conn => {
+      const platform = typeof conn === 'string' ? conn : conn.platform;
+      const status = typeof conn === 'string' ? 'connected' : (conn.status || 'connected');
+      state.set(platform, status);
+    });
+
+    allTiles.forEach(tile => {
+      const platform = tile.dataset.platform;
+      if (!platform) return;
+      if (tile.dataset.stubbed === 'true') return; // unavailable wins
+      const status = state.get(platform);
+      if (!status) return;
+      tile.classList.add('connected');
+      if (status === 'expired') tile.classList.add('expired');
+    });
+
+    // Re-attach (once) the right-click → disconnect handler. We use
+    // event delegation so the handler stays attached across rerenders.
+    const panel = document.getElementById('magic-panel');
+    if (panel && !panel.dataset.disconnectHandlerAttached) {
+      panel.dataset.disconnectHandlerAttached = '1';
+      panel.addEventListener('contextmenu', (e) => {
+        const tile = e.target.closest('.magic-tile');
+        if (!tile || !tile.classList.contains('connected')) return;
+        e.preventDefault();
+        const platform = tile.dataset.platform;
+        const name = tile.querySelector('.tile-name')?.textContent || platform;
+        showContextMenu(e, [
+          { label: 'Disconnect', danger: true, action: () => {
+            showModal({
+              title: `Disconnect ${name}?`,
+              body: 'You can reconnect anytime from the sidebar.',
+              confirmLabel: 'Disconnect',
+              cancelLabel: 'Keep',
+              onConfirm: async () => {
+                await merlin.disconnectPlatform(platform, document.getElementById('brand-select')?.value || '');
+                loadConnections();
+              },
+            });
+          }},
+        ]);
+      });
+    }
   }).catch((err) => { console.warn('[connections]', err); });
 }
 
@@ -2124,8 +2198,11 @@ document.getElementById('magic-btn').addEventListener('click', () => {
     const creditBrand = document.getElementById('brand-select')?.value || '';
     merlin.getCredits(creditBrand).then((credits) => {
       if (!credits) return;
-      // Show credits as tooltip on hover, not inline text
+      // Show credits as tooltip on hover, not inline text.
+      // Skip stubbed (`unavailable`) tiles so their "Coming soon" tooltip
+      // survives — stubbed platforms never have credits anyway.
       document.querySelectorAll('.magic-tile').forEach(tile => {
+        if (tile.dataset.stubbed === 'true') return;
         const platform = tile.dataset.platform;
         const existing = tile.querySelector('.tile-credits');
         if (existing) existing.remove();
@@ -3258,10 +3335,25 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape' && isRecording) cancelRecording();
 });
 
-// Auto-resize textarea
+// Auto-resize textarea.
+//
+// REGRESSION GUARD (2026-04-15, input-scrollbar incident):
+// overflow-y stays `hidden` by default (see matching comment in
+// style.css) and we flip it to `auto` only when the text is longer than
+// the 120px cap. Chromium otherwise reserves a scrollbar track for
+// single-line content, which paying users reported as a visible gray
+// bar on the right edge of the input.
 function autoResize() {
   input.style.height = 'auto';
-  input.style.height = Math.min(input.scrollHeight, 120) + 'px';
+  const MAX_INPUT_HEIGHT = 120;
+  const contentHeight = input.scrollHeight;
+  if (contentHeight > MAX_INPUT_HEIGHT) {
+    input.style.height = MAX_INPUT_HEIGHT + 'px';
+    input.style.overflowY = 'auto';
+  } else {
+    input.style.height = contentHeight + 'px';
+    input.style.overflowY = 'hidden';
+  }
 }
 input.addEventListener('input', autoResize);
 // User typing over interim voice text commits it to normal color
@@ -3739,21 +3831,37 @@ async function loadPerfBar(days, brandOverride) {
     if (perf && perf.generatedAt) {
       // Data exists (even if revenue/spend are zero — that's a valid state, not "no data")
       renderPerfBar(perf);
-    } else if (!cached && brand && !perfState._refreshedBrands?.has(brand)) {
-      // No data for this brand AND we haven't already tried refreshing it.
-      // Guard prevents infinite refresh loops for brands with no connected platforms.
+    } else if (!cached && brand) {
+      // REGRESSION GUARD (2026-04-15, codex per-brand revenue audit — finding #1):
+      // The refresh-loop guard is keyed by `${brand}:${days}`, not just
+      // `brand`. Previously the key was brand-only, which meant a single
+      // 7D refresh on launch "satisfied" the guard forever — so when the
+      // user clicked 30D or 90D and the cache miss hit this branch,
+      // loadPerfBar skipped the refresh and rendered empty. The UI
+      // appeared to quietly lose longer windows. Key the guard by the
+      // full (brand, period) pair so each period gets exactly one
+      // refresh attempt per session, independently.
+      const refreshKey = `${brand}:${days}`;
       if (!perfState._refreshedBrands) perfState._refreshedBrands = new Set();
-      perfState._refreshedBrands.add(brand);
-      renderPerfBar(null);
-      try {
-        await merlin.refreshPerf(brand);
-        // Re-check that user hasn't switched brands during the 30-60s refresh
-        if (perfState.currentBrand !== brand || perfState.currentPeriod !== days) return;
-        const retryPerf = await fetchPerfData(days, brand);
-        if (perfState.currentBrand === brand && perfState.currentPeriod === days) {
-          renderPerfBar(retryPerf);
-        }
-      } catch {}
+      if (!perfState._refreshedBrands.has(refreshKey)) {
+        perfState._refreshedBrands.add(refreshKey);
+        renderPerfBar(null);
+        try {
+          // Pass `days` through — the binary writes the dashboard file with
+          // period_days: <days>, and computePerfSummary will only surface
+          // files whose period matches. Omitting this would default to a
+          // 1-day refresh that the perf bar then couldn't read back.
+          await merlin.refreshPerf(brand, days);
+          // Re-check that user hasn't switched brands during the 30-60s refresh
+          if (perfState.currentBrand !== brand || perfState.currentPeriod !== days) return;
+          const retryPerf = await fetchPerfData(days, brand);
+          if (perfState.currentBrand === brand && perfState.currentPeriod === days) {
+            renderPerfBar(retryPerf);
+          }
+        } catch {}
+      } else {
+        renderPerfBar(null);
+      }
     } else if (!cached) {
       renderPerfBar(null);
     }
@@ -3783,13 +3891,24 @@ loadBrands().then(() => {
   const activeBrand = document.getElementById('brand-select')?.value || '';
   loadPerfBar(7, activeBrand);
 
-  // Background perf refresh — pull fresh data on launch if brand data is stale
+  // Background perf refresh — pull fresh data on launch if brand data is stale.
+  //
+  // REGRESSION GUARD (2026-04-15, codex per-brand revenue audit — finding #1):
+  // Pass the active period to refreshPerf. Previously this called
+  // refreshPerf(activeBrand) with no days argument, which defaults to 1
+  // in the main-process handler. The binary then wrote a 1-day dashboard
+  // file, and computePerfSummary — which now filters by period_days —
+  // would not surface it for the user's 7D/30D/90D selection. The
+  // on-launch refresh must match the UI's active period so the file
+  // landing on disk is actually consumable.
   (async function refreshPerfOnLaunch() {
     try {
       const lastUpdate = await merlin.getPerfUpdated(activeBrand);
       const stale = !lastUpdate || (Date.now() - new Date(lastUpdate).getTime() > 4 * 60 * 60 * 1000);
       if (stale) {
-        await merlin.refreshPerf(activeBrand);
+        const launchPeriodAttr = document.querySelector('.perf-period-btn.active')?.dataset.days;
+        const launchPeriod = Number.isFinite(parseInt(launchPeriodAttr)) ? parseInt(launchPeriodAttr) : 7;
+        await merlin.refreshPerf(activeBrand, launchPeriod);
         // Re-read the current brand from DOM — user may have switched during the 30-60s refresh
         const currentBrand = document.getElementById('brand-select')?.value || '';
         if (currentBrand === activeBrand) {
@@ -3803,12 +3922,15 @@ loadBrands().then(() => {
 });
 
 // Periodic refresh — every 4 hours, refresh the currently selected brand
+// for the CURRENTLY selected period. See the REGRESSION GUARD above on
+// refreshPerfOnLaunch for why days must flow through.
 setInterval(async () => {
   try {
     const activeBrand = document.getElementById('brand-select')?.value || '';
-    await merlin.refreshPerf(activeBrand);
     const activePeriod = document.querySelector('.perf-period-btn.active')?.dataset.days || '7';
-    loadPerfBar(parseInt(activePeriod), activeBrand);
+    const days = parseInt(activePeriod) || 7;
+    await merlin.refreshPerf(activeBrand, days);
+    loadPerfBar(days, activeBrand);
   } catch {}
 }, 4 * 60 * 60 * 1000); // every 4 hours
 
@@ -3988,7 +4110,27 @@ document.getElementById('perf-bar').addEventListener('click', async (e) => {
   }
 
   overlay.classList.remove('hidden');
-  // Use perf state cache (same source as perf bar) — unified data
+  // REGRESSION GUARD (2026-04-15, codex per-brand revenue audit — findings #3 + #5):
+  // Use perfState.cache as the SINGLE source of truth for this overlay.
+  //
+  // Previously, when the perf cache was empty this handler fell back to
+  // `merlin.getStatsCache()` which is keyed only by action name — not
+  // brand and not period. A cached "dashboard" entry from a different
+  // brand would populate this overlay as if it belonged to the current
+  // brand, and the loose heuristic in populateStatsCard would happily
+  // pick the first revenue-looking field it saw from any action. That
+  // stitched together Frankenstein metrics from unrelated brands.
+  //
+  // The overlay now shows `setStatsEmpty()` when there is no
+  // brand-scoped perf data, which is accurate and honest. The revenue
+  // bar in the header will trigger a targeted refresh for the selected
+  // period, and the overlay reads whatever lands in perfState.cache.
+  //
+  // Also: `days === 1` is labeled "Yesterday", not "Today". Meta,
+  // TikTok, Google, and Amazon all report yesterday's calendar data on
+  // a days=1 request, so labeling the aggregate as "Today" was a lie —
+  // it showed yesterday's spend next to yesterday's revenue, not a live
+  // current-day number.
   try {
     const brand = document.getElementById('brand-select')?.value || '';
     const days = perfState.currentPeriod || 7;
@@ -4002,15 +4144,17 @@ document.getElementById('perf-bar').addEventListener('click', async (e) => {
       document.getElementById('stats-revenue').textContent = rev > 0 ? fmtMoney(rev) : '--';
       document.getElementById('stats-spend').textContent = spend > 0 ? fmtMoney(spend) : '--';
       document.getElementById('stats-roas').textContent = mer > 0 ? mer.toFixed(1) + 'x return' : '--';
-      const periodLabels = { 1: 'Today', 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last 12 months' };
+      const periodLabels = { 1: 'Yesterday', 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last 12 months' };
       document.getElementById('stats-period').textContent = periodLabels[days] || `Last ${days} days`;
       updateStatsBarAndStory(rev, spend, mer);
     } else {
-      // Fallback to stats cache for legacy compat
-      const cache = await merlin.getStatsCache();
-      populateStatsCard(cache);
+      // No brand-scoped perf data available. DO NOT fall back to the
+      // action-keyed stats cache — see the regression guard above.
+      setStatsEmpty();
     }
-  } catch {}
+  } catch {
+    setStatsEmpty();
+  }
 });
 
 // ── Activity Feed (full panel view, toggled via Activity button) ──
@@ -4086,22 +4230,83 @@ async function loadActivityFeed() {
       const detail = item.detail || '';
       const product = item.product ? ` · ${item.product}` : '';
 
+      // Convert the raw action + detail into a plain-English description.
+      //
+      // REGRESSION GUARD (2026-04-15, human-readable-activity incident):
+      // Spell entries used to render as the raw UUID — "a5c5e05c3107f48c0
+      // completed" — because the default case did
+      // `spellName = action.replace('spell-','')` which for auto-created
+      // spells (taskId is a 16-char hex hash) produces the hash itself,
+      // not a name. The `detail` field ALREADY contains a human sentence
+      // ("Check mad-chill product completeness") — we just weren't
+      // reading it. Always prefer `detail` over action-derived labels.
+      // If you add a new action, either extend this switch with a short
+      // label OR make sure the binary writes a readable `detail` string
+      // on the activity.jsonl entry.
+      const cleanDetail = (s) => {
+        if (!s || typeof s !== 'string') return '';
+        // Trim, strip leading emoji/punctuation, cap at 120 chars.
+        const out = s.trim().replace(/^[\-\s·•]+/, '');
+        return out.length > 120 ? out.slice(0, 117) + '…' : out;
+      };
+      const humanizeSpellId = (id) => {
+        if (!id) return 'Spell';
+        // Strip "spell-" prefix and any leading brand segment
+        // ("ivoryella-daily-ads" → "daily ads").
+        const stripped = id.replace(/^spell-/, '');
+        // If it looks like a raw hex hash (8+ hex chars, no dashes),
+        // there's nothing nice to show — fall through to "Scheduled spell".
+        if (/^[0-9a-f]{8,}$/i.test(stripped)) return 'Scheduled spell';
+        // Otherwise reshape "daily-ads" → "Daily ads".
+        const words = stripped.replace(/-/g, ' ').trim();
+        if (!words) return 'Scheduled spell';
+        return words.charAt(0).toUpperCase() + words.slice(1);
+      };
+      const prettyDetail = cleanDetail(detail);
+      // Is this detail a technical metadata string (e.g. "model:kling
+      // duration:15s") or a real sentence? Metadata strings stay out of
+      // the activity UI — we show the preset label instead.
+      const isTechDetail = (s) => {
+        if (!s) return true;
+        // All lowercase colon-separated key:value pairs = technical.
+        if (/^[a-z0-9_:.\s-]+$/.test(s) && s.includes(':') && !/\s[A-Z]/.test(s)) return true;
+        return false;
+      };
+      const friendlyDetail = isTechDetail(prettyDetail) ? '' : prettyDetail;
+
       let desc = '';
       switch (action) {
-        case 'video': desc = `New video${product}`; break;
-        case 'image': desc = `New ad image${product}`; break;
-        case 'blog': desc = `Blog post published`; break;
-        case 'kill': desc = `Ad paused${detail ? ' — ' + detail : ''}`; break;
-        case 'scale': desc = `Winner scaled${detail ? ' — ' + detail : ''}`; break;
-        case 'meta-push': desc = `Ad live on Meta`; break;
-        case 'dashboard': desc = `Performance check`; break;
+        case 'video': desc = friendlyDetail || `New video${product}`; break;
+        case 'image': desc = friendlyDetail || `New ad image${product}`; break;
+        case 'blog': desc = friendlyDetail || 'Blog post published'; break;
+        case 'kill': desc = `Ad paused${friendlyDetail ? ' — ' + friendlyDetail : ''}`; break;
+        case 'scale': desc = `Winner scaled${friendlyDetail ? ' — ' + friendlyDetail : ''}`; break;
+        case 'meta-push': desc = friendlyDetail || 'Ad live on Meta'; break;
+        case 'tiktok-push': desc = friendlyDetail || 'Ad live on TikTok'; break;
+        case 'google-ads-push': desc = friendlyDetail || 'Ad live on Google'; break;
+        case 'amazon-ads-push': desc = friendlyDetail || 'Ad live on Amazon'; break;
+        case 'reddit-create-ad': desc = friendlyDetail || 'Ad live on Reddit'; break;
+        case 'linkedin-push': desc = friendlyDetail || 'Ad live on LinkedIn'; break;
+        case 'dashboard': desc = friendlyDetail || 'Performance check'; break;
+        case 'report': desc = friendlyDetail || 'Report generated'; break;
         default:
-          // Clean up technical strings for non-technical users
-          if (action.startsWith('spell-')) {
-            const spellName = action.replace('spell-', '').replace(/-/g, ' ');
-            desc = detail?.includes('failed') ? `⚠ ${spellName} failed` : `✓ ${spellName} completed`;
-          } else {
+          if (action && action.startsWith('spell-')) {
+            // Prefer the human detail; fall back to a prettified name.
+            const spellName = humanizeSpellId(action);
+            const failed = prettyDetail.toLowerCase().includes('failed')
+              || (item.type === 'error');
+            if (prettyDetail && !prettyDetail.toLowerCase().endsWith('completed')
+                             && !prettyDetail.toLowerCase().endsWith('failed')) {
+              desc = failed ? `⚠ ${prettyDetail}` : `✓ ${prettyDetail}`;
+            } else {
+              desc = failed ? `⚠ ${spellName} failed` : `✓ ${spellName} completed`;
+            }
+          } else if (prettyDetail) {
+            desc = prettyDetail;
+          } else if (action) {
             desc = action.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+          } else {
+            desc = 'Activity';
           }
       }
 

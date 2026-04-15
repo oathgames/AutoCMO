@@ -475,15 +475,13 @@ async function readCredentials() {
     } catch {}
   }
 
-  // 4. Windows — check alternate credential file locations AND Credential
-  //    Manager via PowerShell. Claude Code's CLI primarily stores at
-  //    ~/.claude/.credentials.json (already checked as CLAUDE_CRED_FILE at
-  //    the top), but older versions or the Claude Desktop app may store
-  //    elsewhere. Codex P2 #6: we used to skip Credential Manager entirely
-  //    "because it needs P/Invoke" — but we can shell out to PowerShell's
-  //    Get-StoredCredential or use the built-in cmdkey command. It's slow
-  //    (~200ms) but runs only on startup and only if the filesystem checks
-  //    already failed.
+  // 4. Windows — check alternate credential file locations. Claude Code's
+  //    CLI primarily stores at ~/.claude/.credentials.json (already
+  //    checked as CLAUDE_CRED_FILE at the top of this function), but
+  //    older versions may still write to %APPDATA%/Claude or similar.
+  //    We intentionally do NOT probe Windows Credential Manager — see
+  //    the REGRESSION GUARD below for the full history (Codex P1 #2,
+  //    2026-04-14).
   if (process.platform === 'win32') {
     const winCredPaths = [
       path.join(process.env.APPDATA || '', 'Claude', '.credentials.json'),
@@ -503,29 +501,26 @@ async function readCredentials() {
       } catch {}
     }
 
-    // Windows Credential Manager fallback via PowerShell. We query for any
-    // credential whose Target name contains "Claude" or "Anthropic". This
-    // catches tokens written by future CLI versions or by Claude Desktop.
-    // Wrapped in a 3s timeout so a hung PowerShell doesn't block startup.
-    try {
-      const { execSync } = require('child_process');
-      // cmdkey /list is native Windows and doesn't need PowerShell — faster.
-      // It only lists Target names, not secrets, but it tells us whether a
-      // Claude-related credential exists. If one does, the actual read
-      // requires a third-party module, so we log for debugging and move on.
-      const cmdkeyOut = execSync('cmdkey /list', { timeout: 3000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
-      const claudeTargets = (cmdkeyOut || '')
-        .split('\n')
-        .filter(line => /target:.*\b(claude|anthropic)\b/i.test(line))
-        .map(line => line.replace(/^\s*Target:\s*/i, '').trim());
-      if (claudeTargets.length > 0) {
-        console.log('[auth] Windows Credential Manager has Claude entries:', claudeTargets.join(', '));
-        console.log('[auth] (Reading the actual secret requires a native module — falling through to re-auth)');
-      }
-    } catch (e) {
-      // cmdkey missing or timed out — not fatal, just skip the check.
-      console.log('[auth] Windows Credential Manager check skipped:', e.message);
-    }
+    // REGRESSION GUARD (2026-04-14, Codex P1 #2 — misleading cmdkey probe):
+    // Do NOT add a `cmdkey /list` fallback here. A previous version
+    // walked Windows Credential Manager entries, detected anything
+    // whose Target name contained "Claude" or "Anthropic", and logged
+    // "Credential Manager has Claude entries" — giving the honest
+    // impression that those credentials could actually be used. They
+    // cannot: cmdkey only lists Target names, and the DPAPI blob under
+    // each Target needs a native Win32 addon (CredReadW + CryptUnprotectData)
+    // to decrypt. Pure Node has no safe way to read it, so the detection
+    // did nothing except pollute the log and mislead future debuggers.
+    //
+    // For Claude Code CLI users this is a non-issue: the CLI writes its
+    // OAuth token to ~/.claude/.credentials.json (checked first at the
+    // top of this function), not to Credential Manager. For Claude
+    // Desktop users the token format is different and not consumable
+    // by the SDK anyway, so even a working reader would not help.
+    //
+    // If you are tempted to re-add "detect credentials we can't read",
+    // add a working DPAPI reader instead. Otherwise leave this path
+    // explicitly empty — silence beats a false positive.
   }
 
   console.log('[auth] No credentials found in any location');
@@ -779,23 +774,19 @@ async function probeClaudeSetup(force = false) {
         cachedClaudeSetup = { at: Date.now(), result };
         return result;
       } else if (/timed? ?out/i.test(errorMessage)) {
-        // SDK timed out connecting to Claude Desktop. Most common cause on Mac:
-        // Claude Desktop is open but still initializing, or user hasn't completed
-        // the first-run onboarding in Claude Desktop.
-        if (desktop.running) {
-          reason = 'Claude Desktop is open but still starting up. Wait a few seconds and retry, or make sure you\'ve completed the Claude sign-in.';
-        } else {
-          reason = 'Connection to Claude timed out. Open Claude Desktop and sign in first.';
-        }
+        // REGRESSION GUARD (2026-04-14, Codex P3 #6): probe messages
+        // used to push users at Claude Desktop ("Open Claude Desktop
+        // and sign in first"), which is no longer relevant — Merlin
+        // auths through the in-app OAuth flow (triggerClaudeLogin).
+        // Keep reasons focused on the in-app retry path. Do not re-
+        // introduce Desktop install/launch prompts here without
+        // matching UI that can actually act on them.
+        reason = 'Connection to Claude timed out. Click Retry to sign in again.';
       } else if (/ECONNREFUSED|ENOENT|spawn|EPIPE/i.test(errorMessage)) {
-        // SDK can't reach the Claude Code CLI at all
-        reason = 'Merlin could not find the Claude connection. Make sure Claude Desktop is fully open and signed in. If this persists, try reinstalling Claude Desktop from claude.ai/download.';
-      } else if (desktop.running) {
-        reason = 'Claude Desktop is open, but Merlin could not connect yet. Make sure you\'re signed in inside Claude Desktop, then retry.';
-      } else if (desktop.installed) {
-        reason = 'Claude Desktop is installed. Open it to finish connecting Merlin.';
+        // SDK can't reach the bundled Claude Code runtime at all.
+        reason = 'Merlin could not find its Claude connection. Please reinstall Merlin.';
       } else {
-        reason = 'Claude Desktop is not installed yet. Install it to continue, or use an API key.';
+        reason = 'Merlin could not reach Claude. Click Retry to sign in again.';
       }
 
       result = {
@@ -1043,10 +1034,44 @@ async function createWindow() {
     return { action: 'deny' }; // Never open new Electron windows
   });
 
-  // Grant microphone permission for voice input (Web Speech API)
-  win.webContents.session.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'media') { callback(true); return; }
-    callback(false);
+  // Grant microphone permission for voice input.
+  //
+  // REGRESSION GUARD (2026-04-15, mic-in-production incident):
+  // Dev mode worked because Electron auto-grants media permissions in the
+  // default session when the window's URL is `file://`. Packaged builds
+  // route through Chromium's full permission pipeline, which calls TWO
+  // separate handlers:
+  //
+  //   1. setPermissionRequestHandler — async, fires when getUserMedia is
+  //      called. Grants or denies the prompt.
+  //   2. setPermissionCheckHandler   — sync, fires during feature-detection
+  //      (navigator.permissions.query, enumerateDevices, and internally
+  //      before the request handler). If this returns false, Chromium
+  //      treats the feature as unavailable and the request handler
+  //      NEVER fires — getUserMedia rejects with NotAllowedError.
+  //
+  // The old code set only the request handler, so production builds
+  // silently denied mic access at the check-handler stage. Both handlers
+  // are now wired to the same allowlist. Permissions we grant:
+  //
+  //   - media               (legacy Electron name for mic+camera)
+  //   - mediaKeySystem      (DRM — harmless, required on some Win drivers)
+  //   - microphone          (Chromium 121+ split mic/camera scope)
+  //   - audioCapture        (Chromium spelling on some platforms)
+  //
+  // Everything else is denied, including geolocation/notifications/etc.
+  // which we don't use.
+  const ALLOWED_PERMISSIONS = new Set([
+    'media',
+    'mediaKeySystem',
+    'microphone',
+    'audioCapture',
+  ]);
+  win.webContents.session.setPermissionRequestHandler((_webContents, permission, callback) => {
+    callback(ALLOWED_PERMISSIONS.has(permission));
+  });
+  win.webContents.session.setPermissionCheckHandler((_webContents, permission) => {
+    return ALLOWED_PERMISSIONS.has(permission);
   });
 
   // Right-click context menu (Copy, Paste, Select All, etc.)
@@ -1639,10 +1664,16 @@ async function startSession() {
   // message). Either way, the freeze is over.
   _queueFrozenForAuth = false;
 
-  // Hard trial enforcement — block session if expired and not subscribed
-  const sub = getSubscriptionState();
-  if (!sub.subscribed && sub.expired) {
-    if (win && !win.isDestroyed()) win.webContents.send('trial-expired');
+  const access = await ensureSubscriptionAccess({ via: 'start-session' });
+  if (!access.allowed) {
+    if (access.reason === 'trial_expired') {
+      if (win && !win.isDestroyed()) win.webContents.send('trial-expired');
+    } else if (win && !win.isDestroyed()) {
+      win.webContents.send('inline-message', {
+        kind: 'error',
+        text: 'Merlin could not verify your subscription. Reconnect to the internet and try again.',
+      });
+    }
     return;
   }
 
@@ -1743,6 +1774,7 @@ async function startSession() {
       writeBrandTokens,
       vaultGet,
       vaultPut,
+      ensureBinaryLicenseToken: maybeHydrateBinaryLicenseToken,
       runOAuthFlow,
       getConnections,
       appRoot,
@@ -2392,6 +2424,7 @@ async function runOAuthFlow(platform, brandName, extra) {
     }
   }
   try { fs.accessSync(configPath); } catch { return { error: 'Config not found. Run preflight first.' }; }
+  await maybeHydrateBinaryLicenseToken(`oauth-${platform}`);
 
   // Slack requires HTTPS redirect URI — binary handles token exchange (secrets stay in binary)
   if (platform === 'slack') {
@@ -2661,6 +2694,20 @@ ipcMain.handle('send-message', (_, text, options = {}) => {
   if (resolveNextMessage) {
     resolveNextMessage(msg);
   } else {
+    // REGRESSION GUARD (2026-04-14, Codex P1 #1 — duplicate replay):
+    // When _queueFrozenForAuth is true, the renderer's auth-recovery
+    // handler is replaying the triggering prompt after OAuth. The
+    // preserved copy in pendingMessageQueue (if any) is the stale
+    // pre-auth version of the SAME message — we must not drain both
+    // or Claude sees the prompt twice. Clear the frozen queue before
+    // accepting the renderer's authoritative replay. This lets the
+    // renderer be the single source of truth for "what to send next",
+    // while main.js keeps the queue-preservation belt for the
+    // scenarios where the renderer path is somehow unreachable.
+    if (_queueFrozenForAuth) {
+      pendingMessageQueue = [];
+      _queueFrozenForAuth = false;
+    }
     if (pendingMessageQueue.length >= 50) {
       return { success: false, error: 'Message queue full — please wait for the current session to start' };
     }
@@ -2873,6 +2920,89 @@ const SKILL_BODY_MARKER = '<!-- merlin-skill-v2 -->';
 // get picked up by computePerfSummary's "latest dashboard" scan — those
 // files are ambiguous (no brand scoping) and using them would show wrong
 // totals on the bar.
+// Recover brand files (ads-live.json, activity.jsonl) that the pre-fix binary
+// wrote to the wrong location. See the REGRESSION GUARD in refresh-live-ads.
+//
+// The bug: main.js wrote a tmp config to os.tmpdir(), the Go binary derived
+// projectRoot = filepath.Dir³(tmpPath), which landed in the grandparent of
+// the system temp folder (e.g. C:\Users\<user>\AppData on Windows). Any
+// brand file the binary tried to write ended up at
+// `<AppData>/assets/brands/<brand>/*` — invisible to the app, which reads
+// from `<appRoot>/assets/brands/<brand>/*`.
+//
+// This migration scans a small set of plausible stray locations and moves
+// any files it finds into the correct workspace path. Runs once per install
+// (gated by _strayBrandFilesMigrated in merlin-config.json). Non-destructive:
+// only moves files whose destination doesn't exist OR is older than the
+// stray copy, so we never clobber fresher workspace data.
+function migrateStrayBrandFiles() {
+  const cfg = readConfig();
+  if (cfg._strayBrandFilesMigrated === 1) return { skipped: true };
+
+  // Candidate stray roots. `os.tmpdir()` is `.../Temp` on Windows, so the
+  // buggy Dir³ computation gave us `.../Temp/../../` ≈ `%LOCALAPPDATA%\..\..`.
+  // The stray files we've actually observed in the wild live at
+  // `%USERPROFILE%\AppData\assets\brands\*`, which corresponds to the user's
+  // %LOCALAPPDATA% grandparent. Add a few variants to cover macOS and Linux.
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, 'AppData', 'assets', 'brands'),              // Windows
+    path.join(home, 'AppData', 'Local', 'assets', 'brands'),     // Windows (deeper tmpdir)
+    path.join('/', 'var', 'assets', 'brands'),                   // Linux /tmp → /var
+    path.join('/', 'private', 'var', 'folders', 'assets', 'brands'), // macOS
+  ];
+
+  const validBrand = /^[a-z0-9_-]+$/i;
+  const safeNames = new Set(['ads-live.json', 'activity.jsonl']);
+  let moved = 0, kept = 0;
+
+  for (const strayRoot of candidates) {
+    let brandDirs;
+    try {
+      if (!fs.existsSync(strayRoot)) continue;
+      brandDirs = fs.readdirSync(strayRoot, { withFileTypes: true })
+        .filter(d => d.isDirectory() && validBrand.test(d.name));
+    } catch { continue; }
+
+    for (const dirent of brandDirs) {
+      const srcBrandDir = path.join(strayRoot, dirent.name);
+      const dstBrandDir = path.join(appRoot, 'assets', 'brands', dirent.name);
+      let files;
+      try { files = fs.readdirSync(srcBrandDir); } catch { continue; }
+      for (const f of files) {
+        if (!safeNames.has(f)) continue;
+        const src = path.join(srcBrandDir, f);
+        const dst = path.join(dstBrandDir, f);
+        try {
+          const srcStat = fs.statSync(src);
+          if (!srcStat.isFile()) continue;
+          let dstStat = null;
+          try { dstStat = fs.statSync(dst); } catch {}
+          // Only overwrite when workspace copy is missing or older. This
+          // prevents nuking fresh data with a stale stray snapshot.
+          if (dstStat && dstStat.mtimeMs >= srcStat.mtimeMs) { kept++; continue; }
+          fs.mkdirSync(dstBrandDir, { recursive: true });
+          fs.copyFileSync(src, dst);
+          try { fs.unlinkSync(src); } catch {}
+          moved++;
+        } catch {}
+      }
+      // Try to remove the empty stray brand dir (ignored if not empty)
+      try { fs.rmdirSync(srcBrandDir); } catch {}
+    }
+    // Try to remove the empty stray brands root
+    try { fs.rmdirSync(strayRoot); } catch {}
+  }
+
+  try {
+    const c = readConfig();
+    c._strayBrandFilesMigrated = 1;
+    writeConfig(c);
+  } catch {}
+  appendErrorLog(`${new Date().toISOString()} [stray-brand-migration] moved=${moved} kept=${kept}\n`);
+  return { moved, kept };
+}
+
 function migrateLegacyResultsDir() {
   const cfg = readConfig();
   if (cfg._legacyResultsMigrated === 1) return { skipped: true };
@@ -3218,10 +3348,36 @@ ipcMain.handle('refresh-perf', async (_, brandName, days) => {
     return { error: 'config missing' };
   }
   if (brandName) {
-    const merged = brandName ? readBrandConfig(brandName) : readConfig();
-    if (merged && Object.keys(merged).length > 0) {
-      const tmpPath = path.join(os.tmpdir(), `.merlin-config-tmp-${require('crypto').randomBytes(16).toString('hex')}.json`);
-      fs.writeFileSync(tmpPath, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    // REGRESSION GUARD (2026-04-15, codex per-brand revenue audit — finding #2):
+    // Build a STRICT brand-scoped config for dashboard refreshes. The
+    // default readBrandConfig() starts from the global config and overlays
+    // brand-specific fields on top — so a brand that has never connected
+    // Meta will silently inherit whatever leftover metaAccessToken /
+    // metaAdAccountId lives in the global config from the pre-multi-brand
+    // era. On a multi-brand install, that is literally cross-brand data
+    // leakage: Brand B's revenue bar shows Brand A's ad account.
+    //
+    // Strict scoping: start from global (for shared tools like fal /
+    // elevenlabs / vault / outputDir), DELETE every per-brand credential
+    // key, then overlay ONLY the keys the brand explicitly set in its
+    // own brand config file. If the brand has not connected a platform,
+    // that platform's credential is undefined and runDashboard skips it
+    // entirely — which is the right behavior. No data is better than
+    // another brand's data.
+    //
+    // DO NOT revert to readBrandConfig() for this path. If a user reports
+    // that Brand B shows no data after upgrade, the fix is to re-connect
+    // Brand B's platforms — not to restore the global fallback.
+    const strictBrandConfig = buildStrictBrandConfig(brandName);
+    if (strictBrandConfig && Object.keys(strictBrandConfig).length > 0) {
+      // REGRESSION GUARD (2026-04-15, live-ads projectRoot incident):
+      // Tmp config must live inside .claude/tools/ so filepath.Dir³ in the
+      // Go binary resolves projectRoot back to appRoot. See the matching
+      // guard in the refresh-live-ads handler for the full incident report.
+      const toolsDir = path.join(appRoot, '.claude', 'tools');
+      try { fs.mkdirSync(toolsDir, { recursive: true }); } catch {}
+      const tmpPath = path.join(toolsDir, `.merlin-config-tmp-${require('crypto').randomBytes(16).toString('hex')}.json`);
+      fs.writeFileSync(tmpPath, JSON.stringify(strictBrandConfig, null, 2), { mode: 0o600 });
       configPath = tmpPath;
     }
   }
@@ -3232,6 +3388,7 @@ ipcMain.handle('refresh-perf', async (_, brandName, days) => {
   const isTmpConfig = configPath !== path.join(appRoot, '.claude', 'tools', 'merlin-config.json');
   const { execFile } = require('child_process');
   const { redactOutput } = require('./mcp-redact');
+  await maybeHydrateBinaryLicenseToken('dashboard');
   return new Promise((resolve) => {
     execFile(binaryPath, ['--config', configPath, '--cmd', cmd], {
       timeout: 90000, cwd: appRoot,
@@ -3279,50 +3436,60 @@ ipcMain.handle('get-perf-updated', (_, brandName) => {
 const perfCache = {};
 
 function computePerfSummary(days, brandName) {
+  // REGRESSION GUARD (2026-04-15, codex per-brand revenue audit — finding #1):
+  // The perf bar MUST only surface dashboard files whose `period_days`
+  // matches the period the UI is asking for. Previously this function took
+  // the latest file on disk regardless of the window it was generated for,
+  // so a 1-day background refresh would silently back a 30-day UI button
+  // with 1-day data — and nothing in the UI told the user they were
+  // looking at a 30× undercount.
+  //
+  // If no dashboard file matches the requested period, return null so
+  // loadPerfBar triggers a targeted refresh for that period. Do NOT fall
+  // back to "latest file of any period" as a convenience — that was the
+  // exact bug this guard exists to prevent.
   const resultsDir = brandName ? path.join(appRoot, 'results', brandName) : path.join(appRoot, 'results');
-  const files = [];
+  const allFiles = [];
   try {
     for (const f of fs.readdirSync(resultsDir)) {
       if (f.startsWith('dashboard_') && f.endsWith('.json')) {
-        files.push({ name: f, path: path.join(resultsDir, f) });
+        allFiles.push({ name: f, path: path.join(resultsDir, f) });
       }
     }
   } catch {}
+  if (allFiles.length === 0) return null;
+
+  allFiles.sort((a, b) => a.name.localeCompare(b.name));
+
+  // Parse each file (from newest to oldest) and keep only those whose
+  // recorded period_days matches the caller's request. Legacy files
+  // written before the binary started persisting period_days get an
+  // implicit match (`undefined === undefined`) and are skipped since we
+  // can't prove they came from the right window. The binary has been
+  // writing period_days since v0.1 of the dashboard action, so only very
+  // old results directories will hit this fallback.
+  const files = [];
+  const parsedCache = new Map();
+  for (const f of allFiles) {
+    let parsed = null;
+    try { parsed = JSON.parse(fs.readFileSync(f.path, 'utf8')); } catch {}
+    if (!parsed) continue;
+    parsedCache.set(f.name, parsed);
+    const filePeriod = typeof parsed.period_days === 'number' ? parsed.period_days : null;
+    if (filePeriod === days) files.push(f);
+  }
   if (files.length === 0) return null;
 
-  files.sort((a, b) => a.name.localeCompare(b.name));
-  const cutoff = new Date();
-  cutoff.setDate(cutoff.getDate() - days);
-  const cutoffStr = `dashboard_${cutoff.toISOString().slice(0, 10).replace(/-/g, '')}`;
-  // Try latest file first; if corrupted, fall back to previous files
-  let latest = null;
-  for (let i = files.length - 1; i >= 0 && !latest; i--) {
-    try { latest = JSON.parse(fs.readFileSync(files[i].path, 'utf8')); } catch {}
-  }
+  const latest = parsedCache.get(files[files.length - 1].name);
   if (!latest) return null;
 
-  let periodStart = null;
-  for (let i = files.length - 1; i >= 0; i--) {
-    if (files[i].name <= cutoffStr) { periodStart = files[i]; break; }
-  }
-  if (!periodStart && files.length >= 2) periodStart = files[0];
-  if (!periodStart) for (const f of files) {
-    if (f.name >= cutoffStr) { periodStart = f; break; }
-  }
-
+  // Trend comparison only makes sense between two files of the SAME period.
+  // Pick the most recent earlier file whose period_days matches.
   let trend = null;
-  if (periodStart && periodStart.name !== files[files.length - 1].name) {
+  if (files.length >= 2) {
     try {
-      const prev = JSON.parse(fs.readFileSync(periodStart.path, 'utf8'));
-      if (prev.mer > 0 && latest.mer > 0) {
-        trend = Math.round(((latest.mer - prev.mer) / prev.mer) * 100);
-      }
-    } catch {}
-  }
-  if (trend === null && files.length >= 2) {
-    try {
-      const prev = JSON.parse(fs.readFileSync(files[files.length - 2].path, 'utf8'));
-      if (prev.mer > 0 && latest.mer > 0) {
+      const prev = parsedCache.get(files[files.length - 2].name);
+      if (prev && prev.mer > 0 && latest.mer > 0) {
         trend = Math.round(((latest.mer - prev.mer) / prev.mer) * 100);
       }
     } catch {}
@@ -3897,6 +4064,81 @@ function readBrandConfig(brandName) {
   return cfg;
 }
 
+// Read only the brand-specific config file (no global fallback), with
+// vault placeholders resolved from the brand's own vault namespace first.
+// Used by buildStrictBrandConfig for the refresh-perf path where global
+// credentials MUST NOT leak into a brand's dashboard pull.
+function readBrandOnlyBrandCreds(brandName) {
+  if (!brandName) return {};
+  const brandConfigPath = path.join(appRoot, '.claude', 'tools', `.merlin-config-${brandName}.json`);
+  let brandCfg = {};
+  try { brandCfg = JSON.parse(fs.readFileSync(brandConfigPath, 'utf8')); } catch {}
+
+  // Resolve @@VAULT:key@@ placeholders. Unlike readBrandConfig, we deliberately
+  // do NOT fall back to _global vault for BRAND_KEYS — that was the source of
+  // the cross-brand leak. Shared tools (falApiKey, elevenLabsApiKey, etc.) are
+  // handled by the global base config in buildStrictBrandConfig, not here.
+  for (const [k, v] of Object.entries(brandCfg)) {
+    if (typeof v === 'string' && v.startsWith('@@VAULT:') && v.endsWith('@@')) {
+      const vKey = v.slice('@@VAULT:'.length, -2);
+      const real = vaultGet(brandName, vKey);
+      if (real) {
+        brandCfg[k] = real;
+      } else {
+        // Vault entry missing — treat as unset rather than leaving the
+        // placeholder in the config (the Go binary would see the literal
+        // string and try to use it as a token, which would 401).
+        delete brandCfg[k];
+      }
+    }
+  }
+  return brandCfg;
+}
+
+// Build a STRICT brand-scoped config for a refresh-perf / dashboard pull.
+// Global config supplies shared, non-credential fields (outputDir, rate-limit
+// tuning, vertical, shared fal / elevenlabs / heygen / arcads keys). Every
+// per-brand credential (BRAND_KEYS) is STRIPPED from the global base before
+// the brand's own credentials are overlaid on top. If the brand has not
+// connected a platform, that platform's credential is absent from the
+// result and the Go dashboard skips it entirely.
+//
+// REGRESSION GUARD (2026-04-15, codex per-brand revenue audit — finding #2):
+// Do not modify this to fall back to global for any BRAND_KEYS key. See the
+// full incident writeup on the refresh-perf handler.
+function buildStrictBrandConfig(brandName) {
+  if (!brandName) return readConfig();
+
+  // Global base — provides shared tools, outputDir, vertical, etc. Resolves
+  // its own vault placeholders via readConfig, which is fine because shared
+  // tools live in the _global vault namespace.
+  const strict = readConfig();
+
+  // Strip every per-brand credential — no global fallback allowed for these.
+  for (const k of BRAND_KEYS) {
+    delete strict[k];
+  }
+
+  // Also strip any _token_ metadata that was scoped to a different brand —
+  // the Go binary reads _tokenTimestamps to decide when to refresh. Using
+  // another brand's timestamps here would mask real expiry state.
+  delete strict._tokenTimestamps;
+
+  // Overlay only the keys the brand explicitly set.
+  const brandCreds = readBrandOnlyBrandCreds(brandName);
+  for (const [k, v] of Object.entries(brandCreds)) {
+    // Merge all keys from the brand file — not just BRAND_KEYS — so
+    // per-brand config like productUrl, productDescription, and
+    // maxDailyAdBudget still flow through for the dashboard action.
+    strict[k] = v;
+  }
+
+  // Tag the config with the brand so the Go binary's logActivity and
+  // vault lookups scope to the right namespace.
+  strict._brand = brandName;
+  return strict;
+}
+
 function writeBrandTokens(brandName, tokens) {
   if (!brandName || !tokens || Object.keys(tokens).length === 0) return;
   const tokenPath = path.join(appRoot, '.claude', 'tools', `.merlin-config-${brandName}.json`);
@@ -4121,7 +4363,8 @@ function looksEncrypted(buf) {
   const first = buf[0];
   return first < 0x20 || first > 0x7E;
 }
-function readSecureFile(filePath) {
+function readSecureFile(filePath, opts = {}) {
+  const requireIntegrity = !!opts.requireIntegrity;
   try {
     const buf = fs.readFileSync(filePath);
     // Preferred path: the new AES-GCM envelope — works on every OS.
@@ -4138,10 +4381,11 @@ function readSecureFile(filePath) {
         return plain;
       } catch { /* fall through */ }
     }
-    // macOS legacy path: plaintext files written before fix #5. Rewrite
-    // them in the new AES-GCM format on first read so the plaintext is
-    // wiped off disk.
-    if (process.platform === 'darwin' && !looksEncrypted(buf)) {
+    // macOS legacy path: plaintext files written before fix #5. For
+    // non-critical callers we still migrate them once into the AES-GCM
+    // envelope. Integrity-sensitive callers opt out so plaintext can no
+    // longer masquerade as trusted state.
+    if (!requireIntegrity && process.platform === 'darwin' && !looksEncrypted(buf)) {
       const plain = buf.toString('utf8');
       try { fs.writeFileSync(filePath, _encodeSecureBuffer(plain), { mode: 0o600 }); } catch {}
       return plain;
@@ -4160,6 +4404,7 @@ function readSecureFile(filePath) {
         return null;
       }
     }
+    if (requireIntegrity) return null;
     return buf.toString('utf8');
   } catch { return null; }
 }
@@ -4609,7 +4854,24 @@ ipcMain.handle('refresh-live-ads', async (_, brandName) => {
   } catch {}
   if (brandName) {
     if (cfg && Object.keys(cfg).length > 0) {
-      const tmpPath = path.join(os.tmpdir(), `.merlin-config-tmp-${require('crypto').randomBytes(16).toString('hex')}.json`);
+      // REGRESSION GUARD (2026-04-15, live-ads projectRoot incident):
+      // The tmp config MUST live inside .claude/tools/ alongside the real
+      // merlin-config.json. The Go binary derives projectRoot from
+      // filepath.Dir³(globalConfigPath) — with os.tmpdir() that lands in
+      // %LOCALAPPDATA%\AppData (Windows) or /tmp's grandparent, and every
+      // brand file the binary writes (ads-live.json, activity.jsonl) gets
+      // stranded there instead of the workspace's assets/brands/<brand>/.
+      // The Archive "Ads" tab then showed empty because get-live-ads reads
+      // from the correct workspace path and finds nothing. Production users
+      // had stray files building up in AppData that nothing ever cleaned.
+      //
+      // Placing the tmp file under .claude/tools/ makes Dir³ resolve back
+      // to appRoot exactly like the canonical config does. The filename
+      // still matches the `.merlin-config-*.json` protection pattern in
+      // block-api-bypass.js, so Claude can't Read the decrypted secrets.
+      const toolsDir = path.join(appRoot, '.claude', 'tools');
+      try { fs.mkdirSync(toolsDir, { recursive: true }); } catch {}
+      const tmpPath = path.join(toolsDir, `.merlin-config-tmp-${require('crypto').randomBytes(16).toString('hex')}.json`);
       try {
         fs.writeFileSync(tmpPath, JSON.stringify(cfg, null, 2), { mode: 0o600 });
         configPath = tmpPath;
@@ -4639,6 +4901,7 @@ ipcMain.handle('refresh-live-ads', async (_, brandName) => {
 
   const { execFile } = require('child_process');
   const results = [];
+  await maybeHydrateBinaryLicenseToken('live-ads');
 
   try {
     for (const [action, connected] of platformJobs) {
@@ -4879,17 +5142,8 @@ ipcMain.handle('save-pasted-media', (_, dataUrl, filename) => {
 
 // ── Subscription / Trial / License ──────────────────────────
 
-// Whitelist keys for testers — stored as HMAC hashes, never plaintext
-// Whitelist keys validated via HMAC hash comparison
-const VALID_KEY_HASHES = {
-  'dd1a602f79a5fd7d': 5,  // test key — 5 uses max
-  'cd1c3ef01b913d64': 99, // beta key
-};
-
-function hashKey(key) {
-  const crypto = require('crypto');
-  return crypto.createHmac('sha256', 'merlin-salt-2026').update(key).digest('hex').slice(0, 16);
-}
+// Activation keys are now verified server-side so usage limits and
+// revocation live in one authoritative place.
 
 // Machine fingerprint for Stripe checkout + license polling (persistent).
 //
@@ -4933,6 +5187,46 @@ function getAppliedAttribution() {
   return null;
 }
 
+const SUBSCRIPTION_OFFLINE_GRACE_MS = 72 * 60 * 60 * 1000;
+
+function normalizeEmailHint(value) {
+  const email = String(value || '').trim().toLowerCase();
+  return /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email) ? email : '';
+}
+
+function readCheckoutEmailHint() {
+  const hintFile = path.join(appRoot, '.merlin-checkout-email');
+  try {
+    const raw = readSecureFile(hintFile, { requireIntegrity: true });
+    return normalizeEmailHint(raw);
+  } catch { return ''; }
+}
+
+function writeCheckoutEmailHint(email) {
+  const normalized = normalizeEmailHint(email);
+  if (!normalized) return false;
+  try {
+    writeSecureFile(path.join(appRoot, '.merlin-checkout-email'), normalized);
+    return true;
+  } catch { return false; }
+}
+
+function resolveLicenseRecoveryEmail() {
+  const sub = getSubscriptionState();
+  const cfg = readConfig();
+  return normalizeEmailHint(sub?.email) || normalizeEmailHint(cfg?._userEmail) || readCheckoutEmailHint();
+}
+
+function isSubscriptionVerificationFresh(sub) {
+  return !!(
+    sub &&
+    sub.subscribed &&
+    Number.isFinite(sub.lastVerifiedAt) &&
+    sub.lastVerifiedAt > 0 &&
+    Date.now() - sub.lastVerifiedAt <= SUBSCRIPTION_OFFLINE_GRACE_MS
+  );
+}
+
 function getSubscriptionState() {
   const subFile = path.join(appRoot, '.merlin-subscription');
   let recoveryNeeded = false;
@@ -4949,10 +5243,12 @@ function getSubscriptionState() {
       // whose auth tag failed). Dropping the fallback eliminates a
       // footgun where a corrupted/tampered file would be silently
       // parsed as JSON and trusted.
-      const raw = readSecureFile(subFile);
+      const raw = readSecureFile(subFile, { requireIntegrity: true });
       if (raw) {
         const data = JSON.parse(raw);
         if (data.subscribed) {
+          const lastVerifiedAt = Number(data.lastVerifiedAt || data.activatedAt || 0) || 0;
+          const offlineGraceUntil = lastVerifiedAt > 0 ? lastVerifiedAt + SUBSCRIPTION_OFFLINE_GRACE_MS : null;
           return {
             subscribed: true,
             tier: data.tier || 'pro',
@@ -4961,6 +5257,9 @@ function getSubscriptionState() {
             email: data.email || '',
             gracePeriodUntil: data.gracePeriodUntil || null,
             currentPeriodEnd: data.currentPeriodEnd || null,
+            lastVerifiedAt: lastVerifiedAt || null,
+            offlineGraceUntil,
+            serverVerifiedFresh: !!(offlineGraceUntil && offlineGraceUntil >= Date.now()),
           };
         }
       } else {
@@ -4993,6 +5292,9 @@ function getSubscriptionState() {
     trialStart,
     expired: daysLeft === 0,
     recoveryNeeded,
+    lastVerifiedAt: null,
+    offlineGraceUntil: null,
+    serverVerifiedFresh: false,
   };
 }
 
@@ -5019,6 +5321,7 @@ function persistSubscription(data) {
     gracePeriodUntil: data.gracePeriodUntil || null,
     currentPeriodEnd: data.currentPeriodEnd || null,
     activatedAt: Date.now(),
+    lastVerifiedAt: Number.isFinite(data.lastVerifiedAt) ? data.lastVerifiedAt : Date.now(),
     via: data.via || 'stripe',
   });
   try {
@@ -5030,12 +5333,13 @@ function persistSubscription(data) {
 }
 
 // Clear the local subscription file (called on cancel/refund).
-function clearSubscription() {
+function clearSubscription(opts = {}) {
+  const { preserveToken = true } = opts;
   const subFile = path.join(appRoot, '.merlin-subscription');
   try { fs.unlinkSync(subFile); } catch {}
-  // Scrub the license token at the same time — leaving a stale token
-  // around would let a reconnected Stripe session rebind it incorrectly.
-  try { fs.unlinkSync(path.join(appRoot, '.merlin-license-token')); } catch {}
+  if (!preserveToken) {
+    try { fs.unlinkSync(path.join(appRoot, '.merlin-license-token')); } catch {}
+  }
 }
 
 // ── License token (dormant — codex enterprise review fix #2) ───────
@@ -5056,12 +5360,14 @@ function clearSubscription() {
 //   3. Flip open-manage to forward the token
 // without having to re-land the read/write/IPC plumbing.
 //
-// DO NOT delete these. DO NOT wire them up without first completing
-// the deep-link capture path or they'll diverge from the server.
+// Active entitlement proof path:
+// this token now gates the billing portal and server-held OAuth/BFF
+// integrations. It must come from an integrity-protected local file or
+// a verified server recovery flow; forged plaintext state is rejected.
 function readLicenseToken() {
   const tokenFile = path.join(appRoot, '.merlin-license-token');
   try {
-    const raw = readSecureFile(tokenFile);
+    const raw = readSecureFile(tokenFile, { requireIntegrity: true });
     if (!raw) return '';
     const hex = String(raw).trim().replace(/[^0-9a-f]/gi, '').slice(0, 64).toLowerCase();
     return hex.length === 64 ? hex : '';
@@ -5082,6 +5388,79 @@ ipcMain.handle('set-license-token', (_evt, token) => {
   const ok = writeLicenseToken(token);
   return { ok };
 });
+
+async function postJson(url, payload, timeout = 10000) {
+  const https = require('https');
+  const body = JSON.stringify(payload);
+  return new Promise((resolve, reject) => {
+    const req = https.request(url, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': Buffer.byteLength(body),
+      },
+      timeout,
+    }, (res) => {
+      let chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        let data = {};
+        try { data = JSON.parse(Buffer.concat(chunks).toString()); } catch {}
+        resolve({ status: res.statusCode || 500, data });
+      });
+    });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
+    req.write(body);
+    req.end();
+  });
+}
+
+async function claimLicenseTokenFromServer(opts = {}) {
+  const machineId = opts.machineId || getMachineId();
+  const email = normalizeEmailHint(opts.email || resolveLicenseRecoveryEmail());
+  if (!machineId) return { ok: false, error: 'machine id unavailable' };
+  if (!email) return { ok: false, error: 'email unavailable' };
+
+  writeCheckoutEmailHint(email);
+
+  try {
+    const { status, data } = await postJson('https://merlingotme.com/api/claim-license-token', {
+      machineId,
+      email,
+    });
+    if (status >= 200 && status < 300 && data.licenseToken) {
+      writeLicenseToken(data.licenseToken);
+      if (data.activated === true) {
+        persistSubscription({
+          tier: data.tier || 'pro',
+          status: data.status || 'active',
+          email: data.email || email,
+          gracePeriodUntil: data.gracePeriodUntil || null,
+          currentPeriodEnd: data.currentPeriodEnd || null,
+          lastVerifiedAt: Date.now(),
+          via: opts.via || 'claim',
+        });
+      }
+      return { ok: true, token: data.licenseToken, email: data.email || email, data };
+    }
+    return { ok: false, error: data.error || `Server returned ${status}`, status, data };
+  } catch (err) {
+    return { ok: false, error: err?.message || String(err) };
+  }
+}
+
+async function ensureLicenseToken(opts = {}) {
+  const existing = readLicenseToken();
+  if (existing) return { ok: true, token: existing };
+  return claimLicenseTokenFromServer(opts);
+}
+
+async function maybeHydrateBinaryLicenseToken(via) {
+  const sub = getSubscriptionState();
+  if (!sub.subscribed && !sub.recoveryNeeded) return;
+  await ensureLicenseToken({ machineId: getMachineId(), via });
+}
 
 // Throttle server reconciliation so we never hammer /api/check-license.
 let _lastReconcileAt = 0;
@@ -5107,55 +5486,71 @@ async function reconcileSubscriptionWithServer(opts = {}) {
   _lastReconcileAt = now;
 
   const machineId = getMachineId();
+  const current = getSubscriptionState();
   try {
     const raw = await httpsGet(`https://merlingotme.com/api/check-license?id=${machineId}`);
     let data;
     try { data = JSON.parse(raw.toString()); } catch { return { reconciled: false, reason: 'parse' }; }
 
-    const current = getSubscriptionState();
-
     if (data.activated === true) {
-      if (!current.subscribed) {
-        persistSubscription({
-          tier: data.tier || 'pro',
-          status: data.status || 'active',
-          email: data.email || '',
-          gracePeriodUntil: data.gracePeriodUntil || null,
-          currentPeriodEnd: data.currentPeriodEnd || null,
-          via: opts.via || 'reconcile',
-        });
-        if (win && !win.isDestroyed()) {
-          win.webContents.send('subscription-activated', { tier: data.tier || 'pro' });
-        }
-        return { reconciled: true, subscribed: true, changed: true };
+      let email = current.email || '';
+      if (!readLicenseToken()) {
+        const claimed = await ensureLicenseToken({ machineId, via: opts.via || 'reconcile' });
+        if (claimed.ok && claimed.email) email = claimed.email;
       }
-      return { reconciled: true, subscribed: true, changed: false };
+      persistSubscription({
+        tier: data.tier || 'pro',
+        status: data.status || 'active',
+        email,
+        gracePeriodUntil: data.gracePeriodUntil || null,
+        currentPeriodEnd: data.currentPeriodEnd || null,
+        lastVerifiedAt: now,
+        via: opts.via || 'reconcile',
+      });
+      if (!current.subscribed && win && !win.isDestroyed()) {
+        win.webContents.send('subscription-activated', { tier: data.tier || 'pro' });
+      }
+      return { reconciled: true, subscribed: true, changed: !current.subscribed || !current.serverVerifiedFresh };
     }
 
-    // Server says not activated. Two cases:
-    //
-    //  (a) The server returns a `status` field — the license record
-    //      EXISTS and has been explicitly deactivated (canceled, refunded,
-    //      past_due with 3 failed retries). In that case we clear local
-    //      Pro state so the UI matches reality.
-    //
-    //  (b) No `status` field — the KV record doesn't exist on the server.
-    //      This could mean the user activated via a local license key and
-    //      never hit Stripe at all, or the record was purged. Preserve
-    //      local state rather than downgrading a legit key-activated user.
-    if (current.subscribed && data.status && data.status !== 'active' && data.status !== 'trialing') {
-      clearSubscription();
+    if (current.subscribed) {
+      clearSubscription({ preserveToken: true });
       if (win && !win.isDestroyed()) {
-        win.webContents.send('subscription-canceled', { reason: data.status });
+        win.webContents.send('subscription-canceled', { reason: data.status || 'inactive' });
       }
       return { reconciled: true, subscribed: false, changed: true };
     }
-    return { reconciled: true, subscribed: !!current.subscribed, changed: false };
+    return { reconciled: true, subscribed: false, changed: false };
   } catch (err) {
-    // Network failure — preserve local state and let the user keep using
-    // the app. We'll retry on the next throttle window.
-    return { reconciled: false, reason: 'network', error: err?.message || String(err) };
+    return {
+      reconciled: false,
+      reason: 'network',
+      error: err?.message || String(err),
+      subscribed: isSubscriptionVerificationFresh(current),
+    };
   }
+}
+
+async function ensureSubscriptionAccess(opts = {}) {
+  let sub = getSubscriptionState();
+  if (sub.subscribed && isSubscriptionVerificationFresh(sub)) {
+    return { allowed: true, sub, source: 'cached' };
+  }
+
+  const shouldReconcile = sub.subscribed || sub.expired || sub.recoveryNeeded;
+  if (shouldReconcile) {
+    const before = sub;
+    const result = await reconcileSubscriptionWithServer({ force: true, via: opts.via || 'session' });
+    sub = getSubscriptionState();
+    if (sub.subscribed) return { allowed: true, sub, source: 'reconciled' };
+    if (result.reason === 'network' && before.subscribed && isSubscriptionVerificationFresh(before)) {
+      return { allowed: true, sub: before, source: 'offline-grace' };
+    }
+  }
+
+  if (sub.subscribed) return { allowed: false, sub, reason: 'verification_required' };
+  if (sub.expired) return { allowed: false, sub, reason: 'trial_expired' };
+  return { allowed: true, sub, source: 'trial' };
 }
 
 ipcMain.handle('get-subscription', () => getSubscriptionState());
@@ -5168,35 +5563,35 @@ ipcMain.handle('check-subscription-status', async () => {
   return getSubscriptionState();
 });
 
-ipcMain.handle('activate-key', (_, key) => {
+ipcMain.handle('activate-key', async (_, key) => {
   if (!key || typeof key !== 'string') return { success: false, error: 'Invalid key' };
-  const trimmed = key.trim().toLowerCase();
-  const hashed = hashKey(trimmed);
-
-  // Check whitelist (hash the input, compare against stored hashes)
-  const maxUses = VALID_KEY_HASHES[hashed];
-  if (maxUses !== undefined) {
-    // Track usage count in a local file
-    const usageFile = path.join(appRoot, '.merlin-key-usage.json');
-    let usage = {};
-    try { usage = JSON.parse(fs.readFileSync(usageFile, 'utf8')); } catch {}
-    const used = usage[hashed] || 0;
-    if (used >= maxUses) {
-      return { success: false, error: 'This key has reached its activation limit.' };
+  try {
+    const { status, data } = await postJson('https://merlingotme.com/api/activate-key', {
+      machineId: getMachineId(),
+      key,
+    });
+    if (status >= 200 && status < 300 && data.success) {
+      if (!writeLicenseToken(data.licenseToken || '')) {
+        return { success: false, error: 'Activation succeeded but the device token could not be saved.' };
+      }
+      persistSubscription({
+        tier: data.tier || 'pro',
+        status: data.status || 'active',
+        email: '',
+        gracePeriodUntil: data.gracePeriodUntil || null,
+        currentPeriodEnd: data.currentPeriodEnd || null,
+        lastVerifiedAt: Date.now(),
+        via: 'activation-key',
+      });
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('subscription-activated', { tier: data.tier || 'pro' });
+      }
+      return { success: true, tier: data.tier || 'pro' };
     }
-    usage[hashed] = used + 1;
-    try { fs.writeFileSync(usageFile, JSON.stringify(usage, null, 2)); } catch {}
-
-    const subFile = path.join(appRoot, '.merlin-subscription');
-    try {
-      writeSecureFile(subFile, JSON.stringify({ subscribed: true, tier: 'pro', activatedAt: Date.now() }));
-    } catch (err) {
-      return { success: false, error: 'Could not save activation' };
-    }
-    return { success: true, tier: 'pro' };
+    return { success: false, error: data.error || `Server returned ${status}` };
+  } catch (err) {
+    return { success: false, error: err?.message || 'network error' };
   }
-
-  return { success: false, error: 'Invalid key. Check your email or visit merlingotme.com' };
 });
 
 // Stripe payment link ID — this is the PRODUCTION Payment Link, not the
@@ -5242,13 +5637,16 @@ function startActivationPoller(machineId) {
 ipcMain.handle('open-subscribe', async () => {
   const machineId = getMachineId();
   // Pre-fill email from Claude account if available
-  let emailParam = '';
+  let email = '';
   try {
     if (activeQuery) {
       const info = await activeQuery.accountInfo();
-      if (info?.email) emailParam = `&prefilled_email=${encodeURIComponent(info.email)}`;
+      if (info?.email) email = normalizeEmailHint(info.email);
     }
   } catch {}
+  if (!email) email = normalizeEmailHint(readConfig()?._userEmail);
+  if (email) writeCheckoutEmailHint(email);
+  const emailParam = email ? `&prefilled_email=${encodeURIComponent(email)}` : '';
   // Append attribution if present
   let attrSuffix = '';
   const attr = getAppliedAttribution();
@@ -5282,36 +5680,28 @@ ipcMain.handle('open-subscribe', async () => {
 // and why this replaced the licenseToken approach that couldn't be
 // migrated onto existing paying users without breaking their portal
 // access.
+// Billing portal access is now authenticated with machineId +
+// licenseToken. The token is recovered from a verified email session
+// only when needed, then reused as the independent proof-of-possession
+// for privileged billing actions on this device.
 ipcMain.handle('open-manage', async () => {
   const machineId = getMachineId();
-  const sub = getSubscriptionState();
-  const email = (sub && sub.email) || '';
   try {
-    const https = require('https');
-    const payload = JSON.stringify({ machineId, email });
-    const raw = await new Promise((resolve, reject) => {
-      const req = https.request('https://merlingotme.com/api/portal', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
-        },
-        timeout: 10000,
-      }, (res) => {
-        let body = [];
-        res.on('data', c => body.push(c));
-        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(body) }));
-      });
-      req.on('error', reject);
-      req.on('timeout', () => { req.destroy(); reject(new Error('timeout')); });
-      req.write(payload);
-      req.end();
+    const ensured = await ensureLicenseToken({ machineId, via: 'portal' });
+    if (!ensured.ok || !ensured.token) {
+      const errMsg = 'Billing access could not be verified on this device. Re-sync your subscription or contact support@merlingotme.com.';
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('inline-message', { kind: 'error', text: errMsg });
+      }
+      return { ok: false, error: errMsg };
+    }
+
+    const { status, data } = await postJson('https://merlingotme.com/api/portal', {
+      machineId,
+      licenseToken: ensured.token,
     });
 
-    let data = {};
-    try { data = JSON.parse(raw.body.toString()); } catch {}
-
-    if (raw.status >= 200 && raw.status < 300 && data.url) {
+    if (status >= 200 && status < 300 && data.url) {
       shell.openExternal(data.url);
       return { ok: true };
     }
@@ -5323,16 +5713,15 @@ ipcMain.handle('open-manage', async () => {
     // record no longer matches the email on the server record — this
     // happens if the user changed their Stripe email without the
     // Electron app catching the update yet; a reconcile will fix it.
-    let errMsg = data.error || `Server returned ${raw.status}`;
-    if (raw.status === 400 && data.error === 'email required') {
-      errMsg = 'Your local subscription record is missing an email. Relaunch Merlin to re-sync, or contact support@merlingotme.com.';
-    } else if (raw.status === 401 && data.error === 'reauth_required') {
-      errMsg = 'Your subscription record is out of date. Email support@merlingotme.com to recover it.';
-    } else if (raw.status === 403 && data.error === 'unauthorized') {
-      // Trigger a forced reconcile in the background — the local
-      // email may be stale after a Stripe-side email change.
-      reconcileSubscriptionWithServer({ force: true, via: 'portal-403' }).catch(() => {});
-      errMsg = 'Billing credential rejected. Your saved email may be out of date — try again in a moment, or email support@merlingotme.com.';
+    // Prefer device-token wording even if older comments above still
+    // mention the previous email-based recovery flow.
+    let errMsg = data.error || `Server returned ${status}`;
+    if (status === 401 && data.error === 'reauth_required') {
+      errMsg = 'Your billing credential needs to be recovered. Relaunch Merlin online, or contact support@merlingotme.com.';
+    } else if (status === 403 && data.error === 'unauthorized') {
+      errMsg = 'Billing access was rejected for this device token. Re-sync your subscription, or contact support@merlingotme.com.';
+    } else if (status === 404 && (data.error === 'license not found' || data.error === 'no subscription on file')) {
+      errMsg = 'No billing subscription was found for this device. Re-sync your subscription, or contact support@merlingotme.com.';
     }
     if (win && !win.isDestroyed()) {
       win.webContents.send('inline-message', {
@@ -6294,6 +6683,9 @@ app.whenReady().then(async () => {
   // Move orphaned dashboard files from the legacy .claude/tools/results/
   // location into results/_legacy/ (runs once, idempotent)
   try { migrateLegacyResultsDir(); } catch (err) { console.error('[legacy-results-migration]', err.message); }
+  // Recover brand files stranded by the tmp-config projectRoot bug
+  // (runs once, idempotent) — see refresh-live-ads REGRESSION GUARD.
+  try { migrateStrayBrandFiles(); } catch (err) { console.error('[stray-brand-migration]', err.message); }
 
   // Kick off the engine ensure + version check BEFORE createWindow. This
   // sets _startupChecksPromise so the very first refresh-perf IPC from the
@@ -6321,13 +6713,23 @@ app.whenReady().then(async () => {
     activeChildProcesses.clear();
   });
 
-  // Launch on system startup — opt-in only (user enables via "Start at login" toggle)
-  // On first install, default to enabled. User can disable from tray or settings.
+  // REGRESSION GUARD (2026-04-14, Codex P2 #4 — silent auto-start):
+  // First-install default is OFF. A previous version defaulted new
+  // installs to openAtLogin=true, which silently enrolled every
+  // freshly-installed Merlin into persistent background behavior
+  // before the user had even finished the ToS screen. Combined with
+  // the close-to-tray handler below, that meant a brand-new Mac or
+  // Windows user shut the window, restarted their machine, and found
+  // Merlin quietly running in their tray with no memory of opting in.
+  //
+  // Opt-in only: the user must explicitly enable "Start at login" from
+  // the tray menu or settings panel. If you are tempted to "help new
+  // users" by defaulting this to true again, read the Codex report
+  // first — this is a consent-pattern rule, not a convenience toggle.
   if (app.isPackaged) {
     try {
       const startupPref = readConfig().startAtLogin;
-      // Only set if preference exists in config; first run defaults to true
-      const shouldStart = startupPref !== undefined ? startupPref : true;
+      const shouldStart = startupPref === true; // explicit opt-in only
       app.setLoginItemSettings({ openAtLogin: shouldStart, openAsHidden: true });
     } catch {}
   }

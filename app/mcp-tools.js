@@ -221,6 +221,9 @@ async function runBinary(ctx, action, args, opts = {}) {
     }
 
     const timeout = opts.timeout || 300000; // 5 min default
+    if (ctx.ensureBinaryLicenseToken) {
+      try { await ctx.ensureBinaryLicenseToken(`mcp-${action}`); } catch {}
+    }
     const child = execFile(binaryPath, ['--config', tmpPath, '--cmd', JSON.stringify(cmdObj)], {
       timeout,
       cwd: ctx.appRoot,
