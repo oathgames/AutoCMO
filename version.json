@@ -1,5 +1,5 @@
 {
-  "version": "1.2.0",
+  "version": "1.2.1",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -23,10 +23,8 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.2.0: HeyGen Video Agent (prompt-to-video), deep security hardening across OAuth / hook guard / attribution, and a Mac license-activation fix.",
+  "notes": "v1.2.1: Auto-update reliability fix — partial downloads now fail loudly instead of producing misleading \"update file corrupted\" errors on flaky networks.",
   "whatsNew": [
-    "New HeyGen Video Agent: describe your ad in plain English, get a finished avatar video back",
-    "Major security pass — OAuth flows, hook guard, and attribution tightened after adversarial review; Shopify OAuth now validates CSRF state",
-    "Mac trial-expiry screen now opens the license-key modal directly — no more blank screens when activating Pro"
+    "Auto-update downloads now verify the full file arrived before hashing — fixes rare \"update file looks corrupted\" errors caused by truncated downloads on unstable networks"
   ]
 }

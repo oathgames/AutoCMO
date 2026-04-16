@@ -6286,20 +6286,47 @@ ipcMain.handle('check-for-updates', async () => {
 
 // ── Auto-Update ─────────────────────────────────────────────
 
+// REGRESSION GUARD (2026-04-16): httpsGet MUST validate byte count against
+// Content-Length and reject on the response stream's `error` event. The
+// prior version resolved with whatever data had arrived when `end` fired,
+// with no length check. A TCP connection closed early by a proxy, flaky
+// wifi, or TLS renegotiation drop produced a truncated buffer that the
+// downstream sha256 check correctly rejected as "checksum mismatch" —
+// which the UI surfaced as "The update file looks corrupted" to users
+// whose networks were only mildly unreliable. The truncation was
+// invisible to monitoring (no HTTP error, no exception) so it looked
+// like a release integrity issue. DO NOT drop the length check or the
+// response-stream error handler.
 function httpsGet(url, _depth = 0) {
   if (_depth > 10) return Promise.reject(new Error('Too many redirects'));
   const https = require('https');
   return new Promise((resolve, reject) => {
     const req = https.get(url, { headers: { 'User-Agent': 'Merlin-Desktop' }, timeout: 15000 }, (res) => {
       if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume(); // drain the redirect body so the socket can be reused
         return httpsGet(res.headers.location, _depth + 1).then(resolve).catch(reject);
       }
       if (res.statusCode !== 200) {
+        res.resume();
         return reject(new Error(`HTTP ${res.statusCode}`));
       }
-      let body = [];
-      res.on('data', (c) => body.push(c));
-      res.on('end', () => resolve(Buffer.concat(body)));
+      const expectedLen = Number.parseInt(res.headers['content-length'], 10);
+      const hasExpectedLen = Number.isFinite(expectedLen) && expectedLen > 0;
+      let received = 0;
+      const body = [];
+      res.on('data', (c) => { body.push(c); received += c.length; });
+      res.on('error', (e) => reject(new Error(`Download stream error: ${e.message}`)));
+      res.on('end', () => {
+        // Node treats `end` as "the server closed the connection." For a
+        // chunked response that means the server said it was done, but
+        // for a Content-Length response a short byte count means the
+        // connection closed early — surface that as a hard error so the
+        // downstream checksum check doesn't see a truncated buffer.
+        if (hasExpectedLen && received !== expectedLen) {
+          return reject(new Error(`Incomplete download: expected ${expectedLen} bytes, received ${received}`));
+        }
+        resolve(Buffer.concat(body, received));
+      });
     });
     req.on('error', reject);
     req.on('timeout', () => { req.destroy(); reject(new Error('Request timeout')); });
