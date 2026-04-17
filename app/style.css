@@ -1000,12 +1000,19 @@ a:hover{text-decoration:underline}
 .activity-item {
   display: flex;
   gap: 8px;
-  padding: 5px 0;
+  padding: 5px 6px;
   font-size: 11px;
   color: var(--text-muted);
   border-bottom: 1px solid var(--hover-3);
+  cursor: pointer;
+  border-radius: 4px;
+  transition: background .1s ease;
 }
+.activity-item:hover { background: rgba(255,255,255,.03); }
 .activity-item:last-child { border-bottom: none; }
+.activity-item .activity-desc { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.activity-item--error { border-left: 2px solid #ef4444; padding-left: 8px; background: rgba(239,68,68,.05); }
+.activity-item--warn  { border-left: 2px solid #fbbf24; padding-left: 8px; background: rgba(251,191,36,.04); }
 .activity-dot {
   width: 6px;
   height: 6px;
@@ -1018,7 +1025,113 @@ a:hover{text-decoration:underline}
 .activity-dot-publish { background: #a78bfa; }
 .activity-dot-report { background: #fbbf24; }
 .activity-dot-error { background: #ef4444; }
+.activity-dot-auth { background: #22d3ee; }
+.activity-dot-config { background: #f472b6; }
+.activity-dot-sync { background: #94a3b8; }
+.activity-dot-launch { background: #c084fc; }
+.activity-dot-scan { background: #facc15; }
+.activity-dot-manage { background: #818cf8; }
+.activity-dot-setup { background: #fb923c; }
+.activity-dot-info { background: #64748b; }
 .activity-time { color: var(--text-dim); font-size: 10px; margin-left: auto; white-space: nowrap; }
+
+/* Activity toolbar — search, filter chips, export/copy */
+.activity-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 10px 0 8px;
+  border-bottom: 1px solid rgba(255,255,255,.04);
+  margin-bottom: 6px;
+  align-items: center;
+}
+.activity-search {
+  flex: 1 1 180px;
+  min-width: 140px;
+  padding: 6px 10px;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.08);
+  color: var(--text);
+  border-radius: 6px;
+  font-size: 11px;
+}
+.activity-search:focus { outline: none; border-color: rgba(167,139,250,.5); }
+.activity-filters { display: flex; gap: 4px; flex-wrap: wrap; }
+.activity-chip {
+  padding: 4px 9px;
+  font-size: 10px;
+  font-weight: 600;
+  background: transparent;
+  border: 1px solid rgba(255,255,255,.1);
+  color: var(--text-muted);
+  border-radius: 999px;
+  cursor: pointer;
+  transition: all .12s ease;
+}
+.activity-chip:hover { background: rgba(255,255,255,.04); color: var(--text); }
+.activity-chip.active { background: rgba(167,139,250,.15); border-color: rgba(167,139,250,.4); color: #c4b5fd; }
+.activity-actions { display: flex; gap: 4px; margin-left: auto; }
+.activity-action-btn {
+  padding: 4px 10px;
+  font-size: 10px;
+  font-weight: 600;
+  background: rgba(255,255,255,.04);
+  border: 1px solid rgba(255,255,255,.1);
+  color: var(--text-muted);
+  border-radius: 4px;
+  cursor: pointer;
+  transition: all .12s ease;
+}
+.activity-action-btn:hover { background: rgba(255,255,255,.08); color: var(--text); }
+.activity-action-btn.flash { background: rgba(52,211,153,.15); color: #6ee7b7; border-color: rgba(52,211,153,.4); }
+
+/* Raw JSON reveal under a clicked entry */
+.activity-raw {
+  position: relative;
+  margin: 4px 0 10px 14px;
+  padding: 10px 12px;
+  background: rgba(0,0,0,.25);
+  border: 1px solid rgba(255,255,255,.06);
+  border-radius: 6px;
+  font-size: 10.5px;
+  animation: activity-raw-in .12s ease-out;
+}
+@keyframes activity-raw-in {
+  from { opacity: 0; transform: translateY(-2px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+.activity-raw pre {
+  margin: 0;
+  padding: 0;
+  color: var(--text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow: auto;
+}
+.activity-raw-copy {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 2px 8px;
+  font-size: 10px;
+  background: rgba(255,255,255,.06);
+  border: 1px solid rgba(255,255,255,.1);
+  color: var(--text-muted);
+  border-radius: 3px;
+  cursor: pointer;
+}
+.activity-raw-copy:hover { background: rgba(255,255,255,.1); color: var(--text); }
+
+.activity-empty, .activity-empty-filtered {
+  color: var(--text-dim);
+  padding: 20px 0;
+  text-align: center;
+  font-size: 12px;
+}
+.activity-empty-icon { font-size: 24px; opacity: .4; margin-bottom: 6px; }
+.activity-empty-sub { opacity: .7; }
 
 /* ── Custom Titlebar ──────────────────────────────────────── */
 #titlebar{
