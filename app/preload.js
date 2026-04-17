@@ -310,6 +310,24 @@ contextBridge.exposeInMainWorld('merlin', {
     return ipcRenderer.invoke('speak-text', { text, voice, requestId });
   },
   stopSpeaking: () => ipcRenderer.invoke('stop-speaking'),
+  // Streaming TTS: open a session at the start of a Claude response, push
+  // complete sentences as they arrive, close on finalize. Chunks come back
+  // on the same `onVoiceOutputChunk` channel tagged with requestId.
+  speakTextStreamStart: (requestId, voice) => {
+    if (!Number.isInteger(requestId) || requestId < 0) throw new Error('invalid requestId');
+    if (voice !== undefined && typeof voice !== 'string') throw new Error('voice must be a string');
+    return ipcRenderer.invoke('speak-text-stream-start', { requestId, voice });
+  },
+  speakTextStreamAppend: (requestId, text) => {
+    if (!Number.isInteger(requestId) || requestId < 0) throw new Error('invalid requestId');
+    if (typeof text !== 'string') throw new Error('text must be a string');
+    if (text.length > 5000) throw new Error('text too long (5000 char max)');
+    return ipcRenderer.invoke('speak-text-stream-append', { requestId, text });
+  },
+  speakTextStreamEnd: (requestId) => {
+    if (!Number.isInteger(requestId) || requestId < 0) throw new Error('invalid requestId');
+    return ipcRenderer.invoke('speak-text-stream-end', { requestId });
+  },
   onVoiceOutputProgress: (callback) => {
     if (typeof callback !== 'function') throw new Error('callback must be a function');
     const handler = (_event, payload) => callback(payload);

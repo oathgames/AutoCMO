@@ -588,9 +588,55 @@ Compact reference for every platform action. Tools take `{action, brand, ...}`.
 
 `campaigns` · `ads` · `insights` · `create` · `pause`
 
+### Reddit Organic (prospecting + drafting + posting)
+
+Organic-growth pipeline for finding pain-point threads, clustering them, drafting quality-gated replies, and (optionally) posting them under heavy compliance preflight. Same OAuth + `redditAccessToken` as Reddit Ads — one login covers both surfaces.
+
+| Action | Purpose | Key params |
+|---|---|---|
+| `reddit-prospect-scan` | Search Reddit for relevant threads (keyword + subreddit list) | `brand`, `keywords`, `subreddits` (comma list or blank = sitewide), `scanLimit` |
+| `reddit-prospect-draft` | Cluster pain points + draft quality-gated replies for the top threads | `brand`, `keywords`, `subreddits`, `draftLimit`, `draftDryRun` (true = no AI call, cluster-only) |
+| `reddit-prospect-post` | Submit ONE approved reply (compliance preflight + /api/comment) | `brand`, `threadId`, `subreddit`, `draftBody`, `approved: true` (Electron card sets this) |
+| `reddit-shadowban-check` | Standalone daily health check — authed /me vs unauth /user probe | `brand` |
+
+**Quality gate** (`reddit-prospect-draft`): every draft passes through a structural gate (40–300 words, no banned self-promo phrases, no shouting, no URLs unless the sub allows them, must reference at least one thread-content token) AND an optional AI gate (Gemini scores authenticity/helpfulness/thread-fit/compliance/overall; fails closed on network error). Drafts below threshold are dropped, not surfaced.
+
+**Compliance preflight** (`reddit-prospect-post`, auto mode): account ≥30 days old, combined karma ≥100, max 5 posts / 24h, ≥120 min between posts to same subreddit, ≥300s between any two posts, body not posted in last 72h (SHA-256 of normalized body), no cached shadowban. Any block writes a `reddit_posts_<ts>.json` envelope with a friendly reason.
+
+**`redditPostMode` config field (in merlin-config.json):**
+
+| Value | Behavior |
+|---|---|
+| `"auto"` (default) | Full compliance preflight → `/api/comment` write. Gated on account age/karma/shadowban. |
+| `"draft-only"` | Skip compliance + write. Reply is saved to `results/reddit_draft_<ts>.txt` for manual paste. Zero shadowban risk, zero API writes. The legitimate path for fresh accounts / warm-up windows / shadowban recovery. |
+
+When `auto` mode blocks on an account-age, karma, or shadowban reason, Merlin **saves the draft to disk anyway** as a fallback and surfaces a `suggestion` field hinting to switch to `draft-only`. When `auto` blocks on cadence or dedup (real spam signals), the draft is NOT saved and no escape hatch is offered — the user needs to wait or rewrite, not paste around it.
+
+**Approval model:** every `reddit-prospect-post` call surfaces an Electron approval card showing the subreddit + reply preview (200 chars). The user explicitly approves each reply. In `draft-only` mode the card label reads "Save draft for manual paste"; in `auto` mode it reads "Post reply to r/{sub}". The `approved: true` flag in the cmd envelope is a defense-in-depth declaration — the binary refuses to proceed without it.
+
+**Rate limits:** all calls route through the `reddit_organic` preflight bucket — separate from `reddit_ads` so a surge of scans doesn't starve ad operations.
+
 ### Shopify (`shopify`)
 
 `products` · `orders` (`batchCount` = days) · `import` (pulls products into brand folder)
+
+### Stripe (`stripe`)
+
+OAuth-only, **read-only** (`scope=read_only` — Merlin cannot charge, refund, cancel, or modify anything in your Stripe account). Use for revenue reporting when the brand does NOT sell through Shopify, or when you run a subscription business on Stripe Billing.
+
+| Action | Key params |
+|---|---|
+| `stripe-login` | (opens browser OAuth — no API keys to paste) |
+| `stripe-setup` | (verifies token, fetches account identity) |
+| `stripe-preference` | `provider` = `shopify` \| `stripe` \| `both` (disambiguates when BOTH Shopify and Stripe are connected; prevents double-counting) |
+| `stripe-revenue` | `batchCount` = days (gross, refunds, net, AOV, new customers, USD-normalized) |
+| `stripe-subscriptions` | (MRR, ARR, active subs, 30-day churn, top plans) |
+| `stripe-cohorts` | `batchCount` = days (first-charge-month cohorts with lifetime revenue) |
+| `stripe-analytics` | `batchCount` = days (consolidated revenue + subs + cohorts JSON) |
+
+**When Stripe surfaces in the dashboard:** `dashboard` automatically pulls Stripe alongside Shopify when connected. The "topline" revenue number respects `revenueSourcePreference` — default prefers Shopify when both are connected (safer for order semantics). Subscription metrics (MRR/ARR/churn) always come from Stripe regardless of topline pick.
+
+**FX:** all amounts converted to USD via Stripe's `/v1/exchange_rates/usd`, cached 1 hour. Historical drift ±1%.
 
 ### Klaviyo (`klaviyo`)
 

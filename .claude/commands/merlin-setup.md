@@ -561,6 +561,34 @@ After connecting:
 2. **Pull order metrics**: Run `{"action": "shopify-orders", "batchCount": 7}` to get recent revenue data for the dashboard.
 3. Launch a background SEO audit:
 
+**F) Stripe connection (optional — for revenue reporting):**
+Offer when the brand is **SaaS / subscription / non-Shopify commerce**, or when the user mentions MRR, churn, ARR, or subscriptions.
+
+Stripe is **read-only**: the OAuth scope is pinned to `read_only`, so Merlin can see revenue, subscriptions, and cohorts but cannot charge, refund, cancel, or modify anything. This is enforced at three layers (source scan, Worker BFF scope check, Stripe's own 403 on write endpoints).
+
+**One-click OAuth — no API keys to paste:**
+```
+mcp__merlin__platform_login({platform: "stripe", brand: "X"})
+```
+- Opens `https://connect.stripe.com/oauth/authorize?scope=read_only&...`
+- User clicks "Connect" in their Stripe account
+- Token exchanged server-side via the Cloudflare Worker BFF (client secret never touches the user's machine)
+
+After connecting:
+1. **Verify account**: Run `{"action": "stripe-setup"}` to confirm the connection and cache the account ID.
+2. **Pull revenue**: `{"action": "stripe-revenue", "batchCount": 30}` — gross, refunds, net, AOV, new customers, all USD-normalized via Stripe's own FX.
+3. **Pull subscription metrics**: `{"action": "stripe-subscriptions"}` — MRR, ARR, active subs, 30-day churn, top plans. Returns nil / skipped if the account has zero subscription products (transactional-only merchants).
+
+**Revenue source disambiguation (CRITICAL):** if BOTH Shopify AND Stripe are connected AND Stripe is the Shopify payment processor, you will double-count orders without intervention. The first `stripe-setup` run after connecting both will print a prompt. Ask the user and then run:
+```
+{"action": "stripe-preference", "provider": "shopify"}   # Shopify is topline, Stripe hidden from revenue row
+{"action": "stripe-preference", "provider": "stripe"}    # Stripe is topline, Shopify hidden from revenue row
+{"action": "stripe-preference", "provider": "both"}      # Separate streams (e.g. Shopify + a subscription product on Stripe Billing) — sum them
+```
+Default (no preference set) prefers Shopify when both are connected — safer, avoids double-count.
+
+
+
 **Background SEO Audit** (run via Agent tool while displaying the token instructions):
 
 ### NON-NEGOTIABLE: What Claude NEVER touches

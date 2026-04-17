@@ -1,6 +1,6 @@
 {
   "name": "Merlin",
-  "version": "1.3.0",
+  "version": "1.5.0",
   "description": "Merlin — Your AI CMO",
   "main": "app/main.js",
   "scripts": {
@@ -34,7 +34,27 @@
     ],
     "afterSign": "build/notarize.js",
     "files": [
-      "app/**/*"
+      "app/**/*",
+      "!.claude${/*}",
+      "!assets${/*}",
+      "!build${/*}",
+      "!bootstrapper${/*}",
+      "!pwa${/*}",
+      "!results${/*}",
+      "!voice-tools-work${/*}",
+      "!dist${/*}",
+      "!.merlin-backup${/*}",
+      "!CLAUDE.md",
+      "!memory.md",
+      "!version.json",
+      "!README.md",
+      "!README.txt",
+      "!LICENSE.txt",
+      "!seasonal.json",
+      "!test-sdk.js",
+      "!*.exe",
+      "!*.dmg",
+      "!*.zip"
     ],
     "extraResources": [
       {

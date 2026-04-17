@@ -376,9 +376,16 @@ function appendText(text) {
       if (currentBubble && textBuffer.length !== lastRenderedLength) {
         // Strip leading <voice>speak|silent</voice> before render so the
         // UI metadata tag never flashes visibly during streaming.
-        const { cleaned } = stripVoiceTag(textBuffer);
+        const { speak, cleaned, resolved } = stripVoiceTag(textBuffer);
         currentBubble.innerHTML = renderMarkdown(cleaned);
         lastRenderedLength = textBuffer.length;
+        // Streaming TTS: feed complete sentences as they arrive so the
+        // wizard starts speaking while Claude is still typing. Guarded on
+        // resolved so we never synth the raw "<voice>speak</voice>" tag
+        // before we know what Claude is opening with.
+        if (voiceEnabled && speak && resolved && cleaned.length > 0) {
+          _flushStreamingSpeakSentences(currentBubble, cleaned);
+        }
       }
       scrollToBottom();
       rafPending = false;
@@ -429,7 +436,16 @@ function finalizeBubble() {
       addReplayButton(currentBubble, cleaned);
     }
     if (voiceEnabled && speak && cleaned && cleaned.trim().length > 0) {
-      speakMessage(cleaned, currentBubble);
+      // If a streaming-speak session already fed sentences during the
+      // stream, just close it — calling speakMessage here would re-synth
+      // the entire response on top of already-playing audio.
+      const handledByStream = _finishStreamingSpeak(currentBubble, cleaned);
+      if (!handledByStream) speakMessage(cleaned, currentBubble);
+    } else if (_streamSpeakState && _streamSpeakState.session.bubbleEl === currentBubble) {
+      // Edge case: voice flipped off mid-response (toggle button or Escape
+      // already called stopSpeaking, which clears state). If state somehow
+      // survived — abandon it cleanly so no stray appends leak to worker.
+      _finishStreamingSpeak(currentBubble, cleaned);
     }
   }
   currentBubble = null;
@@ -867,6 +883,7 @@ function handleStreamEvent(msg) {
     // Show tool activity status (like Claude Code) — single persistent row, no stacking
     if (event.content_block && event.content_block.type === 'tool_use') {
       const toolName = event.content_block.name || '';
+      const input = event.content_block.input || {};
       const labels = {
         'Bash': 'Casting a spell', 'Read': 'Reading the scrolls', 'Write': 'Inscribing',
         'Edit': 'Refining the formula', 'Glob': 'Scanning the vault', 'Grep': 'Divining patterns',
@@ -874,7 +891,49 @@ function handleStreamEvent(msg) {
         'Agent': 'Dispatching a familiar', 'TodoWrite': 'Charting the course',
         'AskUserQuestion': 'Awaiting your wisdom',
       };
-      const label = labels[toolName] || 'Channeling';
+      // MCP Merlin tools — specific labels per action so users see what's happening
+      // instead of the generic "Channeling" fallback. Image/video/voice runs can
+      // take minutes; a precise label prevents "taking a while…" dead-air confusion.
+      let label = labels[toolName];
+      if (!label && typeof toolName === 'string' && toolName.indexOf('mcp__merlin__') === 0) {
+        const tool = toolName.slice('mcp__merlin__'.length);
+        const action = (input && typeof input.action === 'string') ? input.action : '';
+        const count = (input && typeof input.count === 'number' && input.count > 0) ? input.count : 0;
+        if (tool === 'image' || tool === 'content') {
+          label = count > 1 ? ('Brewing ' + count + ' images') : 'Brewing an image';
+        } else if (tool === 'video') {
+          label = 'Rendering video (this can take a few minutes)';
+        } else if (tool === 'voice') {
+          label = action === 'clone' ? 'Cloning voice' : 'Synthesizing voice';
+        } else if (tool === 'email') {
+          label = 'Drafting email';
+        } else if (tool === 'seo') {
+          label = action === 'audit' ? 'Auditing site' : 'Researching keywords';
+        } else if (tool === 'dashboard') {
+          label = 'Reading performance';
+        } else if (tool === 'meta_ads' || tool === 'tiktok_ads' || tool === 'google_ads' || tool === 'amazon_ads' || tool === 'reddit_ads') {
+          const platform = tool.replace('_ads', '').replace(/^./, function (c) { return c.toUpperCase(); });
+          if (action === 'push') label = 'Publishing ' + platform + ' ad';
+          else if (action === 'kill') label = 'Pausing ' + platform + ' ad';
+          else if (action === 'duplicate') label = 'Scaling ' + platform + ' ad';
+          else if (action === 'insights') label = 'Reading ' + platform + ' insights';
+          else if (action === 'setup') label = 'Setting up ' + platform + ' campaign';
+          else label = 'Talking to ' + platform;
+        } else if (tool === 'shopify') {
+          label = 'Reading Shopify';
+        } else if (tool === 'klaviyo') {
+          label = 'Reading Klaviyo';
+        } else if (tool === 'platform_login') {
+          label = 'Connecting platform';
+        } else if (tool === 'connection_status') {
+          label = 'Checking connections';
+        } else if (tool === 'config') {
+          label = 'Updating config';
+        } else {
+          label = 'Channeling';
+        }
+      }
+      if (!label) label = 'Channeling';
       setStatusLabel(label);
     }
   }
@@ -1697,7 +1756,7 @@ const PLATFORM_DISPLAY_NAMES = {
   meta: 'Meta', tiktok: 'TikTok', google: 'Google Ads', amazon: 'Amazon',
   reddit: 'Reddit', linkedin: 'LinkedIn', shopify: 'Shopify', etsy: 'Etsy',
   klaviyo: 'Klaviyo', pinterest: 'Pinterest', snapchat: 'Snapchat',
-  twitter: 'X', slack: 'Slack', discord: 'Discord',
+  twitter: 'X', slack: 'Slack', discord: 'Discord', stripe: 'Stripe',
   fal: 'fal.ai', elevenlabs: 'ElevenLabs', heygen: 'HeyGen', arcads: 'Arcads',
 };
 function platformDisplayName(platform) {
@@ -1713,11 +1772,11 @@ function platformDisplayName(platform) {
 // linkedin/snapchat/twitter were missing from every list, so any ecom/agency
 // brand couldn't see Reddit or Etsy even though they're fully connected.
 const verticalIntegrations = {
-  ecom:    ['meta','tiktok','shopify','klaviyo','google','pinterest','amazon','reddit','etsy','snapchat','twitter','linkedin','fal','elevenlabs','heygen','arcads','slack','discord'],
-  game:    ['meta','tiktok','google','reddit','snapchat','twitter','fal','heygen','elevenlabs','arcads','slack','discord'],
-  saas:    ['meta','google','klaviyo','linkedin','reddit','twitter','fal','elevenlabs','heygen','arcads','slack','discord'],
-  local:   ['meta','google','reddit','fal','slack','discord'],
-  agency:  ['meta','tiktok','shopify','klaviyo','google','pinterest','amazon','reddit','etsy','linkedin','snapchat','twitter','fal','elevenlabs','heygen','arcads','slack','discord'],
+  ecom:    ['meta','tiktok','shopify','stripe','klaviyo','google','pinterest','amazon','reddit','etsy','snapchat','twitter','linkedin','fal','elevenlabs','heygen','arcads','slack','discord'],
+  game:    ['meta','tiktok','google','stripe','reddit','snapchat','twitter','fal','heygen','elevenlabs','arcads','slack','discord'],
+  saas:    ['meta','google','stripe','klaviyo','linkedin','reddit','twitter','fal','elevenlabs','heygen','arcads','slack','discord'],
+  local:   ['meta','google','stripe','reddit','fal','slack','discord'],
+  agency:  ['meta','tiktok','shopify','stripe','klaviyo','google','pinterest','amazon','reddit','etsy','linkedin','snapchat','twitter','fal','elevenlabs','heygen','arcads','slack','discord'],
 };
 
 async function loadBrands() {
@@ -1853,16 +1912,42 @@ function fmtMoney(n) {
   return '$' + Math.round(n);
 }
 
+const STATS_PERIOD_LABELS = { 1: 'Yesterday', 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last 12 months' };
+
+const PLATFORM_DISPLAY = {
+  'Meta Ads': 'Meta', 'meta': 'Meta',
+  'Google Ads': 'Google', 'google': 'Google',
+  'TikTok Ads': 'TikTok', 'tiktok': 'TikTok',
+  'Amazon Ads': 'Amazon', 'amazon': 'Amazon',
+  'LinkedIn Ads': 'LinkedIn', 'linkedin': 'LinkedIn',
+};
+function platformShortName(p) { return PLATFORM_DISPLAY[p] || p || ''; }
+
 function setStatsEmpty() {
-  ['stats-revenue','stats-roas','stats-spend'].forEach(id => {
-    document.getElementById(id).textContent = '--';
+  ['stats-revenue','stats-roas','stats-spend','stats-customers'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.textContent = '--';
   });
   document.getElementById('stats-period').textContent = 'No data yet — run a performance check first';
   document.getElementById('stats-story').textContent = '';
+  document.getElementById('stats-top-ad').textContent = '';
   document.getElementById('stats-bar-spend').style.width = '50%';
   document.getElementById('stats-bar-revenue').style.width = '50%';
   document.getElementById('stats-bar-spend').querySelector('.stats-bar-label').textContent = '';
   document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = '';
+  const pill = document.getElementById('stats-trend-pill');
+  if (pill) { pill.classList.add('hidden'); pill.textContent = ''; pill.classList.remove('up','down','flat'); }
+  const label = document.getElementById('stats-revenue-label');
+  if (label) label.textContent = 'revenue from Merlin\u2019s ads';
+  setStatsPeriodActive(null);
+}
+
+function setStatsPeriodActive(days) {
+  document.querySelectorAll('.stats-period-btn').forEach(btn => {
+    const d = parseInt(btn.dataset.days, 10);
+    if (days && d === days) btn.classList.add('active');
+    else btn.classList.remove('active');
+  });
 }
 
 function updateStatsBarAndStory(rev, spend, mer) {
@@ -1873,7 +1958,7 @@ function updateStatsBarAndStory(rev, spend, mer) {
     document.getElementById('stats-bar-spend').style.width = spendPct + '%';
     document.getElementById('stats-bar-revenue').style.width = revPct + '%';
     document.getElementById('stats-bar-spend').querySelector('.stats-bar-label').textContent = fmtMoney(spend) + ' spent';
-    document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = fmtMoney(rev) + ' revenue';
+    document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = fmtMoney(rev) + ' back';
   } else {
     document.getElementById('stats-bar-spend').style.width = '50%';
     document.getElementById('stats-bar-revenue').style.width = '50%';
@@ -1881,12 +1966,78 @@ function updateStatsBarAndStory(rev, spend, mer) {
     document.getElementById('stats-bar-revenue').querySelector('.stats-bar-label').textContent = '';
   }
   if (mer > 0 && spend > 0) {
-    document.getElementById('stats-story').textContent = 'Every $1 you spent returned $' + mer.toFixed(2);
+    document.getElementById('stats-story').textContent = '$1 in \u2192 $' + mer.toFixed(2) + ' out';
   } else if (rev > 0) {
     document.getElementById('stats-story').textContent = fmtMoney(rev) + ' in revenue tracked';
   } else {
     document.getElementById('stats-story').textContent = '';
   }
+}
+
+function renderStatsTrendPill(trend) {
+  const pill = document.getElementById('stats-trend-pill');
+  if (!pill) return;
+  pill.classList.remove('up', 'down', 'flat');
+  if (trend == null || isNaN(trend)) {
+    pill.classList.add('hidden');
+    pill.textContent = '';
+    return;
+  }
+  const rounded = Math.round(trend);
+  let arrow, cls;
+  if (rounded > 0) { arrow = '\u2191'; cls = 'up'; }
+  else if (rounded < 0) { arrow = '\u2193'; cls = 'down'; }
+  else { arrow = '\u2192'; cls = 'flat'; }
+  pill.classList.add(cls);
+  pill.classList.remove('hidden');
+  pill.textContent = `${arrow} ${Math.abs(rounded)}% vs prior`;
+}
+
+function renderStatsTopChannel(topChannel) {
+  const el = document.getElementById('stats-top-ad');
+  if (!el) return;
+  if (!topChannel) { el.textContent = ''; return; }
+  const name = platformShortName(topChannel.name);
+  const parts = [];
+  if (topChannel.revenue > 0 && topChannel.spend > 0) {
+    parts.push(`${fmtMoney(topChannel.revenue)} from ${fmtMoney(topChannel.spend)}`);
+  } else if (topChannel.spend > 0) {
+    parts.push(`${fmtMoney(topChannel.spend)} spent`);
+  }
+  if (topChannel.roas > 0) parts.push(`${topChannel.roas.toFixed(1)}x return`);
+  el.textContent = parts.length > 0 ? `\u2726 Top win: ${name} \u2014 ${parts.join(' \u00b7 ')}` : '';
+}
+
+// Paint the whole card from a perf object. Ad-attributed revenue is preferred
+// for the hero number (honest — it excludes organic, direct, email, referrals
+// that Merlin can't claim credit for). Falls back to total revenue if no ad
+// platforms reported purchase value (fresh accounts, TikTok-only, etc.).
+function renderStatsCard(perf, days) {
+  const totalRev = perf.revenue > 0 ? perf.revenue : 0;
+  const adRev = perf.adRevenue > 0 ? perf.adRevenue : 0;
+  const spend = perf.spend > 0 ? perf.spend : 0;
+
+  const heroVal = adRev > 0 ? adRev : totalRev;
+  const heroIsAdRev = adRev > 0;
+  const effMer = heroIsAdRev && spend > 0 ? (adRev / spend) : (perf.mer > 0 ? perf.mer : (spend > 0 ? totalRev / spend : 0));
+
+  document.getElementById('stats-revenue').textContent = heroVal > 0 ? fmtMoney(heroVal) : '--';
+  document.getElementById('stats-spend').textContent = spend > 0 ? fmtMoney(spend) : '--';
+  document.getElementById('stats-roas').textContent = effMer > 0 ? effMer.toFixed(1) + 'x' : '--';
+  document.getElementById('stats-customers').textContent = perf.newCustomers > 0 ? String(perf.newCustomers) : '--';
+
+  const revLabel = document.getElementById('stats-revenue-label');
+  if (revLabel) {
+    revLabel.textContent = heroIsAdRev
+      ? 'revenue from Merlin\u2019s ads'
+      : (heroVal > 0 ? 'revenue tracked' : 'revenue from Merlin\u2019s ads');
+  }
+
+  document.getElementById('stats-period').textContent = STATS_PERIOD_LABELS[days] || `Last ${days} days`;
+  setStatsPeriodActive(days);
+  updateStatsBarAndStory(heroVal, spend, effMer);
+  renderStatsTrendPill(perf.trend);
+  renderStatsTopChannel(perf.topChannel);
 }
 
 // populateStatsCard was removed on 2026-04-15 alongside the action-keyed
@@ -2093,7 +2244,7 @@ async function renderWisdom(w) {
 
   const prettyPlatform = (p) => {
     if (!p) return '';
-    const map = { meta: 'Meta', tiktok: 'TikTok', google: 'Google', amazon: 'Amazon', reddit: 'Reddit', linkedin: 'LinkedIn', shopify: 'Shopify' };
+    const map = { meta: 'Meta', tiktok: 'TikTok', google: 'Google', amazon: 'Amazon', reddit: 'Reddit', linkedin: 'LinkedIn', shopify: 'Shopify', stripe: 'Stripe' };
     return map[String(p).toLowerCase()] || String(p).charAt(0).toUpperCase() + String(p).slice(1);
   };
 
@@ -2233,19 +2384,221 @@ document.getElementById('stats-overlay').addEventListener('click', (e) => {
   if (e.target.id === 'stats-overlay') document.getElementById('stats-overlay').classList.add('hidden');
 });
 
-// Share button — copy stats as shareable text
-document.getElementById('stats-share').addEventListener('click', async () => {
-  const btn = document.getElementById('stats-share');
+// Share — build a self-contained PNG card via the native Canvas API and drop
+// it on the clipboard as image + text. Image is what people actually paste into
+// IG Story / X / Discord; text is the fallback when ClipboardItem isn't
+// available (older browsers, non-https contexts, privacy-restricted setups).
+//
+// No new npm dep — the renderer is hand-drawn so the output is identical on
+// every machine and doesn't depend on the user's installed fonts or theme.
+function drawStatsShareCard() {
+  const W = 1080, H = 1350; // IG Story-ish aspect, safe for X/Discord too.
+  const canvas = document.createElement('canvas');
+  canvas.width = W; canvas.height = H;
+  const ctx = canvas.getContext('2d');
+
+  const bg = ctx.createLinearGradient(0, 0, W, H);
+  bg.addColorStop(0, '#0a0a0a');
+  bg.addColorStop(1, '#141420');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  const glow = ctx.createRadialGradient(W/2, H*0.35, 100, W/2, H*0.35, W*0.7);
+  glow.addColorStop(0, 'rgba(167,139,250,0.15)');
+  glow.addColorStop(1, 'rgba(167,139,250,0)');
+  ctx.fillStyle = glow; ctx.fillRect(0, 0, W, H);
+
+  const PAD = 80;
+  const cardX = PAD, cardY = PAD, cardW = W - PAD*2, cardH = H - PAD*2;
+  const r = 44;
+  ctx.fillStyle = 'rgba(255,255,255,0.02)';
+  ctx.strokeStyle = 'rgba(167,139,250,0.35)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(cardX+r, cardY);
+  ctx.lineTo(cardX+cardW-r, cardY); ctx.quadraticCurveTo(cardX+cardW, cardY, cardX+cardW, cardY+r);
+  ctx.lineTo(cardX+cardW, cardY+cardH-r); ctx.quadraticCurveTo(cardX+cardW, cardY+cardH, cardX+cardW-r, cardY+cardH);
+  ctx.lineTo(cardX+r, cardY+cardH); ctx.quadraticCurveTo(cardX, cardY+cardH, cardX, cardY+cardH-r);
+  ctx.lineTo(cardX, cardY+r); ctx.quadraticCurveTo(cardX, cardY, cardX+r, cardY);
+  ctx.closePath(); ctx.fill(); ctx.stroke();
+
+  const brand = document.getElementById('stats-brand-name').textContent || 'Merlin';
+  const period = document.getElementById('stats-period').textContent || '';
+  const revText = document.getElementById('stats-revenue').textContent || '--';
+  const revLabel = document.getElementById('stats-revenue-label').textContent || '';
+  const story = document.getElementById('stats-story').textContent || '';
+  const spend = document.getElementById('stats-spend').textContent || '--';
+  const roas = document.getElementById('stats-roas').textContent || '--';
+  const customers = document.getElementById('stats-customers').textContent || '--';
+  const topLine = document.getElementById('stats-top-ad').textContent || '';
+  const trendPill = document.getElementById('stats-trend-pill');
+  const trendText = trendPill && !trendPill.classList.contains('hidden') ? trendPill.textContent : '';
+  const trendUp = trendPill?.classList.contains('up');
+  const trendDown = trendPill?.classList.contains('down');
+
+  ctx.textAlign = 'center';
+  const cx = W / 2;
+
+  let y = cardY + 90;
+  ctx.fillStyle = '#a78bfa';
+  ctx.font = '600 26px -apple-system, Segoe UI, system-ui, sans-serif';
+  ctx.fillText('\u2726  MERLIN GOT ME', cx, y);
+
+  y += 75;
+  ctx.fillStyle = '#ffffff';
+  ctx.font = '800 56px -apple-system, Segoe UI, system-ui, sans-serif';
+  ctx.fillText(brand, cx, y);
+
+  y += 42;
+  ctx.fillStyle = 'rgba(255,255,255,0.5)';
+  ctx.font = '500 22px -apple-system, Segoe UI, system-ui, sans-serif';
+  ctx.fillText(period, cx, y);
+
+  y += 150;
+  const heroGrad = ctx.createLinearGradient(cx-300, y, cx+300, y);
+  heroGrad.addColorStop(0, '#34d399');
+  heroGrad.addColorStop(1, '#a78bfa');
+  ctx.fillStyle = heroGrad;
+  ctx.font = '800 160px -apple-system, Segoe UI, system-ui, sans-serif';
+  ctx.fillText(revText, cx, y);
+
+  y += 52;
+  ctx.fillStyle = 'rgba(255,255,255,0.7)';
+  ctx.font = '500 26px -apple-system, Segoe UI, system-ui, sans-serif';
+  ctx.fillText(revLabel, cx, y);
+
+  if (trendText) {
+    y += 60;
+    const pillW = 280, pillH = 54;
+    const pillX = cx - pillW/2, pillY = y - pillH/2 + 8;
+    ctx.fillStyle = trendUp ? 'rgba(52,211,153,0.15)' : trendDown ? 'rgba(248,113,113,0.15)' : 'rgba(255,255,255,0.08)';
+    ctx.strokeStyle = trendUp ? 'rgba(52,211,153,0.5)' : trendDown ? 'rgba(248,113,113,0.5)' : 'rgba(255,255,255,0.2)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    const pr = pillH/2;
+    ctx.moveTo(pillX+pr, pillY);
+    ctx.lineTo(pillX+pillW-pr, pillY); ctx.quadraticCurveTo(pillX+pillW, pillY, pillX+pillW, pillY+pr);
+    ctx.lineTo(pillX+pillW, pillY+pillH-pr); ctx.quadraticCurveTo(pillX+pillW, pillY+pillH, pillX+pillW-pr, pillY+pillH);
+    ctx.lineTo(pillX+pr, pillY+pillH); ctx.quadraticCurveTo(pillX, pillY+pillH, pillX, pillY+pillH-pr);
+    ctx.lineTo(pillX, pillY+pr); ctx.quadraticCurveTo(pillX, pillY, pillX+pr, pillY);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = trendUp ? '#34d399' : trendDown ? '#f87171' : '#ffffff';
+    ctx.font = '700 22px -apple-system, Segoe UI, system-ui, sans-serif';
+    ctx.fillText(trendText, cx, y + 19);
+  }
+
+  if (story) {
+    y += 100;
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 34px -apple-system, Segoe UI, system-ui, sans-serif';
+    ctx.fillText(story, cx, y);
+  }
+
+  y += 80;
+  const cellH = 130, cellW = (cardW - 80) / 3, gap = 20;
+  const gridX = cardX + 40;
+  const cells = [
+    { v: spend, l: 'AD SPEND' },
+    { v: roas, l: 'RETURN' },
+    { v: customers, l: 'NEW CUSTOMERS' },
+  ];
+  cells.forEach((c, i) => {
+    const x = gridX + i * (cellW + gap) - (gap * (cells.length-1))/cells.length + (i * (gap/cells.length));
+    const cellX = gridX + i * ((cardW - 80 - gap*2) / 3 + gap);
+    const w = (cardW - 80 - gap*2) / 3;
+    ctx.fillStyle = 'rgba(255,255,255,0.04)';
+    ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+    ctx.lineWidth = 1;
+    const cr = 16;
+    ctx.beginPath();
+    ctx.moveTo(cellX+cr, y);
+    ctx.lineTo(cellX+w-cr, y); ctx.quadraticCurveTo(cellX+w, y, cellX+w, y+cr);
+    ctx.lineTo(cellX+w, y+cellH-cr); ctx.quadraticCurveTo(cellX+w, y+cellH, cellX+w-cr, y+cellH);
+    ctx.lineTo(cellX+cr, y+cellH); ctx.quadraticCurveTo(cellX, y+cellH, cellX, y+cellH-cr);
+    ctx.lineTo(cellX, y+cr); ctx.quadraticCurveTo(cellX, y, cellX+cr, y);
+    ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 42px -apple-system, Segoe UI, system-ui, sans-serif';
+    ctx.fillText(c.v, cellX + w/2, y + 60);
+    ctx.fillStyle = 'rgba(255,255,255,0.5)';
+    ctx.font = '600 16px -apple-system, Segoe UI, system-ui, sans-serif';
+    ctx.fillText(c.l, cellX + w/2, y + 100);
+  });
+  y += cellH;
+
+  if (topLine) {
+    y += 50;
+    ctx.fillStyle = 'rgba(255,255,255,0.85)';
+    ctx.font = 'italic 500 26px -apple-system, Segoe UI, system-ui, sans-serif';
+    const maxW = cardW - 80;
+    let txt = topLine;
+    while (ctx.measureText(txt).width > maxW && txt.length > 10) {
+      txt = txt.slice(0, -4) + '\u2026';
+    }
+    ctx.fillText(txt, cx, y);
+  }
+
+  const footerY = cardY + cardH - 60;
+  ctx.fillStyle = 'rgba(255,255,255,0.4)';
+  ctx.font = '600 20px -apple-system, Segoe UI, system-ui, sans-serif';
+  ctx.fillText('\u2726 merlingotme.com', cx, footerY);
+
+  return canvas;
+}
+
+async function copyShareCardToClipboard() {
+  const canvas = drawStatsShareCard();
+  return new Promise((resolve, reject) => {
+    canvas.toBlob(async (blob) => {
+      if (!blob) { reject(new Error('blob failed')); return; }
+      try {
+        if (typeof ClipboardItem !== 'undefined' && navigator.clipboard?.write) {
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
+          resolve('image');
+          return;
+        }
+      } catch (err) { /* fall through to text fallback */ }
+      reject(new Error('no-image-clipboard'));
+    }, 'image/png');
+  });
+}
+
+function buildShareText() {
   const brand = document.getElementById('stats-brand-name').textContent;
   const rev = document.getElementById('stats-revenue').textContent;
+  const revLabel = document.getElementById('stats-revenue-label').textContent;
   const period = document.getElementById('stats-period').textContent;
   const roas = document.getElementById('stats-roas').textContent;
   const story = document.getElementById('stats-story').textContent;
   const spend = document.getElementById('stats-spend').textContent;
-  const text = `✦ Merlin Got Me\n${brand} — ${period}\n${rev} revenue\n${story ? story + '\n' : ''}${spend} spent · ${roas}\nmerlingotme.com`;
-  try { await navigator.clipboard.writeText(text); } catch {}
+  const customers = document.getElementById('stats-customers').textContent;
+  const trendEl = document.getElementById('stats-trend-pill');
+  const trend = trendEl && !trendEl.classList.contains('hidden') ? trendEl.textContent : '';
+  const top = document.getElementById('stats-top-ad').textContent;
+  const lines = [
+    '\u2726 Merlin Got Me',
+    `${brand} \u2014 ${period}`,
+    `${rev} ${revLabel}`,
+  ];
+  if (trend) lines.push(trend);
+  if (story) lines.push(story);
+  lines.push(`${spend} spent \u00b7 ${roas} return \u00b7 ${customers} new customers`);
+  if (top) lines.push(top);
+  lines.push('merlingotme.com');
+  return lines.join('\n');
+}
+
+document.getElementById('stats-share').addEventListener('click', async () => {
+  const btn = document.getElementById('stats-share');
   const orig = btn.innerHTML;
-  btn.textContent = 'Copied!';
+  let mode = 'text';
+  try {
+    await copyShareCardToClipboard();
+    mode = 'image';
+  } catch {
+    try { await navigator.clipboard.writeText(buildShareText()); } catch {}
+    mode = 'text';
+  }
+  btn.textContent = mode === 'image' ? 'Image copied!' : 'Text copied!';
   btn.style.background = 'var(--success)';
   setTimeout(() => { btn.innerHTML = orig; btn.style.background = ''; }, 2000);
 });
@@ -2349,8 +2702,13 @@ function loadConnections() {
   }).catch((err) => { console.warn('[connections]', err); });
 }
 
-// Auto-refresh connections when tokens change (e.g., OAuth completed in background)
-merlin.onConnectionsChanged(() => loadConnections());
+// Auto-refresh connections when tokens change (e.g., OAuth completed in background).
+// Also seed the morning-briefing spell for any brand that just picked up its first
+// ad platform — users shouldn't have to visit the Spellbook to get proactive reports.
+merlin.onConnectionsChanged(() => {
+  loadConnections();
+  autoSeedMorningBriefing();
+});
 
 document.getElementById('magic-btn').addEventListener('click', () => {
   document.getElementById('archive-panel').classList.add('hidden');
@@ -2419,7 +2777,7 @@ document.addEventListener('click', (e) => {
 });
 
 // Connect platform tiles — ALL connections handled directly in UI, zero chat involvement
-const OAUTH_PLATFORMS = new Set(['meta', 'tiktok', 'shopify', 'google', 'amazon', 'pinterest', 'klaviyo', 'slack', 'discord', 'etsy', 'reddit']);
+const OAUTH_PLATFORMS = new Set(['meta', 'tiktok', 'shopify', 'google', 'amazon', 'pinterest', 'klaviyo', 'slack', 'discord', 'etsy', 'reddit', 'stripe']);
 const API_KEY_PLATFORMS = {
   fal:        { key: 'falApiKey', label: 'fal.ai', placeholder: 'fal-xxxx...', url: 'https://fal.ai/dashboard/keys' },
   elevenlabs: { key: 'elevenLabsApiKey', label: 'ElevenLabs', placeholder: 'xi_xxxx...', url: 'https://elevenlabs.io/app/settings/api-keys' },
@@ -2906,6 +3264,67 @@ function sendChatFromPanel(msg) {
   merlin.sendMessage(msg);
 }
 
+// Morning-briefing preset — hoisted to module scope so the auto-seed path
+// (onConnectionsChanged) and the Spellbook template list both reference one
+// source of truth. Editing the prompt here propagates to both.
+const MORNING_BRIEFING_PRESET = {
+  spell: 'morning-briefing',
+  cron: '0 5 * * 1-5',
+  name: 'Morning Briefing',
+  desc: 'Overnight results at 5 AM',
+  prompt:
+    'Pull overnight results via dashboard. Read .merlin-wisdom.json for benchmarks. ' +
+    'Save to .merlin-briefing.json: date, ads (winners/losers/fatigue signals), content (published), ' +
+    'revenue (yesterday + week + MER trend), recommendation (one actionable sentence), severity. ' +
+    'Set "severity" to "critical" if daily ROAS dropped >30% vs 7-day avg OR an ad account was rejected/disabled OR blended MER fell below 1.5x; ' +
+    '"warning" if revenue dropped >10% vs 7-day avg OR any active ad has CPC >2x the vertical average OR spend is pacing >20% over plan; ' +
+    'otherwise "ok". This field drives a desktop notification — only mark non-"ok" when the signal is real and actionable. ' +
+    'Compare your CTR/ROAS to Wisdom collective averages — flag if above or below. Keep each field 2-4 lines. ' +
+    'If slackBotToken exists in config, post a clean digest to the Slack channel using the Slack API (chat.postMessage with the bot token) in this exact format:\n' +
+    '"✦ Morning Briefing — [Brand]\n' +
+    '━━━━━━━━━━━━━━━\n' +
+    '💰 Revenue: $X yesterday · $Xk this week · MER Xx\n' +
+    '📈 Winners: [top ad name] at Xx ROAS\n' +
+    '⚠️ Action: [one-line recommendation]\n' +
+    '━━━━━━━━━━━━━━━"\n' +
+    'Keep it to 4 lines max. No fluff. Just numbers and one action item. ' +
+    'GEO CHECK (weekly, run on Mondays only): Use WebSearch to search for the brand\'s product category ' +
+    '(e.g., "best streetwear brands", "best [vertical] [product]"). Check if the brand appears in AI-generated snippets ' +
+    'or top results. Score: appeared in X/5 searches. Save to memory.md: `## GEO Score\n0407|3/5|"best streetwear" yes|"affordable hoodies" no`. ' +
+    'If score drops vs last week, flag in briefing.',
+};
+
+// Silently seed the morning-briefing spell for any brand that has an ad
+// platform connected but no spells yet. Fired from onConnectionsChanged so
+// new users get proactive reporting the moment they connect their first
+// platform — no manual Spellbook trip required. Idempotent: brands with
+// any existing spell are skipped so users who intentionally disabled the
+// briefing don't get it resurrected on the next OAuth.
+let autoSeedInFlight = false;
+async function autoSeedMorningBriefing() {
+  if (autoSeedInFlight) return;
+  autoSeedInFlight = true;
+  try {
+    const targets = await discoverBrandsForSpellActivation();
+    for (const brand of targets) {
+      try {
+        const existing = await merlin.listSpells(brand).catch(() => []);
+        if (existing && existing.length > 0) continue;
+        const staggered = offsetCronMinutes(MORNING_BRIEFING_PRESET.cron, brandHashMinuteOffset(brand));
+        await merlin.createSpell(
+          `merlin-${MORNING_BRIEFING_PRESET.spell}`,
+          staggered,
+          MORNING_BRIEFING_PRESET.name,
+          MORNING_BRIEFING_PRESET.prompt,
+          brand,
+        );
+      } catch (err) { console.warn('[auto-seed]', brand, err?.message); }
+    }
+  } finally {
+    autoSeedInFlight = false;
+  }
+}
+
 async function loadSpells() {
   let spells;
   const activeBrand = document.getElementById('brand-select')?.value || '';
@@ -2962,23 +3381,7 @@ async function loadSpells() {
       '- Winners get budget doubled every 48h, max 20% daily increase\n' +
       '- Platform allocation: shift monthly toward highest blended ROAS\n' +
       'Report: killed (with reason), scaled, warnings, net budget change, platform allocation recommendation.' },
-    { spell: 'morning-briefing', cron: '0 5 * * 1-5', name: 'Morning Briefing', desc: 'Overnight results at 5 AM', prompt:
-      'Pull overnight results via dashboard. Read .merlin-wisdom.json for benchmarks. ' +
-      'Save to .merlin-briefing.json: date, ads (winners/losers/fatigue signals), content (published), ' +
-      'revenue (yesterday + week + MER trend), recommendation (one actionable sentence). ' +
-      'Compare your CTR/ROAS to Wisdom collective averages — flag if above or below. Keep each field 2-4 lines. ' +
-      'If slackBotToken exists in config, post a clean digest to the Slack channel using the Slack API (chat.postMessage with the bot token) in this exact format:\n' +
-      '"✦ Morning Briefing — [Brand]\n' +
-      '━━━━━━━━━━━━━━━\n' +
-      '💰 Revenue: $X yesterday · $Xk this week · MER Xx\n' +
-      '📈 Winners: [top ad name] at Xx ROAS\n' +
-      '⚠️ Action: [one-line recommendation]\n' +
-      '━━━━━━━━━━━━━━━"\n' +
-      'Keep it to 4 lines max. No fluff. Just numbers and one action item. ' +
-      'GEO CHECK (weekly, run on Mondays only): Use WebSearch to search for the brand\'s product category ' +
-      '(e.g., "best streetwear brands", "best [vertical] [product]"). Check if the brand appears in AI-generated snippets ' +
-      'or top results. Score: appeared in X/5 searches. Save to memory.md: `## GEO Score\n0407|3/5|"best streetwear" yes|"affordable hoodies" no`. ' +
-      'If score drops vs last week, flag in briefing.' },
+    { ...MORNING_BRIEFING_PRESET, desc: MORNING_BRIEFING_PRESET.desc },
     { spell: 'weekly-digest', cron: '0 9 * * 1', name: 'Weekly Digest', desc: 'Monday strategy + benchmarks', prompt:
       'Pull 7-day performance. Compare to previous week AND Wisdom collective benchmarks. ' +
       'List: revenue, spend, MER trend, top 3 ads by ROAS, worst 3 killed, IVT test results (which variable won this week). ' +
@@ -3763,8 +4166,13 @@ const speakerBtn = document.getElementById('speaker-btn');
 let voiceEnabled = localStorage.getItem('merlin.voiceOutput') === '1';
 let currentAudio = null;
 let currentSpeakingBubble = null;
-let _speakReqSeq = 0;          // monotonic id per speakMessage — lets chunks from a stale request be ignored
+let _speakReqSeq = 0;          // monotonic id per playback session — lets chunks from a stale request be ignored
 let _activeSpeakReqId = null;  // only chunks tagged with this id are queued
+// Streaming-speak session for the bubble currently being produced by Claude.
+// Unlike one-shot speakMessage, this session is fed sentence-by-sentence as
+// Claude's stream arrives so audio starts before the response finishes.
+// See _ensureStreamingSpeak / _flushStreamingSpeakSentences below.
+let _streamSpeakState = null;
 
 function stripVoiceTag(raw) {
   if (!raw) return { speak: false, cleaned: '', resolved: true };
@@ -3809,6 +4217,14 @@ function clearSpeakingIndicator(bubbleEl) {
 }
 
 function stopSpeaking() {
+  // Tear down any live streaming-speak session first. It owns a playback
+  // session whose listener must unsubscribe synchronously — otherwise stray
+  // chunks arriving after the abort leak blob URLs for the window's life.
+  if (_streamSpeakState) {
+    const state = _streamSpeakState;
+    _streamSpeakState = null;
+    try { state.session.abort(null); } catch {}
+  }
   if (currentAudio) {
     try { currentAudio.pause(); } catch {}
     try {
@@ -3828,15 +4244,42 @@ function stopSpeaking() {
   try { merlin.stopSpeaking && merlin.stopSpeaking(); } catch {}
 }
 
-// speakMessage kicks off a streamed synthesis: main.js synthesises sentence
-// by sentence and ships each WAV back via onVoiceOutputChunk. We queue them
-// here and play in order — first audio starts in ~2 s even for long texts,
-// while later sentences are still being generated.
-async function speakMessage(text, bubbleEl) {
-  if (!text || !text.trim()) return;
-  if (!merlin.speakText) return;
-  // Last-writer-wins: a new message cancels the prior playback.
-  stopSpeaking();
+// Convert a raw TTS error into something a non-technical user can act on.
+// Voice-specific branches take priority; everything else falls through to
+// the generic friendlyError. Hoisted out of the per-session closure so
+// one-shot + streaming paths share one definition.
+function _voiceFriendlyError(raw) {
+  const s = String(raw || '').toLowerCase();
+  if (s.includes('voice worker exited') || s.includes('uncaught')) {
+    return 'Voice engine crashed. Restart Merlin and try again.';
+  }
+  if (s.includes('init timeout') || s.includes('ensuretts')) {
+    return 'Voice model is still loading (first run downloads ~92 MB).\nTry again in a moment — or check your internet connection.';
+  }
+  if (s.includes('text too long')) {
+    return 'That message is too long to read aloud (5000-char cap).';
+  }
+  return friendlyError(raw, 'voice');
+}
+
+// Creates a playback session bound to a fresh reqId. Subscribes to the
+// voice-output-chunk IPC, filters for this session's reqId, decodes WAV
+// blobs into <audio> elements, plays them in FIFO order, and cleans up
+// blob URLs the moment each chunk finishes (or is abandoned).
+//
+// Returns:
+//   reqId     — stamp this onto every IPC that feeds the session
+//   bubbleEl  — the bubble the session is speaking for (identity key)
+//   abort(e)  — synchronous teardown; drains queued blobs + surfaces error
+//
+// Invariants:
+//   1. Exactly one session "owns" playback at a time. Ownership is held via
+//      `_activeSpeakReqId`. Any other session's chunks are dropped (for
+//      non-final) or used to unsubscribe + drain (for final).
+//   2. Every Object URL created in the queue is revoked on one of: played
+//      to completion, drainQueue() on abort/error, or finishIfDrained at
+//      end-of-stream. No path leaks.
+function _createSpeakPlayback(bubbleEl) {
   const reqId = ++_speakReqSeq;
   _activeSpeakReqId = reqId;
   currentSpeakingBubble = bubbleEl;
@@ -3849,9 +4292,8 @@ async function speakMessage(text, bubbleEl) {
   const queue = [];          // FIFO of {url, audio} ready to play
   let playing = false;
   let streamDone = false;
+  let unsubscribed = false;
 
-  // Drain any still-queued blob URLs — called from the error/abort paths so
-  // we don't leak Object URLs for sentences the user will never hear.
   const drainQueue = () => {
     while (queue.length) {
       const { url } = queue.shift();
@@ -3859,8 +4301,7 @@ async function speakMessage(text, bubbleEl) {
     }
   };
 
-  const finishIfDrained = () => {
-    if (!streamDone || playing || queue.length > 0) return;
+  const releaseOwnership = () => {
     if (_activeSpeakReqId === reqId) _activeSpeakReqId = null;
     if (currentSpeakingBubble === bubbleEl) {
       clearSpeakingIndicator(bubbleEl);
@@ -3868,28 +4309,14 @@ async function speakMessage(text, bubbleEl) {
     }
   };
 
-  // Convert a raw TTS error string into something a non-technical user
-  // can act on. Voice-specific branches take priority; everything else
-  // falls through to the generic friendlyError.
-  const voiceFriendly = (raw) => {
-    const s = String(raw || '').toLowerCase();
-    if (s.includes('voice worker exited') || s.includes('uncaught')) {
-      return 'Voice engine crashed. Restart Merlin and try again.';
-    }
-    if (s.includes('init timeout') || s.includes('ensuretts')) {
-      return 'Voice model is still loading (first run downloads ~92 MB).\nTry again in a moment — or check your internet connection.';
-    }
-    if (s.includes('text too long')) {
-      return 'That message is too long to read aloud (5000-char cap).';
-    }
-    return friendlyError(raw, 'voice');
+  const finishIfDrained = () => {
+    if (!streamDone || playing || queue.length > 0) return;
+    releaseOwnership();
   };
 
-  const surfaceTtsError = (raw) => {
+  const surfaceError = (raw) => {
     if (!raw) return;
-    const msg = voiceFriendly(raw);
-    // Split on first newline so the toast's strong/detail structure renders
-    // the "Try: …" line as the detail row.
+    const msg = _voiceFriendlyError(raw);
     const [title, detail] = msg.split('\n', 2);
     showSpellToast(title || 'Voice output failed', detail || '', 'error');
   };
@@ -3915,26 +4342,20 @@ async function speakMessage(text, bubbleEl) {
     });
   };
 
-  const unsubscribe = merlin.onVoiceOutputChunk((payload) => {
+  const rawUnsubscribe = merlin.onVoiceOutputChunk((payload) => {
     if (!payload) return;
-    // The main-process worker-exit/error path now includes requestId, so the
-    // per-request guard works for all terminal messages. Any packet without a
-    // requestId indicates a pre-requestId main.js — still drop it rather than
-    // poison a request with foreign chunks, but don't log (would be spammy).
     if (payload.requestId !== reqId) return;
     if (_activeSpeakReqId !== reqId) {
-      // Request was superseded. Unsubscribe and drain anything that arrived
-      // after cancellation so the blob URLs don't leak for the window's life.
-      if (payload.final) { unsubscribe(); drainQueue(); }
+      // Session was superseded. Unsubscribe on final + drain queued blobs so
+      // we don't hold Object URLs for audio the user will never hear.
+      if (payload.final) { doUnsubscribe(); drainQueue(); }
       return;
     }
     if (payload.final) {
       streamDone = true;
-      unsubscribe();
+      doUnsubscribe();
       if (payload.error) {
-        // Surface to the user and revoke any un-played chunks — the remaining
-        // audio won't render so there's no value in holding the blob URLs.
-        surfaceTtsError(payload.error);
+        surfaceError(payload.error);
         drainQueue();
       }
       playNext();
@@ -3950,41 +4371,143 @@ async function speakMessage(text, bubbleEl) {
     playNext();
   });
 
+  const doUnsubscribe = () => {
+    if (unsubscribed) return;
+    unsubscribed = true;
+    try { rawUnsubscribe(); } catch {}
+  };
+
+  return {
+    reqId,
+    bubbleEl,
+    surfaceError,
+    // Synchronous teardown. Idempotent. Drops the subscription, drains
+    // queued blob URLs, and releases ownership so a subsequent session can
+    // take over without waiting for the worker's final+aborted round-trip.
+    abort(error) {
+      doUnsubscribe();
+      streamDone = true;
+      drainQueue();
+      if (error) surfaceError(error);
+      if (!playing) releaseOwnership();
+    },
+  };
+}
+
+// speakMessage: one-shot synthesis of `text`. Used by the replay button and
+// as a fallback when a streaming-speak session never started (speak=false,
+// or the response was too short to produce a sentence boundary).
+async function speakMessage(text, bubbleEl) {
+  if (!text || !text.trim()) return;
+  if (!merlin.speakText) return;
+  stopSpeaking();  // last-writer-wins
+  const session = _createSpeakPlayback(bubbleEl);
+
   let result;
   try {
-    result = await merlin.speakText(text, undefined, reqId);
+    result = await merlin.speakText(text, undefined, session.reqId);
   } catch (err) {
-    unsubscribe();
-    streamDone = true;
-    drainQueue();
-    surfaceTtsError(err && err.message ? err.message : err);
-    if (_activeSpeakReqId === reqId) _activeSpeakReqId = null;
-    if (currentSpeakingBubble === bubbleEl) {
-      clearSpeakingIndicator(bubbleEl);
-      currentSpeakingBubble = null;
-    }
+    session.abort(err && err.message ? err.message : err);
     return;
   }
-
-  // Main process finished dispatching chunks. If no chunk arrived at all
-  // (error or aborted before first sentence) we clean up here — otherwise
-  // playNext() drains the queue and calls finishIfDrained naturally.
+  // If main refused the request, fail fast without waiting for a final that
+  // will never come. `aborted` isn't an error — it means a newer session
+  // already superseded us, and that session's final will clean up playback.
   if (!result || !result.success) {
-    unsubscribe();
-    streamDone = true;
-    if (result && result.error && !result.aborted) {
-      drainQueue();
-      surfaceTtsError(result.error);
-    }
-    // If playback already started, let it drain; otherwise reset state.
-    if (_activeSpeakReqId === reqId && !playing && queue.length === 0) {
-      _activeSpeakReqId = null;
-      if (currentSpeakingBubble === bubbleEl) {
-        clearSpeakingIndicator(bubbleEl);
-        currentSpeakingBubble = null;
-      }
-    }
+    if (result && result.error && !result.aborted) session.abort(result.error);
+    else session.abort(null);
   }
+}
+
+// ── Streaming-speak session ─────────────────────────────────────
+// Fed sentence-by-sentence from `appendText` as Claude's stream arrives.
+// The first complete sentence kicks off synthesis while Claude is still
+// generating — closing the gap between end-of-response and start-of-audio
+// from ~2-3 s (old one-shot flow) to ~400-700 ms (first sentence + one
+// Kokoro pass on a warm model).
+//
+// State shape:
+//   session:      _createSpeakPlayback handle (reqId + abort + bubbleEl)
+//   consumed:     char index into the bubble's `cleaned` text already sent
+//   started:      true once speak-text-stream-start has been dispatched
+//                 (lazy — we only open the worker session when the first
+//                 real sentence is ready to send)
+//   finalized:    true once we've sent the worker stream-end; guards
+//                 against double-finalize and late appends after close
+
+function _ensureStreamingSpeak(bubbleEl) {
+  if (_streamSpeakState && _streamSpeakState.session.bubbleEl === bubbleEl) {
+    return _streamSpeakState;
+  }
+  // Different bubble (or stale state) — tear down and start fresh.
+  stopSpeaking();
+  const session = _createSpeakPlayback(bubbleEl);
+  _streamSpeakState = { session, consumed: 0, started: false, finalized: false };
+  return _streamSpeakState;
+}
+
+async function _startStreamingSpeakWorker(state) {
+  if (state.started || state.finalized) return;
+  state.started = true;
+  let res;
+  try {
+    res = await merlin.speakTextStreamStart(state.session.reqId);
+  } catch (err) {
+    state.session.abort(err && err.message ? err.message : err);
+    if (_streamSpeakState === state) _streamSpeakState = null;
+    return;
+  }
+  if (!res || res.error) {
+    state.session.abort(res && res.error);
+    if (_streamSpeakState === state) _streamSpeakState = null;
+  }
+}
+
+// Called from appendText on every delta. Extracts any newly-complete
+// sentences from `cleaned` and ships them to the worker. No-op if the
+// streaming session has been torn down (e.g. user pressed Escape).
+function _flushStreamingSpeakSentences(bubbleEl, cleaned) {
+  const splitter = window.MerlinSentenceSplitter;
+  if (!splitter) return;
+  const state = _ensureStreamingSpeak(bubbleEl);
+  if (!state || state.finalized) return;
+  const { sentences, nextIdx } = splitter.extractCompleteSentences(cleaned, state.consumed);
+  if (sentences.length === 0) return;
+  state.consumed = nextIdx;
+  // Lazily open the worker session on the first complete sentence. Avoids
+  // reserving Kokoro for a speak=true response that turns out to be empty
+  // or shorter than MIN_SENTENCE_CHARS.
+  if (!state.started) _startStreamingSpeakWorker(state);
+  for (const sentence of sentences) {
+    // Fire-and-forget. A failed append just drops that sentence — earlier
+    // sentences still play, and the worker's final will clean up regardless.
+    try { merlin.speakTextStreamAppend(state.session.reqId, sentence).catch(() => {}); } catch {}
+  }
+}
+
+// Called from finalizeBubble. If a streaming session is active for this
+// bubble, flush any trailing partial sentence and close. Returns true if
+// the streaming path handled this bubble (caller must NOT also fire the
+// one-shot fallback — that would re-speak everything).
+function _finishStreamingSpeak(bubbleEl, cleaned) {
+  const state = _streamSpeakState;
+  if (!state || state.session.bubbleEl !== bubbleEl) return false;
+  _streamSpeakState = null;
+  if (!state.started) {
+    // No sentence ever completed — nothing was sent to the worker and no
+    // playback session should be held open. Tear down and let the caller
+    // fall back to one-shot speakMessage for the full text.
+    state.session.abort(null);
+    return false;
+  }
+  state.finalized = true;
+  const splitter = window.MerlinSentenceSplitter;
+  const tail = splitter ? splitter.drainRemaining(cleaned, state.consumed) : '';
+  if (tail) {
+    try { merlin.speakTextStreamAppend(state.session.reqId, tail).catch(() => {}); } catch {}
+  }
+  try { merlin.speakTextStreamEnd(state.session.reqId).catch(() => {}); } catch {}
+  return true;
 }
 
 function addReplayButton(bubbleEl, text) {
@@ -5106,21 +5629,34 @@ document.getElementById('perf-bar').addEventListener('click', async (e) => {
     let perf = perfState.cache[brand]?.[days];
     if (!perf) perf = await fetchPerfData(days, brand);
     if (perf) {
-      const rev = perf.revenue > 0 ? perf.revenue : 0;
-      const spend = perf.spend > 0 ? perf.spend : 0;
-      const mer = perf.mer > 0 ? perf.mer : (spend > 0 ? rev / spend : 0);
-
-      document.getElementById('stats-revenue').textContent = rev > 0 ? fmtMoney(rev) : '--';
-      document.getElementById('stats-spend').textContent = spend > 0 ? fmtMoney(spend) : '--';
-      document.getElementById('stats-roas').textContent = mer > 0 ? mer.toFixed(1) + 'x return' : '--';
-      const periodLabels = { 1: 'Yesterday', 7: 'Last 7 days', 30: 'Last 30 days', 90: 'Last 90 days', 365: 'Last 12 months' };
-      document.getElementById('stats-period').textContent = periodLabels[days] || `Last ${days} days`;
-      updateStatsBarAndStory(rev, spend, mer);
+      renderStatsCard(perf, days);
     } else {
       // No brand-scoped perf data available. DO NOT fall back to the
       // action-keyed stats cache — see the regression guard above.
       setStatsEmpty();
     }
+  } catch {
+    setStatsEmpty();
+  }
+});
+
+// In-card period toggle — switch the overlay between 1D/7D/30D/90D/12M without
+// having to close + click a different button on the perf bar. Pivoting inside
+// the card matters for the share flow: users want to pick the most flattering
+// period before screenshotting.
+document.addEventListener('click', async (e) => {
+  const btn = e.target.closest('.stats-period-btn');
+  if (!btn) return;
+  e.stopPropagation();
+  const days = parseInt(btn.dataset.days, 10);
+  if (!days) return;
+  const brand = document.getElementById('brand-select')?.value || '';
+  setStatsPeriodActive(days);
+  try {
+    let perf = perfState.cache[brand]?.[days];
+    if (!perf) perf = await fetchPerfData(days, brand);
+    if (perf) renderStatsCard(perf, days);
+    else setStatsEmpty();
   } catch {
     setStatsEmpty();
   }

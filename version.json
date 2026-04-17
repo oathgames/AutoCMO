@@ -1,5 +1,5 @@
 {
-  "version": "1.3.0",
+  "version": "1.5.0",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -25,14 +25,18 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.3.0: Brain upgrade — Merlin's instructions are now 56% leaner (faster cold start, lower token cost) with new statistical winner test, copy quality gate, conversion rubric, and SEO scoring framework. On-demand reference files are now distributed to existing users via /update.",
+  "notes": "v1.5.0: Stripe read-only revenue integration (7 actions, OAuth-pinned read_only scope), Reddit organic growth (scan/draft/post/shadowban-check with 7-layer compliance preflight), streaming TTS (first-sentence latency cut from ~2-3s to ~400-700ms), universal RevenueSource abstraction so Shopify + Stripe + future billing connectors feed one topline, mobile approval queue stub on the landing worker (HMAC-signed), and a CI asar size ceiling to block the v1.3.0 bloat regression on both Windows and Mac builds.",
   "whatsNew": [
-    "Faster cold start — merlin.md trimmed from 45KB to 20KB by moving on-demand content into reference files (loaded only when needed)",
-    "New Promotion Gate: stat-test before scaling winners (p<0.05 AND ≥15% lift) — no more scaling on noise",
-    "New Copy Quality Gate: 7-expert panel scoring with AI-detector weighting and banned-vocabulary list before any ad copy ships",
-    "Conversion Rubric: 8-dimension landing page audit applied automatically when you ask Merlin why ads aren't converting",
-    "SEO Rubric: Impact×Confidence keyword scoring with BOFU/MOFU/TOFU classifier and striking-distance band (positions 4-20)",
-    "Cold-email benchmarks (40% open / 3% reply / 1% positive) and email attribution model picker (first-touch / linear / time-decay) wired into email audit",
-    "Routing fix: existing users now receive merlin-platforms.md and merlin-setup.md on /update (previously only shipped via fresh installer)"
+    "Stripe integration (read-only): seven new actions — stripe-login, stripe-setup, stripe-revenue, stripe-subscriptions, stripe-cohorts, stripe-analytics, stripe-preference. OAuth scope pinned to read_only in TWO places (binary + worker re-verifies Stripe's echoed scope). No write verbs in source — enforced by a build-failing test that greps stripe.go. Topline preference configurable (shopify/stripe/both) when both connected.",
+    "Universal RevenueSource abstraction (dashboard.go): Shopify and Stripe both report through one RevenueSource{Name,Kind,Revenue,NewCustomers,MRR,ARR,ActiveSubs,ChurnPct} shape. pickRevenueSource disambiguates topline by cfg.RevenueSourcePreference. Adding future billing connectors (PayPal, Square, Recurly) is now one function + one case — no ad-hoc revenue fields.",
+    "Reddit organic prospecting: four new actions — reddit-prospect-scan (find relevant threads), reddit-prospect-draft (cluster + quality-gated replies), reddit-prospect-post (7-layer compliance preflight + /api/comment), reddit-shadowban-check (daily account health probe).",
+    "Two-stage quality gate on every Reddit draft: structural (40-300 words, no banned self-promo phrases, no shouting, thread-fit required) + optional AI score (Gemini authenticity/helpfulness/thread-fit/compliance). Fails closed on network errors.",
+    "Seven-layer Reddit compliance preflight on auto-posting: account ≥30 days old, combined karma ≥100, ≤5 posts / 24h, ≥120 min per-sub cadence, ≥300s global cadence, 72h body-hash dedup, cached shadowban check — all BEFORE /api/comment.",
+    "`redditPostMode: \"draft-only\"`: escape hatch for fresh accounts — skips the compliance gate, saves replies to results/reddit_draft_<ts>.txt for manual paste. When auto-mode blocks, the draft is auto-saved as fallback.",
+    "Streaming TTS: Claude's response is fed sentence-by-sentence as it streams, so the first complete sentence kicks off synthesis while Claude is still writing. Time-to-first-word drops from ~2-3s (old one-shot) to ~400-700ms. Short fragments coalesce to avoid choppy playback. 20 new sentence-splitter tests pin the streaming logic.",
+    "Mobile approval queue stub on the landing worker: HMAC-signed /api/approval/{enqueue,:id,:id/decide,pending}. Ships live today for the Electron approval card; the iOS/Android surface uses the same endpoints when v2.0 mobile lands. 41 new worker tests cover signature verification, fail-closed secret handling, double-decide 409s, and oversized-body truncation.",
+    "CI asar size ceiling (300 MB, Windows + Mac): guards against the v1.3.0 regression that shipped a 568 MB asar because voice tools double-packed. A bloated asar was breaking auto-update sha256 checks and pushing low-RAM machines into OOM during downloadAndApplyUpdate.",
+    "Rate-limit preflight hardening: NextSlotNano-based monotonic slot reservation replaces LastCall arithmetic, fixing a same-platform parallel fan-out race where two callers could reserve the same wire slot. Sleep-under-preflightMu is now an audited invariant — all Locked functions return a duration to sleep after unlock.",
+    "Hook blocklist tightened: every pattern for a critical file (.vault, .rate-state, .rate-secret, .merlin-config, .merlin-vault, .merlin-ratelimit, .merlin-audit, .merlin-tokens) now matches atomic-write siblings (.bak, .tmp, .tmp.N) via (\\.|$) instead of $."
   ]
 }

@@ -33,6 +33,14 @@ const BANNED_HOSTS = [
   'api.klaviyo.com',
   'adsapi.snapchat.com',
   'ads-api.pinterest.com',
+  // Stripe — read-only reporting via the binary. Direct `curl api.stripe.com`
+  // from Claude would bypass the binary's read-only enforcement (stripeGet)
+  // and the rate-limit preflight. All Stripe access must go through the binary.
+  'api.stripe.com',
+  // Stripe OAuth authorize + token URLs. The binary opens authorize in the
+  // user's browser and the BFF at merlingotme.com handles the token exchange —
+  // Claude never needs to touch connect.stripe.com directly.
+  'connect.stripe.com',
 ];
 
 // Shopify Admin API is blocked but OAuth authorize URL stays allowed (user-facing).
@@ -131,6 +139,7 @@ const PROTECTED_PATH_PATTERNS = [
   /\.merlin-vault(\.|$)/i,
   /\.merlin-ratelimit(\.|$)/i,
   /\.merlin-audit(\.|$)/i,
+  /\.merlin-reddit-cache(\.|$)/i,
   /\.rate-state(\.|$)/i,
   /\.rate-secret(\.|$)/i,
   // REGRESSION GUARD (2026-04-14, adversary loop 2):
@@ -173,6 +182,7 @@ const PROTECTED_COMMAND_PATTERNS = [
   /\.merlin-vault\b/i,
   /\.merlin-ratelimit\b/i,
   /\.merlin-audit\b/i,
+  /\.merlin-reddit-cache\b/i,
   /\.rate-state\b/i,
   /\.rate-secret\b/i,
   /\.merlin-[a-z]/i,                    // Catch-all: .merlin-api-key, .merlin-subscription, etc.

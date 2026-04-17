@@ -890,6 +890,18 @@ let _queueFrozenForAuth = false;
 // Auto-expire pending approvals after 15 minutes
 const APPROVAL_TIMEOUT_MS = 15 * 60 * 1000;
 
+// macOS bounces the dock once; every other platform flashes the taskbar until activated.
+function nudgeForApproval() {
+  if (!win || win.isDestroyed() || win.isFocused()) return;
+  try {
+    if (process.platform === 'darwin' && app.dock && typeof app.dock.bounce === 'function') {
+      app.dock.bounce('informational');
+    } else if (typeof win.flashFrame === 'function') {
+      win.flashFrame(true);
+    }
+  } catch {}
+}
+
 // ── Window ──────────────────────────────────────────────────
 
 async function createWindow() {
@@ -1163,6 +1175,11 @@ async function createWindow() {
     }
   });
 
+  // On Windows, flashFrame(true) keeps blinking until explicitly cleared.
+  win.on('focus', () => {
+    try { if (typeof win.flashFrame === 'function') win.flashFrame(false); } catch {}
+  });
+
   const showWindow = () => {
     if (win && !win.isDestroyed()) { win.show(); win.focus(); }
     else createWindow();
@@ -1277,6 +1294,9 @@ const BANNED_API_HOSTS = [
   'sellingpartnerapi-eu.amazon.com', 'sellingpartnerapi-fe.amazon.com',
   'api.klaviyo.com', 'a.klaviyo.com',
   'adsapi.snapchat.com', 'ads-api.pinterest.com',
+  // Stripe — read-only reporting via the binary only (same reasoning as
+  // block-api-bypass.js). Defense in depth: hook blocks first, canUseTool blocks second.
+  'api.stripe.com', 'connect.stripe.com',
 ];
 const ALLOWED_URL_PREFIXES = [
   'https://github.com/oathgames/',
@@ -1413,6 +1433,7 @@ function translateTool(toolName, input) {
       'tiktok-push':   { label: 'Publish this ad to TikTok', cost: '$5/day budget' },
       'tiktok-login':  { label: 'Connect to your TikTok Ads account', cost: 'Free' },
       'shopify-login': { label: 'Connect to your Shopify store', cost: 'Free' },
+      'stripe-login':  { label: 'Connect Stripe (read-only revenue reporting)', cost: 'Free' },
       'slack-login':   { label: 'Connect Slack for notifications', cost: 'Free' },
       'discord-login': { label: 'Connect Discord for notifications', cost: 'Free' },
       'discord-setup': { label: 'Change Discord notification channel', cost: 'Free' },
@@ -1565,6 +1586,7 @@ async function handleToolApproval(toolName, input) {
       const payload = { toolUseID, label: translated.label, cost: translated.cost, budget: budgetDetail };
       if (win && !win.isDestroyed()) win.webContents.send('approval-request', payload);
       wsServer.broadcast('approval-request', payload);
+      nudgeForApproval();
       return new Promise((resolve) => {
         setPendingApproval(toolUseID, (approved) => {
           resolve(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'User declined' });
@@ -1586,6 +1608,81 @@ async function handleToolApproval(toolName, input) {
     input.command.includes('delete-campaign') || input.command.includes('delete_campaign')
   )) {
     return { behavior: 'deny', message: 'Merlin is not allowed to delete campaigns. Ads can be paused but campaigns are never deleted.' };
+  }
+
+  // REDDIT ORGANIC POST: explicit approval card for reddit-prospect-post.
+  // Shown BEFORE the ad-spend branch so the budget UX doesn't overshadow the
+  // organic-reach UX (the reply body preview is what the operator needs to
+  // read, not a dollar figure).
+  //
+  // The Go binary ALSO refuses to post without `approved:true` in the cmd
+  // envelope — Electron gating is the user-facing gate; the `approved` flag
+  // is the defense-in-depth declaration. We verify both are present.
+  if (toolName === 'Bash' && input.command && input.command.includes('reddit-prospect-post')) {
+    // Extract relevant fields for the approval card. All are optional — we
+    // fall back to placeholders so a malformed command still shows SOMETHING
+    // rather than silently auto-approving.
+    const sub = (input.command.match(/"subreddit"\s*:\s*"([^"]+)"/) || [])[1] || '(unknown sub)';
+    const body = (input.command.match(/"draftBody"\s*:\s*"([^"]+)"/) || [])[1] || '';
+    const approvedFlag = /"approved"\s*:\s*true/.test(input.command);
+
+    // Refuse if Claude forgot the approved flag — surface a clear message
+    // Claude will retry with. This is not a security check; the Electron
+    // approval card below IS the security check. This is to prevent silent
+    // binary failures with a cryptic "approval required" message.
+    if (!approvedFlag) {
+      return {
+        behavior: 'deny',
+        message: 'reddit-prospect-post requires "approved":true in the cmd envelope. Set approved:true and resubmit — Electron will then show the approval card for the user.',
+      };
+    }
+
+    // Read redditPostMode so the card label + hint matches what the binary will
+    // actually do. Brand-scoped config takes precedence over global. "auto" =
+    // real /api/comment write, "draft-only" = save to results/ for manual
+    // paste (no Reddit write). Defaults to "auto" on any read error.
+    //
+    // Regex safety: `input.command` is the raw shell-arg JSON string. Any
+    // embedded quotes inside string values (e.g., draftBody containing literal
+    // `"brand":"X"`) are JSON-escaped as `\"brand\":\"X\"` — which fails the
+    // `"brand"` literal anchor (close-quote would be `\`, not `"`). So the
+    // regex cannot be hijacked by a malicious draftBody. Worst case on a
+    // genuinely malformed command: regex misses, `activeBrand` is '', we fall
+    // back to global config — same path as a brand-less run.
+    let postMode = 'auto';
+    try {
+      const brandMatch = input.command.match(/"brand"\s*:\s*"([^"]+)"/);
+      const activeBrand = brandMatch ? brandMatch[1] : '';
+      const cfg = activeBrand ? readBrandConfig(activeBrand) : readConfig();
+      const raw = (cfg && typeof cfg.redditPostMode === 'string') ? cfg.redditPostMode.trim().toLowerCase() : '';
+      if (raw === 'draft-only') postMode = 'draft-only';
+    } catch {}
+
+    // Show approval card. Label + budget line differ by mode so the user sees
+    // exactly what's about to happen. cost field reused as a body preview
+    // (first 200 chars — card layout is compact).
+    const preview = body.length > 200 ? body.slice(0, 197) + '…' : body;
+    const toolUseID = Date.now().toString();
+    const label = postMode === 'draft-only'
+      ? `Save draft for manual paste — r/${sub}`
+      : `Post reply to r/${sub}`;
+    const budgetLine = postMode === 'draft-only'
+      ? 'Draft-only mode — reply will be saved to results/ for you to paste manually. No Reddit API write. Auto-expires in 15 min if ignored.'
+      : 'Organic post — no ad spend. Auto-expires in 15 min if ignored.';
+    const payload = {
+      toolUseID,
+      label,
+      cost: preview || '(no body)',
+      budget: budgetLine,
+    };
+    if (win && !win.isDestroyed()) win.webContents.send('approval-request', payload);
+    wsServer.broadcast('approval-request', payload);
+    nudgeForApproval();
+    return new Promise((resolve) => {
+      setPendingApproval(toolUseID, (approved) => {
+        resolve(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'User declined' });
+      });
+    });
   }
 
   // BUDGET ENFORCEMENT: Bash Merlin push actions — show approval card with full budget context
@@ -1629,6 +1726,7 @@ async function handleToolApproval(toolName, input) {
       const payload = { toolUseID, label: translated.label, cost: translated.cost, budget: budgetDetail };
       if (win && !win.isDestroyed()) win.webContents.send('approval-request', payload);
       wsServer.broadcast('approval-request', payload);
+      nudgeForApproval();
       return new Promise((resolve) => {
         setPendingApproval(toolUseID, (approved) => {
           resolve(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'User declined' });
@@ -1642,6 +1740,7 @@ async function handleToolApproval(toolName, input) {
     const payload = { toolUseID, questions: input.questions };
     win.webContents.send('ask-user-question', payload);
     wsServer.broadcast('ask-user-question', payload);
+    nudgeForApproval();
     return new Promise((resolve) => {
       setPendingApproval(toolUseID, (answers) => {
         resolve({ behavior: 'allow', updatedInput: { ...input, answers } });
@@ -1654,6 +1753,7 @@ async function handleToolApproval(toolName, input) {
   const payload = { toolUseID, label: translated.label, cost: translated.cost };
   win.webContents.send('approval-request', payload);
   wsServer.broadcast('approval-request', payload);
+  nudgeForApproval();
 
   return new Promise((resolve) => {
     setPendingApproval(toolUseID, (approved) => {
@@ -3009,20 +3109,32 @@ function spawnTtsWorker() {
         aborted: !!msg.aborted,
         error: msg.error,
       });
-      _currentSynthSender = null;
-      _currentSynthReqId = 0;
+      // Only reset the tracker if this final belongs to the CURRENT session.
+      // When a new speak-text (or stream-start) preempts a prior one, the
+      // worker emits a final+aborted for the old reqId AFTER we've already
+      // pointed the tracker at the new reqId — resetting unconditionally
+      // here would strand the new session with no sender, so its chunks
+      // would be dropped. This guard is the fix for that race.
+      if (msg.reqId === _currentSynthReqId) {
+        _currentSynthSender = null;
+        _currentSynthReqId = 0;
+      }
     } else if (msg.type === 'error') {
       // Fall back to the tracked reqId when the worker didn't attach one
       // (e.g. init-time error before the first synth). Without a requestId
       // the renderer ignores the message and leaks its listener.
+      const errReqId = typeof msg.reqId === 'number' ? msg.reqId : _currentSynthReqId;
       sendToRenderer('voice-output-chunk', {
-        requestId: typeof msg.reqId === 'number' ? msg.reqId : _currentSynthReqId,
+        requestId: errReqId,
         final: true,
         error: msg.message,
       });
       console.error('[tts] worker error:', msg.message);
-      _currentSynthSender = null;
-      _currentSynthReqId = 0;
+      // Same race guard as the 'final' branch — don't strand a newer session.
+      if (errReqId === _currentSynthReqId) {
+        _currentSynthSender = null;
+        _currentSynthReqId = 0;
+      }
     }
   });
 
@@ -3107,6 +3219,56 @@ ipcMain.handle('stop-speaking', () => {
   if (_ttsWorker) _ttsWorker.postMessage({ type: 'abort' });
   _currentSynthSender = null;
   return { stopped: true };
+});
+
+// ── Streaming-text TTS ──────────────────────────────────────────
+// Companion to `speak-text`. The renderer opens a session at the start of a
+// Claude response, pushes complete sentences via `append` as the stream
+// arrives, and calls `end` when the response is done. Chunks flow back on
+// the same `voice-output-chunk` channel, so the renderer's chunk handler
+// doesn't care whether they came from a one-shot or a streaming session.
+//
+// The three handlers share one invariant: every append/end is a no-op on
+// the worker side unless there's a live session with the same reqId. That
+// keeps late IPC from a cancelled session from bleeding into the next one.
+
+ipcMain.handle('speak-text-stream-start', async (event, args) => {
+  const requestId = args && typeof args.requestId === 'number' ? args.requestId : 0;
+  const voice = (args && args.voice) || KOKORO_DEFAULT_VOICE;
+  try {
+    await ensureTtsReady();
+  } catch (err) {
+    console.error('[tts] ensureTtsReady failed:', err);
+    return { error: String(err && err.message ? err.message : err) };
+  }
+  // Abort any prior job (one-shot or stream) before repointing the sender.
+  // Mirrors the one-shot path and ensures late chunks from the prior job
+  // land on the correct per-reqId renderer listener.
+  _ttsWorker.postMessage({ type: 'abort' });
+  _currentSynthSender = event.sender;
+  _currentSynthReqId = requestId;
+  _ttsWorker.postMessage({ type: 'stream-start', reqId: requestId, voice });
+  return { success: true };
+});
+
+ipcMain.handle('speak-text-stream-append', (_event, args) => {
+  const requestId = args && typeof args.requestId === 'number' ? args.requestId : 0;
+  const text = args && typeof args.text === 'string' ? args.text : '';
+  // Per-append length cap: a single "sentence" longer than the one-shot
+  // 5000-char limit would blow past Kokoro's attention window anyway. The
+  // renderer's splitter already enforces sentence boundaries, so this is
+  // defence-in-depth for malformed callers.
+  if (!text || text.length > 5000) return { error: 'invalid append' };
+  if (!_ttsWorker || _currentSynthReqId !== requestId) return { error: 'no active stream' };
+  _ttsWorker.postMessage({ type: 'stream-append', reqId: requestId, text });
+  return { success: true };
+});
+
+ipcMain.handle('speak-text-stream-end', (_event, args) => {
+  const requestId = args && typeof args.requestId === 'number' ? args.requestId : 0;
+  if (!_ttsWorker || _currentSynthReqId !== requestId) return { error: 'no active stream' };
+  _ttsWorker.postMessage({ type: 'stream-end', reqId: requestId });
+  return { success: true };
 });
 
 ipcMain.handle('open-claude-download', () => { shell.openExternal('https://claude.ai/download'); });
@@ -3572,6 +3734,104 @@ function appendErrorLog(line) {
   } catch {}
 }
 
+// ── Briefing notifier ──────────────────────────────────────────
+// Watches appRoot for updates to .merlin-briefing*.json files and fires an
+// OS desktop notification when the briefing's `severity` field is non-"ok"
+// ("warning" or "critical"). This is the proactive-escalation path — users
+// who aren't actively in the app at 5 AM still learn about overnight ad
+// account rejections, ROAS cliffs, and spend overruns through the OS
+// notification center.
+//
+// Duplicate suppression keys on the briefing's own `date` field rather than
+// file mtime: a re-run of the same-day briefing (manual "run now", spell
+// retry) won't produce a second notification, while a fresh day's briefing
+// will. A brand-new install seeds from existing briefings on startup so
+// opening the app doesn't retro-notify on a briefing already surfaced by
+// the in-app briefing card (get-briefing IPC).
+const briefingLastNotified = new Map(); // path -> last date string already notified
+const briefingDebounce = new Map();     // path -> NodeJS.Timeout
+let briefingWatcher = null;
+
+function startBriefingNotifier() {
+  try { fs.mkdirSync(appRoot, { recursive: true }); } catch {}
+  // Seed state from briefings already on disk so the first fs.watch event
+  // (which on some Windows builds fires once at watch-start with the newest
+  // file) doesn't notify for a briefing that's already been seen.
+  try {
+    for (const f of fs.readdirSync(appRoot)) {
+      if (!/^\.merlin-briefing.*\.json$/.test(f)) continue;
+      const full = path.join(appRoot, f);
+      try {
+        const data = JSON.parse(fs.readFileSync(full, 'utf8'));
+        if (data && data.date) briefingLastNotified.set(full, String(data.date));
+      } catch {}
+    }
+  } catch {}
+
+  try {
+    briefingWatcher = fs.watch(appRoot, { persistent: false }, (_event, filename) => {
+      if (!filename || !/^\.merlin-briefing.*\.json$/.test(filename)) return;
+      const full = path.join(appRoot, filename);
+      // fs.watch fires multiple events per atomic-rename write — debounce so
+      // we only parse the briefing once the writer is done.
+      const prev = briefingDebounce.get(full);
+      if (prev) clearTimeout(prev);
+      briefingDebounce.set(full, setTimeout(() => {
+        briefingDebounce.delete(full);
+        maybeNotifyBriefing(full);
+      }, 500));
+    });
+  } catch (err) {
+    appendErrorLog(`${new Date().toISOString()} [briefing-notifier] watch failed: ${err.message}\n`);
+  }
+}
+
+function maybeNotifyBriefing(briefingPath) {
+  try {
+    if (!fs.existsSync(briefingPath)) return;
+    const data = JSON.parse(fs.readFileSync(briefingPath, 'utf8'));
+    const severity = String(data && data.severity || 'ok').toLowerCase();
+    if (severity !== 'warning' && severity !== 'critical') return;
+    const dateKey = String(data && data.date || '');
+    if (!dateKey) return;
+    if (briefingLastNotified.get(briefingPath) === dateKey) return;
+    briefingLastNotified.set(briefingPath, dateKey);
+
+    const { Notification: ElectronNotification } = require('electron');
+    if (!ElectronNotification.isSupported()) return;
+
+    // Extract brand from filename (.merlin-briefing-{brand}.json); legacy
+    // no-suffix file (.merlin-briefing.json) renders as a generic title.
+    const base = path.basename(briefingPath);
+    const m = base.match(/^\.merlin-briefing-(.+)\.json$/);
+    const brandLabel = m ? m[1] : '';
+    const icon = severity === 'critical' ? '⚠' : '✦';
+    const title = brandLabel
+      ? `${icon} ${brandLabel} — ${severity}`
+      : `${icon} Merlin briefing — ${severity}`;
+    const body = String(data && data.recommendation || 'Open Merlin to review the morning briefing.').slice(0, 180);
+
+    const n = new ElectronNotification({
+      title,
+      body,
+      urgency: severity === 'critical' ? 'critical' : 'normal',
+    });
+    n.on('click', () => {
+      try {
+        if (win && !win.isDestroyed()) {
+          if (win.isMinimized()) win.restore();
+          win.show();
+          win.focus();
+        }
+      } catch {}
+    });
+    n.show();
+    appendErrorLog(`${new Date().toISOString()} [briefing-notifier] fired severity=${severity} brand=${brandLabel || '-'} date=${dateKey}\n`);
+  } catch (err) {
+    appendErrorLog(`${new Date().toISOString()} [briefing-notifier] notify failed: ${err.message}\n`);
+  }
+}
+
 // ── Performance status bar: read cached dashboard data ──────
 // Background dashboard refresh — runs binary to pull fresh data from all platforms.
 // The optional `days` parameter controls how many days of history the binary
@@ -3768,12 +4028,32 @@ function computePerfSummary(days, brandName) {
     name: p.platform, spend: p.spend || 0, revenue: p.revenue || 0, roas: p.roas || 0,
   })).filter(p => p.spend > 0);
 
+  // Ad-attributed revenue = sum of per-platform purchase value reported by the
+  // ad networks themselves. This is the number Merlin can defensibly claim —
+  // `latest.revenue` is total storefront revenue (includes organic, direct,
+  // email, referrals) and would overstate Merlin's influence on the share card.
+  const adRevenue = platformBreakdown.reduce((s, p) => s + (p.revenue || 0), 0);
+
+  // Top channel: highest ad-attributed revenue with a valid ROAS. Falls back
+  // to highest spend when no platform reported revenue (fresh accounts, TikTok
+  // which doesn't return purchase value). Used for the "top win" row in the
+  // Revenue Tracker card.
+  let topChannel = null;
+  if (platformBreakdown.length > 0) {
+    const withRev = platformBreakdown.filter(p => p.revenue > 0 && p.roas > 0);
+    const pool = withRev.length > 0 ? withRev : platformBreakdown;
+    topChannel = pool.slice().sort((a, b) => (b.revenue || b.spend) - (a.revenue || a.spend))[0];
+  }
+
   return {
     revenue: latest.revenue || 0,
+    adRevenue,
     spend: latest.total_spend || 0,
     mer: latest.mer || 0,
+    newCustomers: latest.new_customers || 0,
     platforms: platformBreakdown.length,
     platformBreakdown,
+    topChannel,
     dailyBudget,
     trend,
     periodDays: days,
@@ -4289,6 +4569,14 @@ const VAULT_SENSITIVE_KEYS = [
   'etsyRefreshToken',
   'redditAccessToken',
   'redditRefreshToken',
+  // Stripe Connect read-only token — a live API key even in read-only mode.
+  // A leak exposes the connected account's full revenue stream, customer
+  // emails, subscription records, and account ID. Route through vault like
+  // every other OAuth token.
+  // REGRESSION GUARD (2026-04-17, v1.4 Stripe review Cipher #1):
+  //   Before this fix runStripeLogin wrote stripeAccessToken in plaintext
+  //   to merlin-config.json. Do NOT remove this from the list.
+  'stripeAccessToken',
   // API keys that were previously left in plaintext — adversarial review
   // found these are just as sensitive as OAuth tokens.
   'falApiKey',
@@ -4330,6 +4618,7 @@ const BRAND_KEYS = [
   'amazonAdClientId', 'amazonAdClientSecret', 'amazonSpClientId', 'amazonSpClientSecret',
   'etsyAccessToken', 'etsyRefreshToken', 'etsyShopId', 'etsyKeystring',
   'redditAccessToken', 'redditRefreshToken', 'redditAdAccountId',
+  'stripeAccessToken', 'stripeAccountId',
   'klaviyoAccessToken', 'klaviyoApiKey',
   'pinterestAccessToken',
   'slackBotToken', 'slackWebhookUrl',
@@ -4908,6 +5197,7 @@ function getConnections(brandName) {
     checkBrand('amazonAccessToken', 'amazon');
     checkBrand('etsyAccessToken', 'etsy');
     checkBrand('redditAccessToken', 'reddit');
+    checkBrand('stripeAccessToken', 'stripe');
     // Shopify needs both token + store
     const shopToken = brandCfg.shopifyAccessToken || (!brandName ? globalCfg.shopifyAccessToken : null);
     const shopStore = brandCfg.shopifyStore || (!brandName ? globalCfg.shopifyStore : null);
@@ -4954,6 +5244,17 @@ ipcMain.handle('disconnect-platform', (_, platform, brandName) => {
       tiktok: ['tiktokAccessToken', 'tiktokAdvertiserId', 'tiktokPixelId'],
       google: ['googleAccessToken', 'googleRefreshToken', 'googleAdsDeveloperToken', 'googleAdsCustomerId'],
       shopify: ['shopifyAccessToken', 'shopifyStore'],
+      // revenueSourcePreference is cleared with Stripe so a reconnect picks
+      // up a fresh disambiguation prompt instead of silently honoring stale
+      // preference from a prior account.
+      //
+      // REGRESSION GUARD (2026-04-17, v1.4 Stripe review Curator #7):
+      //   Without this, a user who disconnects Stripe but keeps Shopify can
+      //   end up with revenueSourcePreference="both" and zero Stripe token,
+      //   which collapses to Shopify-only revenue without warning — AND if
+      //   they later reconnect a DIFFERENT Stripe account, the "both" pref
+      //   silently re-activates double-count risk.
+      stripe: ['stripeAccessToken', 'stripeAccountId', 'revenueSourcePreference'],
       klaviyo: ['klaviyoAccessToken', 'klaviyoApiKey', 'klaviyoRefreshToken'],
       pinterest: ['pinterestAccessToken', 'pinterestRefreshToken'],
       amazon: ['amazonAccessToken', 'amazonRefreshToken', 'amazonProfileId'],
@@ -7079,6 +7380,32 @@ async function downloadAndApplyUpdate() {
     // the staged file + abort staging on any failure (so the next
     // launch boots from the existing asar instead of a half-downloaded
     // one).
+    // REGRESSION GUARD (2026-04-16): app.asar MUST stay under ~300 MB.
+    // httpsGet buffers the entire download in memory before checksum
+    // verification. v1.3.0 ballooned the asar to 568 MB because voice
+    // tools (ffmpeg, whisper-cli, ggml model) staged into .claude/tools/
+    // during the Windows CI build were double-packed — once inside the
+    // asar via electron-builder's default "**/*" include, once outside
+    // via extraResources. A 568 MB stream over consumer wifi truncates
+    // or desyncs often enough that almost every user's auto-update to
+    // v1.3.0 failed the post-download sha256 check, surfacing as
+    // "The update file looks corrupted" (see humanizeUpdateError in
+    // renderer.js — any /checksum|hash|integrity/ match lands there)
+    // and blocking upgrades entirely.
+    //
+    // Fix lives in autoCMO/package.json `build.files`: explicit
+    // "!.claude${/*}", "!assets${/*}" etc. exclusions. IMPORTANT:
+    // electron-builder's glob negations DO NOT work with the "/**/*"
+    // suffix for dot-prefixed or sibling directories — they only work
+    // with the "${/*}" macro form. A CI guard in release.yml ("Verify
+    // app.asar size") hard-fails the build if the asar exceeds 300 MB.
+    // If you touch build.files, re-run `npx electron-builder --win --dir`
+    // locally and confirm dist/win-unpacked/resources/app.asar stays
+    // under ~300 MB before tagging a release. Voice tools belong in
+    // extraResources ONLY. DO NOT add a ".claude/**" or "assets/**"
+    // entry back to the `files` list — extraResources already ships
+    // them unpacked at runtime (see appInstall reads in getBinaryPath
+    // and the voice-tools lookup in .claude/tools/).
     let asarStaged = false;
     if (app.isPackaged && process.platform === 'win32') {
       const asarAsset = (data.assets || []).find(a => a.name === 'app.asar');
@@ -7293,6 +7620,13 @@ app.whenReady().then(async () => {
   // Bootstrap workspace AFTER window is visible (prevents "Not Responding" on first launch)
   setTimeout(bootstrapWorkspace, 500);
 
+  // Start the briefing watcher now that appRoot is guaranteed to exist and
+  // `win` is set (notification click handlers focus it). Cheap, non-blocking:
+  // one fs.watch on appRoot plus a ~50-byte Map per tracked briefing.
+  try { startBriefingNotifier(); } catch (err) {
+    appendErrorLog(`${new Date().toISOString()} [briefing-notifier] startup failed: ${err.message}\n`);
+  }
+
   // macOS: Cmd+Q should actually quit (set forceQuit so close handler allows it)
   app.on('before-quit', () => {
     forceQuit = true;
@@ -7301,6 +7635,7 @@ app.whenReady().then(async () => {
       try { child.kill(); } catch {}
     }
     activeChildProcesses.clear();
+    if (briefingWatcher) { try { briefingWatcher.close(); } catch {} briefingWatcher = null; }
   });
 
   // REGRESSION GUARD (2026-04-14, Codex P2 #4 — silent auto-start):

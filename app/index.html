@@ -126,6 +126,7 @@
       <!-- LinkedIn has a full Go implementation; OAuth credentials wire up in the next release cycle. -->
       <button class="magic-tile" data-platform="linkedin" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="4" fill="#0A66C2"/><path fill="#fff" d="M7.5 9.5h-2.5v8h2.5v-8zM6.25 8.25a1.45 1.45 0 100-2.9 1.45 1.45 0 000 2.9zM19 17.5h-2.5v-4c0-1-.2-1.75-1.25-1.75-1 0-1.25.75-1.25 1.75v4H11.5v-8H14v1.1c.4-.6 1.2-1.3 2.5-1.3 2 0 2.5 1.3 2.5 3v5.2z"/></svg></div><div class="tile-name">LinkedIn</div></button>
       <button class="magic-tile" data-platform="shopify" data-scope="brand" data-tip="Connect Shopify" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#96bf48" d="M15.34 2.61a.26.26 0 00-.24-.2 3.67 3.67 0 00-.67-.01s-1.12.08-1.87.24c-.19-.56-.52-1.07-.92-1.47C10.94.46 10 .25 9.26.25c-.04 0-.08 0-.12.01-1.02-.04-1.87.55-2.53 1.44-.49.66-.87 1.49-1.07 2.14-.77.24-1.32.41-1.39.43-.43.14-.45.15-.5.55C3.6 5.19 2 17.68 2 17.68l10.22 1.77 5.53-1.36S15.35 2.64 15.34 2.61z"/></svg></div><div class="tile-name">Shopify</div></button>
+      <button class="magic-tile" data-platform="stripe" data-scope="brand" data-tip="Connect Stripe (read-only revenue reporting)" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#635BFF"/><path fill="#fff" d="M13.3 9.5c0-.6.5-.9 1.3-.9 1.2 0 2.6.4 3.8 1V6.2c-1.3-.5-2.6-.7-3.8-.7-3.1 0-5.2 1.6-5.2 4.3 0 4.2 5.7 3.5 5.7 5.3 0 .7-.6 1-1.4 1-1.3 0-2.9-.5-4.2-1.3v3.4c1.4.6 2.9.9 4.2.9 3.2 0 5.4-1.6 5.4-4.3 0-4.4-5.8-3.6-5.8-5.3z"/></svg></div><div class="tile-name">Stripe</div></button>
       <button class="magic-tile" data-platform="etsy" data-scope="brand" data-tip="Connect Etsy" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#F1641E"/><path fill="#fff" d="M7 7h5.5v1.5H9v3h3v1.5H9v3h3.5V17.5H7z" stroke="#fff" stroke-width="0.5"/></svg></div><div class="tile-name">Etsy</div></button>
       <!-- Klaviyo has a full Go implementation; OAuth credentials wire up in the next release cycle. -->
       <button class="magic-tile" data-platform="klaviyo" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#2DD881" d="M12 2L2 12l4.5 4.5L12 22l5.5-5.5L22 12z"/></svg></div><div class="tile-name">Klaviyo</div></button>
@@ -193,7 +194,6 @@
     <div class="archive-filters">
       <div class="archive-filter-row">
         <button class="archive-filter active" data-filter="live">Ads</button>
-        <button class="archive-filter" data-filter="all">All</button>
         <button class="archive-filter" data-filter="image">Images</button>
         <button class="archive-filter" data-filter="video">Videos</button>
         <button class="archive-filter" data-filter="swipes">Swipes</button>
@@ -245,18 +245,29 @@
 
 <!-- Revenue Tracker (Merlin Made Me) -->
 <div id="stats-overlay" class="overlay hidden">
-  <div class="stats-card">
+  <div class="stats-card" id="stats-card">
     <button id="stats-close" class="qr-close" aria-label="Close revenue tracker">&times;</button>
     <div id="stats-brand-name" class="stats-brand"></div>
     <div class="stats-header">
       <span class="stats-sparkle">✦</span>
       <span class="stats-subtitle">powered by Merlin</span>
     </div>
-    <div id="stats-period" class="stats-period">This month</div>
+
+    <div class="stats-period-row">
+      <div id="stats-period" class="stats-period">This month</div>
+      <div class="stats-period-toggle" role="tablist" aria-label="Reporting window">
+        <button type="button" class="stats-period-btn" data-days="1" role="tab">1D</button>
+        <button type="button" class="stats-period-btn" data-days="7" role="tab">7D</button>
+        <button type="button" class="stats-period-btn" data-days="30" role="tab">30D</button>
+        <button type="button" class="stats-period-btn" data-days="90" role="tab">90D</button>
+        <button type="button" class="stats-period-btn" data-days="365" role="tab">12M</button>
+      </div>
+    </div>
 
     <div class="stats-hero-number">
       <span id="stats-revenue" class="stats-revenue">--</span>
-      <span class="stats-revenue-label">revenue influenced</span>
+      <span id="stats-revenue-label" class="stats-revenue-label">revenue from Merlin's ads</span>
+      <div id="stats-trend-pill" class="stats-trend-pill hidden"></div>
     </div>
 
     <div class="stats-bar-wrap">
@@ -272,9 +283,10 @@
 
     <div id="stats-story" class="stats-story"></div>
 
-    <div class="stats-grid">
+    <div class="stats-grid stats-grid-3">
       <div class="stats-cell"><span id="stats-spend" class="stats-val">--</span><span class="stats-label">ad spend</span></div>
       <div class="stats-cell"><span id="stats-roas" class="stats-val">--</span><span class="stats-label">return</span></div>
+      <div class="stats-cell"><span id="stats-customers" class="stats-val">--</span><span class="stats-label">new customers</span></div>
     </div>
 
     <div id="stats-top-ad" class="stats-top-ad"></div>
@@ -405,6 +417,7 @@
 
 <script src="marked.min.js"></script>
 <script src="purify.min.js"></script>
+<script src="sentence-splitter.js"></script>
 <script src="renderer.js"></script>
 </body>
 </html>

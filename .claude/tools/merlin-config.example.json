@@ -53,6 +53,12 @@
     "clientID": "86p3wa6kt80r7z"
   },
 
+  "redditAccessToken": "",
+  "redditRefreshToken": "",
+  "redditAdAccountId": "",
+  "_redditPostMode_comment": "How reddit-prospect-post behaves: \"auto\" runs the 7-layer compliance preflight (account age / karma / cadence / dedup / shadowban) and submits via /api/comment. \"draft-only\" skips the compliance gate and saves the reply to results/reddit_draft_<ts>.txt for manual paste — the safe default for fresh accounts, warm-up windows, and shadowban recovery.",
+  "redditPostMode": "auto",
+
   "productName": "My Brand",
   "productUrl": "https://mybrand.com",
   "productDescription": "A short description of your brand.",
