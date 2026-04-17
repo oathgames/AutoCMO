@@ -1,5 +1,5 @@
 {
-  "version": "1.5.0",
+  "version": "1.5.1",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -25,7 +25,7 @@
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.5.0: Stripe read-only revenue integration (7 actions, OAuth-pinned read_only scope), Reddit organic growth (scan/draft/post/shadowban-check with 7-layer compliance preflight), streaming TTS (first-sentence latency cut from ~2-3s to ~400-700ms), universal RevenueSource abstraction so Shopify + Stripe + future billing connectors feed one topline, mobile approval queue stub on the landing worker (HMAC-signed), and a CI asar size ceiling to block the v1.3.0 bloat regression on both Windows and Mac builds.",
+  "notes": "v1.5.1: Asar bloat fix (CI voice tools were double-packing into app.asar via .claude/tools/ staging — restored v1.3.0-style positive allow-list in package.json files field, asar is back to ~226 MB). Same feature set as the un-shipped v1.5.0: Stripe read-only revenue integration (7 actions, OAuth-pinned read_only scope), Reddit organic growth (scan/draft/post/shadowban-check with 7-layer compliance preflight), streaming TTS (first-sentence latency cut from ~2-3s to ~400-700ms), universal RevenueSource abstraction so Shopify + Stripe + future billing connectors feed one topline, mobile approval queue stub on the landing worker (HMAC-signed), and a CI asar size ceiling to block the v1.3.0 bloat regression on both Windows and Mac builds.",
   "whatsNew": [
     "Stripe integration (read-only): seven new actions — stripe-login, stripe-setup, stripe-revenue, stripe-subscriptions, stripe-cohorts, stripe-analytics, stripe-preference. OAuth scope pinned to read_only in TWO places (binary + worker re-verifies Stripe's echoed scope). No write verbs in source — enforced by a build-failing test that greps stripe.go. Topline preference configurable (shopify/stripe/both) when both connected.",
     "Universal RevenueSource abstraction (dashboard.go): Shopify and Stripe both report through one RevenueSource{Name,Kind,Revenue,NewCustomers,MRR,ARR,ActiveSubs,ChurnPct} shape. pickRevenueSource disambiguates topline by cfg.RevenueSourcePreference. Adding future billing connectors (PayPal, Square, Recurly) is now one function + one case — no ad-hoc revenue fields.",
