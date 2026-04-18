@@ -282,6 +282,14 @@ async function init() {
   if (isReturning) {
     // Check for morning briefing FIRST (cached, instant)
     const briefing = await merlin.getBriefing().catch(() => null);
+    // Look up the active brand's prior conversation. If we have one, skip
+    // the "Welcome back — loading..." placeholder and paint the history
+    // instead — the user resumes exactly where they left off per brand.
+    const priorThread = activeBrand
+      ? await merlin.getBrandThread(activeBrand).catch(() => ({ bubbles: [] }))
+      : { bubbles: [] };
+    const hasPriorThread = priorThread && Array.isArray(priorThread.bubbles) && priorThread.bubbles.length > 0;
+
     if (briefing) {
       welcomeBubble.classList.remove('streaming');
       let briefingHtml = `<div class="briefing-card"><div class="briefing-header">✦ While you were away</div>`;
@@ -294,14 +302,32 @@ async function init() {
       merlin.dismissBriefing(); // Mark as seen so it doesn't repeat
       currentBubble = null;
       textBuffer = '';
-      // Add a second bubble for the normal welcome
-      const wb2 = addClaudeBubble();
-      wb2.classList.remove('streaming');
-      wb2.innerHTML = `Welcome back — loading ${escapeHtml(brandName)}...`;
+      if (!hasPriorThread) {
+        const wb2 = addClaudeBubble();
+        wb2.classList.remove('streaming');
+        wb2.innerHTML = `Welcome back — loading ${escapeHtml(brandName)}...`;
+        currentBubble = null;
+        textBuffer = '';
+      }
+    } else if (!hasPriorThread) {
+      welcomeBubble.innerHTML = `Welcome back — loading ${escapeHtml(brandName)}...`;
+    } else {
+      // Prior thread will paint; drop the empty welcome bubble so the chat
+      // doesn't start with a stray "..." above the restored history.
+      welcomeBubble.remove();
       currentBubble = null;
       textBuffer = '';
-    } else {
-      welcomeBubble.innerHTML = `Welcome back — loading ${escapeHtml(brandName)}...`;
+    }
+
+    // Paint prior conversation history (if any). Non-streaming, no TTS —
+    // this is rehydration, not a new response.
+    if (hasPriorThread) {
+      for (const b of priorThread.bubbles) {
+        if (!b || (b.role !== 'user' && b.role !== 'claude')) continue;
+        if (typeof b.text !== 'string' || b.text.length === 0) continue;
+        renderBubbleFromLog(b.role, b.text);
+      }
+      scrollToBottom(true);
     }
 
     // Native progress bar handles onboarding status — no duplicate in chat
@@ -364,6 +390,70 @@ function addClaudeBubble() {
   lastRenderedLength = 0;
   scrollToBottom();
   return bubble;
+}
+
+// Render a persisted bubble (no streaming, no scroll, no TTS, no sparkle).
+// Used to rehydrate the chat from the per-brand thread store on startup
+// and on brand switch. Kept isolated from addUserBubble/addClaudeBubble so
+// live-streaming state (currentBubble, textBuffer) is never disturbed.
+function renderBubbleFromLog(role, text) {
+  if (role === 'user') {
+    const div = document.createElement('div');
+    div.className = 'msg msg-user';
+    div.style.whiteSpace = 'pre-wrap';
+    div.textContent = String(text);
+    messages.appendChild(div);
+    return div;
+  }
+  if (role === 'claude') {
+    const wrapper = document.createElement('div');
+    wrapper.className = 'msg msg-claude';
+    const avatar = document.createElement('div');
+    avatar.className = 'msg-avatar';
+    avatar.textContent = '✦';
+    const bubble = document.createElement('div');
+    bubble.className = 'msg-bubble';
+    bubble.innerHTML = renderMarkdown(String(text));
+    // Replay button so the user can still hear past responses aloud.
+    if (typeof addReplayButton === 'function') {
+      try { addReplayButton(bubble, String(text)); } catch {}
+    }
+    wrapper.appendChild(avatar);
+    wrapper.appendChild(bubble);
+    messages.appendChild(wrapper);
+    return bubble;
+  }
+  return null;
+}
+
+// Visual divider inserted into the chat when the user switches brands. Makes
+// the context boundary obvious — the prior conversation is still visible but
+// clearly sits "above" the new brand's history.
+function renderBrandDivider(label) {
+  const div = document.createElement('div');
+  div.className = 'msg-divider brand-divider';
+  div.style.cssText = 'text-align:center;color:var(--muted,#888);font-size:12px;padding:12px 0;border-top:1px solid var(--border,#2a2a2a);border-bottom:1px solid var(--border,#2a2a2a);margin:12px 0;letter-spacing:0.05em;';
+  div.textContent = `— now working in ${label} —`;
+  messages.appendChild(div);
+  return div;
+}
+
+// Replace the entire chat with a rehydrated thread. Finalizes any streaming
+// bubble first so the old session's half-rendered turn doesn't orphan state.
+function paintBrandThread(bubbles) {
+  try { finalizeBubble(); } catch {}
+  messages.innerHTML = '';
+  currentBubble = null;
+  textBuffer = '';
+  isStreaming = false;
+  if (!Array.isArray(bubbles) || bubbles.length === 0) return 0;
+  for (const b of bubbles) {
+    if (!b || (b.role !== 'user' && b.role !== 'claude')) continue;
+    if (typeof b.text !== 'string' || b.text.length === 0) continue;
+    renderBubbleFromLog(b.role, b.text);
+  }
+  scrollToBottom(true);
+  return bubbles.length;
 }
 
 let lastRenderedLength = 0;
@@ -2017,7 +2107,7 @@ function updateVertical(vertical) {
   }
 }
 
-document.getElementById('brand-select').addEventListener('change', (e) => {
+document.getElementById('brand-select').addEventListener('change', async (e) => {
   // Handle "+ New Brand" option
   if (e.target.value === '__add__') {
     // Reset to previous selection
@@ -2026,21 +2116,53 @@ document.getElementById('brand-select').addEventListener('change', (e) => {
     return;
   }
 
-  // Persist active brand selection
-  merlin.saveState({ activeBrand: e.target.value });
-  e.target.dataset.lastValue = e.target.value || '';
+  const newBrand = e.target.value;
+  const prevBrand = e.target.dataset.lastValue || '';
+  e.target.dataset.lastValue = newBrand || '';
+
+  // Brand context swap — the main process aborts the current SDK turn,
+  // resumes the target brand's SDK session by ID, and returns that brand's
+  // bubble log. We repaint the chat synchronously so the switch feels
+  // immediate; the new SDK session boots in the background. Never inferred
+  // from conversation content — only this explicit dropdown change fires.
+  let swapResult = null;
+  if (newBrand) {
+    try {
+      swapResult = await merlin.switchBrand(newBrand);
+    } catch (err) {
+      console.warn('[switch-brand]', err);
+    }
+  }
+
+  if (swapResult && swapResult.success) {
+    paintBrandThread(swapResult.bubbles);
+    // Only show the divider if we actually switched between distinct
+    // brands — selecting the same brand again shouldn't pollute the chat.
+    if (prevBrand && prevBrand !== newBrand) {
+      const label = (() => {
+        try {
+          const opt = e.target.querySelector(`option[value="${CSS.escape(newBrand)}"]`);
+          return opt?.textContent?.trim() || newBrand;
+        } catch { return newBrand; }
+      })();
+      renderBrandDivider(label);
+    }
+  } else if (swapResult && !swapResult.success) {
+    // Surface the failure but don't leave the UI in a stale state — revert
+    // the dropdown so it matches the brand we're actually working in.
+    console.warn('[switch-brand] failed:', swapResult.error);
+    if (prevBrand) e.target.value = prevBrand;
+  }
+
+  // Update peripheral UI (vertical, connections, spells, perf) for the new brand.
   merlin.getBrands().then((brands) => {
-    const brand = brands.find(b => b.name === e.target.value);
+    const brand = brands.find(b => b.name === newBrand);
     if (brand?.vertical) updateVertical(brand.vertical);
     else updateVertical('');
   }).catch((err) => { console.warn('[brands]', err); });
-  // Reload connections and spells for the selected brand
   loadConnections();
   loadSpells();
-  // Load perf bar for new brand — cache handles instant swap, no blank flash
   const activePeriod = document.querySelector('.perf-period-btn.active')?.dataset.days || '7';
-  const newBrand = e.target.value;
-  // Show cached immediately or skeleton if no cache
   const cached = perfState.cache[newBrand]?.[parseInt(activePeriod)];
   if (cached) renderPerfBar(cached);
   else renderPerfBarSkeleton();

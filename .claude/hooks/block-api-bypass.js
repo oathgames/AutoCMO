@@ -139,6 +139,11 @@ const PROTECTED_PATH_PATTERNS = [
   /\.merlin-vault(\.|$)/i,
   /\.merlin-ratelimit(\.|$)/i,
   /\.merlin-audit(\.|$)/i,
+  // Per-brand conversation history (role + text per bubble). Exfiltration
+  // would leak every marketing decision, customer complaint, revenue
+  // figure, and strategy discussion across every brand. Atomic-write
+  // siblings (.bak/.tmp) covered by (\.|$) per Rule 7.
+  /\.merlin-threads(\.|$)/i,
   /\.merlin-reddit-cache(\.|$)/i,
   // Desktop relay credentials — encrypted via safeStorage but contains the
   // session + desktop token that authenticate to the Cloudflare relay.
