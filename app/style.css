@@ -1991,6 +1991,14 @@ body.platform-mac .titlebar-drag{
 }
 
 /* ── Inline Modal (replaces native prompt/alert) ─────────── */
+/* The modal shares the .overlay class with full-screen overlays like
+   #trial-overlay and #agency-overlay, so at the same z-index the later-
+   appended dynamic overlay would paint on top and swallow clicks (the
+   "I have a license key" button appeared dead on trial-expired because
+   the license-key modal opened behind the still-visible trial overlay).
+   Raising z-index guarantees any showModal call lands above any other
+   overlay regardless of DOM append order. */
+#merlin-modal{z-index:10000}
 .merlin-modal-card{
   background:var(--bg);
   border:1px solid var(--accent-border);
