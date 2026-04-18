@@ -870,6 +870,15 @@ function friendlyError(raw, platformName) {
   if (sl.includes('rate limit') || sl.includes('too many requests') || sl.includes('429')) return 'Too many requests — Merlin is protecting your account.\nTry: Wait 30 seconds and try again. This is normal.';
   if (sl.includes('quota') || sl.includes('exceeded')) return `${platformName || 'API'} quota exceeded.\nTry: Check your plan limits or upgrade your ${platformName || 'API'} account.`;
 
+  // ── Shopify scope-gap (stored token predates a newly-requested scope) ──
+  // Sentinel `scope_gap` is emitted by shopifyRequestWithStatus / shopifyGraphQL
+  // in autocmo-core when Shopify returns 403 "merchant approval for <scope>".
+  // Must come BEFORE the generic 401/403 branches below — re-auth fixes this,
+  // the generic "check permissions" message does not.
+  if (sl.includes('scope_gap') || (sl.includes('shopify') && sl.includes('merchant approval'))) {
+    return 'Your Shopify connection needs to be refreshed to unlock new features.\nTry: Open the ✦ Magic panel and reconnect your Shopify store — it takes 10 seconds.';
+  }
+
   // ── Auth errors ──
   if (sl.includes('401') || sl.includes('unauthorized') || sl.includes('invalid.*key') || sl.includes('invalid.*token')) return `Authorization failed for ${platformName || 'the platform'}.\nTry: Open the ✦ Magic panel and reconnect your account.`;
   if (sl.includes('403') || sl.includes('forbidden') || sl.includes('locked')) return `Access denied on ${platformName || 'the platform'}.\nTry: Check that your account is active and has the right permissions.`;
