@@ -2768,6 +2768,11 @@ ipcMain.handle('switch-brand', async (_, targetBrand) => {
 // (and optionally on re-render) to paint the chat from persisted history.
 ipcMain.handle('get-brand-thread', (_, brand) => {
   if (typeof brand !== 'string' || !brand) return { bubbles: [], sessionId: null };
+  // Same charset guard as switch-brand — brand is only a JSON key here (no
+  // filesystem path built from it) so there's no traversal risk, but
+  // keeping the two handlers symmetric prevents drift if we ever add a
+  // path-joining use downstream.
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(brand)) return { bubbles: [], sessionId: null };
   const thread = threads.getThread(appRoot, brand);
   return { bubbles: thread.bubbles, sessionId: thread.sessionId, lastActiveAt: thread.lastActiveAt };
 });
