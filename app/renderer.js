@@ -42,15 +42,31 @@ function _loadVerifyFacts() {
 }
 
 /**
- * initFactBinding({sessionId, vaultKey, brand, toolsDir}) — called by main.js
- * once the session is known. Hex-encoded vaultKey accepted for IPC safety.
+ * initFactBinding({sessionId, vaultKey, brand, toolsDir}) — wired by the
+ * preload bridge (`window.merlinFactBinding.onInit(cb)` → this callback).
+ * `vaultKey` arrives as a Buffer from preload; contextBridge's structured
+ * clone converts Buffer → Uint8Array on the renderer side, so we accept
+ * both and normalise to Buffer before handing to FactCache. Legacy hex
+ * fallback retained for unit-test harnesses that call initFactBinding
+ * directly without going through the bridge.
  * Safe to call even when factBindingEnabled is false (returns null).
  */
 function initFactBinding({ sessionId, vaultKey, brand, toolsDir }) {
   if (!factBindingEnabled) return null;
   try {
     const { FactCache, watchFactsFile, defaultFactsFilePath } = require('./facts/facts-cache');
-    const vk = Buffer.isBuffer(vaultKey) ? vaultKey : Buffer.from(String(vaultKey), 'hex');
+    let vk;
+    if (Buffer.isBuffer(vaultKey)) {
+      vk = vaultKey;
+    } else if (vaultKey instanceof Uint8Array) {
+      // Structured-clone path from preload. Copy into a Buffer view so
+      // the HMAC code (expects Buffer with .slice / .equals etc.)
+      // sees a true Buffer regardless of the clone's underlying buffer.
+      vk = Buffer.from(vaultKey.buffer, vaultKey.byteOffset, vaultKey.byteLength);
+    } else {
+      // Direct-call test harness — hex string.
+      vk = Buffer.from(String(vaultKey), 'hex');
+    }
     _factCache = new FactCache({
       sessionId, vaultKey: vk, brand,
       onSafeMode: (info) => console.warn('[facts] SAFE MODE', info),
@@ -62,7 +78,16 @@ function initFactBinding({ sessionId, vaultKey, brand, toolsDir }) {
     return _factCache;
   } catch (e) { console.error('[facts] init failed:', e); return null; }
 }
-if (typeof window !== 'undefined') window.__merlinInitFactBinding = initFactBinding;
+// Subscribe to the preload bridge. When main pushes the session-prelude
+// result over `fact-binding:init`, preload converts the hex → Buffer in
+// Node context and delivers it here. The hex never enters this JS world.
+// When the bridge isn't present (factBinding flag off in preload, or
+// test harness loading renderer.js outside Electron) this is a no-op.
+try {
+  if (typeof window !== 'undefined' && window.merlinFactBinding && typeof window.merlinFactBinding.onInit === 'function') {
+    window.merlinFactBinding.onInit((cfg) => initFactBinding(cfg || {}));
+  }
+} catch { /* preload bridge missing — stay off */ }
 
 function _factStreamStart() {
   if (!factBindingEnabled) return;
