@@ -71,6 +71,12 @@ DO NOT narrate each setup step. The app has a native progress bar — do the wor
 
    **Competitors (background):** launch a background agent to find 5–8 via WebSearch. Write `assets/brands/<brand>/competitors.md`.
 
+   **Goal capture (one question, conversational):** before creating scheduled tasks, ask ONCE:
+   *"What's your revenue target for [brand] this month? (e.g., $50k, $100k — or say 'skip' if not sure yet.)"*
+   - If the user gives a number: run `{"action": "goal-set", "brand": "<brand>", "goal": {"targetRevenue": <n>, "window": "monthly", "context": "<any color the user gave>"}}`. Writes `assets/brands/<brand>/goal.md` (YAML frontmatter + free-form context body). The dashboard will surface ahead/on-track/behind/at-risk pacing against this target automatically.
+   - If the user says skip / "no idea" / "later": move on silently. `goal.md` stays absent, dashboard skips the pacing section. The user can set it later with the same action.
+   - The goal file is user-editable markdown — they can open it in any editor and add priorities / constraints / context prose. Reading is via `{"action": "goal-get", "brand": "<brand>"}`.
+
    **Automation (automatic — don't ask):** create all four scheduled tasks automatically (daily, optimize, digest, memory).
 
    **Final summary (the ONLY setup message after products):**
@@ -277,8 +283,11 @@ Create all four scheduled tasks without asking. Use `mcp__scheduled-tasks__creat
   Never below $5/day, never above DAILY_BUDGET total.
 
   == STEP 5c: INVENTORY-AWARE AD PAUSING ==
-  If Shopify connected: shopify-products → if inventory ≤ 0, pause ads promoting that product.
-  Restock → re-enable ads that were paused for stock.
+  If Shopify connected: run {"action":"optimize-inventory","brand":"<brand>"}.
+  Walks ads-live.json, matches each live ad to a Shopify product by slug, pauses on 0 inventory,
+  and restores previously-paused ads when the product is restocked. Idempotent — state is persisted
+  to .merlin-paused-for-stock.json, so the next run picks up where this one left off.
+  Result counts (paused / restored / skipped / errors) are logged to activity.jsonl automatically.
 
   == STEP 5d: WINNER FORMULA DETECTION ==
   After 4+ tests, identify (hook + format + audience + time-of-day) that outperforms 2×+.

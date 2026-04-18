@@ -15,8 +15,9 @@ owner: ryan
 | `import` | `brand` | Pull all products + images into `assets/brands/<brand>/` |
 | `cohorts` | `brand`, `batchCount` (days) | First-purchase cohorts → LTV, repeat rate |
 | `analytics` | `brand`, `batchCount` (days) | 30-day window with AOV, ATC→purchase rate |
+| `optimize-inventory` | `brand` | Cross-references Shopify inventory with live ads; pauses ads for OOS products, restores on restock |
 
-**Inventory-aware ad pausing** — when called from the daily optimization loop, cross-reference inventory with active ads. If inventory ≤ 0, pause ads promoting that product. When restocked, re-enable ads that were paused for stock.
+**Inventory-aware ad pausing** — `optimize-inventory` walks `ads-live.json`, matches each live ad's `product` field to Shopify by slug, and pauses on 0 inventory. Paused ads are recorded in `.merlin-paused-for-stock.json` so the next run can auto-restore them when the product is restocked. Call this from the `merlin-optimize` scheduled task once per day. Safe to re-run; idempotent. Today only Meta is wired; TikTok/Reddit/LinkedIn stubs live in `inventory_sync.go:pausePlatformAd` — adding a case there wires the next platform.
 
 **Shopify write boundary.** Never modify product titles, descriptions, prices, variants, sizes, inventory, pages, theme, or navigation. Merlin **adds** (blog posts, images) — never edits user content.
 
@@ -55,6 +56,7 @@ When BOTH Shopify AND Stripe are connected AND Stripe is the Shopify payment pro
 - "MRR" / "ARR" / "churn" / "active subscribers" → `stripe-subscriptions` directly.
 - "cohort" / "retention by month" / "LTV" → `stripe-cohorts` (subscription) OR `shopify-cohorts` (DTC).
 - "out of stock" / "inventory" / "how much left" → `shopify-products` (inventory field).
+- "pause ads for out-of-stock products" / "are we running ads for sold-out stuff" → `optimize-inventory`.
 
 ## Setup gotcha
 
