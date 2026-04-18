@@ -6,7 +6,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { mountCharts, CHART_SELECTOR } = require('./chart-renderer');
+const { mountCharts, mountChartsInHtml, CHART_SELECTOR } = require('./chart-renderer');
 
 // Tiny DOM shim: just enough to satisfy mountCharts().
 function makeEl(payload) {
@@ -127,4 +127,89 @@ test('mountCharts fallback path escapes title (AI review WARN regression guard)'
     `fallback path leaked raw HTML: ${el.innerHTML}`);
   assert.ok(el.innerHTML.includes('&lt;img'),
     `fallback path did not escape: ${el.innerHTML}`);
+});
+
+// ── mountChartsInHtml (string-based, preload-side) ────────────────────
+//
+// The renderer runs with contextIsolation + no nodeIntegration, so DOM
+// elements can't cleanly cross contextBridge into preload. Production
+// path calls this string-based analogue on the HTML before innerHTML
+// assignment. These tests mirror the DOM-version tests to lock parity.
+
+test('mountChartsInHtml swaps bar-chart placeholder for inline SVG', () => {
+  const payload = encodePayload({
+    title: 'Spend', kind: 'bar',
+    data: [
+      { id: 'a1', label: 'meta',   value: 1000, display: '$1,000' },
+      { id: 'b2', label: 'tiktok', value: 500,  display: '$500' },
+    ],
+  });
+  const html = `<p>preamble</p><div class="merlin-chart" data-chart-payload="${payload}"></div><p>tail</p>`;
+  const out = mountChartsInHtml(html);
+  assert.ok(out.includes('<svg'));
+  assert.ok(out.includes('data-fact="a1"'));
+  assert.ok(out.includes('data-fact="b2"'));
+  assert.ok(out.includes('<p>preamble</p>'));
+  assert.ok(out.includes('<p>tail</p>'));
+  // Outer placeholder div preserved (send-boundary verifier scans it).
+  assert.ok(out.includes('<div class="merlin-chart" data-chart-payload="'));
+});
+
+test('mountChartsInHtml handles multiple placeholders in one pass', () => {
+  const p1 = encodePayload({ title: 'A', kind: 'bar', data: [{ id: 'x', label: 'x', value: 1 }] });
+  const p2 = encodePayload({ title: 'B', kind: 'line', data: [{ id: 'y', label: 'y', value: 2 }, { id: 'z', label: 'z', value: 3 }] });
+  const html =
+    `<div class="merlin-chart" data-chart-payload="${p1}"></div>` +
+    `<div class="merlin-chart" data-chart-payload="${p2}"></div>`;
+  const out = mountChartsInHtml(html);
+  const svgCount = (out.match(/<svg/g) || []).length;
+  assert.equal(svgCount, 2);
+  assert.ok(out.includes('<rect '));
+  assert.ok(out.includes('<path '));
+});
+
+test('mountChartsInHtml is a no-op when no placeholders are present', () => {
+  const html = '<p>hello world</p><div class="other">not a chart</div>';
+  assert.equal(mountChartsInHtml(html), html);
+});
+
+test('mountChartsInHtml handles non-string / empty input', () => {
+  assert.equal(mountChartsInHtml(''), '');
+  assert.equal(mountChartsInHtml(null), null);
+  assert.equal(mountChartsInHtml(undefined), undefined);
+});
+
+test('mountChartsInHtml falls back to text on empty data', () => {
+  const payload = encodePayload({ title: 'Nothing', kind: 'bar', data: [] });
+  const html = `<div class="merlin-chart" data-chart-payload="${payload}"></div>`;
+  const out = mountChartsInHtml(html);
+  assert.ok(out.includes('no data available'));
+  assert.ok(!out.includes('<svg'));
+});
+
+test('mountChartsInHtml fallback escapes title (XSS regression guard)', () => {
+  const payload = encodePayload({
+    title: '<img src=x onerror=alert(1)>', kind: 'bar', data: [],
+  });
+  const html = `<div class="merlin-chart" data-chart-payload="${payload}"></div>`;
+  const out = mountChartsInHtml(html);
+  assert.ok(!out.includes('<img src=x'), `fallback leaked raw HTML: ${out}`);
+  assert.ok(out.includes('&lt;img'), `fallback did not escape: ${out}`);
+});
+
+test('mountChartsInHtml does NOT re-mount an already-mounted placeholder', () => {
+  // After first pass, placeholder body is non-empty (<svg>...</svg>). The
+  // regex requires an empty body (></div>) so a second pass is a no-op —
+  // matching the idempotency contract of the DOM version.
+  const payload = encodePayload({ title: 'X', kind: 'bar', data: [{ id: 'a', label: 'a', value: 1 }] });
+  const html = `<div class="merlin-chart" data-chart-payload="${payload}"></div>`;
+  const first = mountChartsInHtml(html);
+  const second = mountChartsInHtml(first);
+  assert.equal(first, second, 'second pass must be a no-op (idempotent)');
+});
+
+test('mountChartsInHtml tolerates malformed payload (returns fallback)', () => {
+  const html = `<div class="merlin-chart" data-chart-payload="not-json"></div>`;
+  const out = mountChartsInHtml(html);
+  assert.ok(out.includes('no data available'));
 });

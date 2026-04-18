@@ -60,6 +60,60 @@ function mountCharts(root) {
   return mounted;
 }
 
+/**
+ * mountChartsInHtml — string-based analogue of mountCharts.
+ *
+ * The DOM version above requires an Element from the renderer world, which
+ * cannot cross the contextBridge cleanly (DOM proxies either flatten or
+ * throw in practice). The production data path is:
+ *
+ *   renderer calls preload bridge with an HTML string
+ *   → preload runs mountChartsInHtml in Node context
+ *   → renderer assigns returned string to `bubble.innerHTML`
+ *
+ * Parsing: the pass-2 emitter in verify-facts.js always produces the exact
+ * shape `<div class="merlin-chart" data-chart-payload="..."></div>` with no
+ * intervening children. We match that shape specifically — not any `<div>`
+ * with the class — so a downstream escaping bug can never cause us to
+ * chart-mount user-controlled markup.
+ *
+ * Idempotent: re-processing HTML that already has an SVG inside the
+ * placeholder div is a no-op because the inner `</div>` match requires an
+ * empty body. That mirrors the DOM version (which overwrites innerHTML
+ * unconditionally, but produces identical output given the same payload).
+ */
+const CHART_MATCH = /<div\s+class="merlin-chart"\s+data-chart-payload="([^"]*)"[^>]*><\/div>/g;
+
+function renderPayload(payload) {
+  if (!payload || !Array.isArray(payload.data) || payload.data.length === 0) {
+    return renderFallbackHTML(payload);
+  }
+  const kind = (payload.kind || 'bar').toLowerCase();
+  switch (kind) {
+    case 'line': return renderLine(payload);
+    case 'donut':
+    case 'pie':  return renderDonut(payload);
+    case 'bar':
+    default:     return renderBar(payload);
+  }
+}
+
+function mountChartsInHtml(html) {
+  if (typeof html !== 'string' || html.length === 0) return html;
+  if (!html.includes('merlin-chart')) return html;
+  return html.replace(CHART_MATCH, (match, encoded) => {
+    let payload;
+    try { payload = JSON.parse(decodeAttr(encoded)); }
+    catch (e) { payload = null; }
+    const inner = renderPayload(payload);
+    // Preserve the outer div + its data-chart-payload attribute so the
+    // send-boundary verifier and any downstream data-fact traversal still
+    // sees the original placeholder context. Only the empty body gets
+    // replaced.
+    return match.slice(0, match.length - '</div>'.length) + inner + '</div>';
+  });
+}
+
 // ── Renderers ─────────────────────────────────────────────────────────────
 
 const W = 560, H = 220, PAD_L = 48, PAD_R = 16, PAD_T = 24, PAD_B = 36;
@@ -178,4 +232,4 @@ function renderFallbackHTML(payload) {
   return `<p><em>${title}</em> — no data available.</p>`;
 }
 
-module.exports = { mountCharts, CHART_SELECTOR };
+module.exports = { mountCharts, mountChartsInHtml, CHART_SELECTOR };
