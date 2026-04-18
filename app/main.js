@@ -7356,6 +7356,38 @@ async function downloadAndApplyUpdate() {
       try { fs.unlinkSync(backup); } catch {}
     }
 
+    // Phase 3: delete files that a previous version shipped but the new
+    // release has retired. Every entry passes the same appRoot-confined
+    // safety check as updatable/ — `versionJson.removed` is hostile-input
+    // to this process and must never walk outside the install. Deletes are
+    // idempotent: a missing file is a no-op (the user already upgraded
+    // through a version that dropped it, or manually removed it).
+    //
+    // REGRESSION GUARD (2026-04-18): the v1.6.0 skill-routing migration
+    // retired .claude/commands/merlin-platforms.md and merlin-setup.md.
+    // Without this phase, /update would leave orphan prose copies on
+    // every existing install — they carry no routing authority (SDK only
+    // reads SKILL.md) but a future contributor grepping .claude/commands
+    // would see stale files. If you ever add a path-pattern entry (e.g.
+    // `".claude/skills/old-name/"`) consider recursive removal semantics
+    // carefully — today we only support explicit file paths.
+    const removedEntries = Array.isArray(versionJson.removed) ? versionJson.removed : [];
+    for (const entry of removedEntries) {
+      if (!isSafeUpdatablePath(entry)) {
+        console.warn('[update] refusing unsafe removed entry:', entry);
+        continue;
+      }
+      const fullPath = path.resolve(appRoot, entry);
+      try {
+        if (fs.existsSync(fullPath)) {
+          fs.unlinkSync(fullPath);
+          console.log('[update] removed retired file:', entry);
+        }
+      } catch (e) {
+        console.warn('[update] removed-file delete failed (non-fatal):', entry, e.message);
+      }
+    }
+
     const binaryName = process.platform === 'win32' ? 'Merlin-windows-amd64.exe'
       : (process.platform === 'darwin' && process.arch === 'arm64') ? 'Merlin-darwin-arm64'
       : process.platform === 'darwin' ? 'Merlin-darwin-amd64'
