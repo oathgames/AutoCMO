@@ -47,9 +47,20 @@ Meta's Andromeda system rewards ads that feel native to the feed, not studio pit
 3. **`interruptBeats[]`** — 3–6 mid-ad spikes spaced ≥ 1.5s apart. Each is a scene change, tone flip, or reveal (not a repeated product shot). Fewer than 3 collapses retention past 50%; more than 6 reads as chaotic. Kind field: `"twist"`, `"reveal"`, `"interrupt"`, `"resolve"`.
 4. **`platformNative`** — `"reel"` (polished handheld), `"tiktok"` (raw, text-on-screen, trend cadence), `"feed"` (1:1 or 4:5 cleaner), `"stories"` (9:16 quick-read). The binary injects platform-specific styling cues; blank drifts toward studio polish.
 
+## Video prompt assembly (same AdBrief, timeline-first)
+
+The video pipeline uses the same AdBrief struct — fill the 4 camouflage fields exactly as you would for an image brief. Under the hood the binary calls `buildVideoPromptFromBrief()` which renders a timeline-first prompt (Shell lock → Product → Subject → beat timeline → scene cues → 6 technical anchors → freeze-frame close-out → negatives). Key differences from image:
+
+- **Beat timeline** is explicit: `0.0s [opening] → <conflictBeat> → <interruptBeats sorted> → <duration>s [close]`. The close beat is implicit — appears only when at least one real beat is populated.
+- **Camera**: if you leave `camera` blank AND any camouflage field is set, the assembler injects handheld micro-motion (native-feed default). Explicit `camera` always wins.
+- **Duration** comes from `duration` (default 5s for fal). Plumbs into the Shell lock opener and the freeze-frame close-out timestamp.
+- **Priority**: explicit `productHook` still overrides the assembler — use it when you want raw prompt control. Default (no hook) uses AdBrief if set, else the legacy cinematic baseline.
+
+Same `rubric.json` and `prompt.txt` persist to the run folder so video and image runs are uniformly analyzable by the wisdom engine.
+
 ## Creative Rubric (pre-generation gate)
 
-Every AdBrief passed to the image pipeline is scored by `EvaluateBrief()` before a single fal credit is burned. Output is saved to `rubric.json` alongside `prompt.txt` in each run folder. Bands:
+Every AdBrief passed to the image OR video pipeline is scored by `EvaluateBrief()` before a single fal credit is burned. Output is saved to `rubric.json` alongside `prompt.txt` in each run folder. Bands:
 
 - **A (≥90%)** — ship it; consider saving as a template.
 - **B (80–89%)** — pass; one polish field missing.
