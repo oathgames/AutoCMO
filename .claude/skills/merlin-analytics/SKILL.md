@@ -16,6 +16,8 @@ owner: ryan
 
 **Topline revenue routing** — `dashboard` internally resolves `RevenueSource` across every connector (see `merlin-ecom` for the preference rules). Never compute revenue by summing Shopify + Stripe yourself — the abstraction handles double-count protection.
 
+**Goal pacing** — if `assets/brands/<brand>/goal.md` exists, `dashboard` attaches a `goal` block with `status` (ahead / on-track / behind / at-risk), `targetRevenue`, `actualRevenue`, `requiredPerDay`, and a one-line `message` comparing expected vs. actual against the monthly/weekly/quarterly window. Surface this prominently in digests ("Pacing: behind — $20k of $50k target at 50% of month elapsed, need $1,667/day to finish"). When no goal is set, the block is omitted. Goals are captured at onboarding (see `merlin-setup`) or via `{"action": "goal-set", ...}`.
+
 ## Performance table rules
 
 Render only fields that exist in the JSON output. For `meta-insights`, the `campaign_summary` block has **exactly**:
@@ -82,7 +84,9 @@ When running `landing-audit` or auditing any conversion page, score 8 dimensions
 | Mobile responsive | 10% | Tap targets ≥44px, no horizontal scroll, readable without zoom |
 | Page speed | 10% | LCP <2.5s, CLS <0.1, hero image <200KB |
 
-**Overall grade:** A (90+) / B (75–89) / C (60–74) / D (<60). Grade below B → fix before adding traffic. **Never recommend scaling ad spend into a C/D page.**
+**Overall grade:** A (90+) / B (80–89) / C (70–79) / D (60–69) / F (<60). Grade below B → fix before adding traffic. **Never recommend scaling ad spend into a C/D/F page.**
+
+**Automatic enforcement.** The grade is cached to `.merlin-landing-audits.json` by `landing-audit`. `meta-budget` and `meta-duplicate` (scale-up paths) call `enforceLandingGrade` before changing spend — scores below 80 are refused unless the caller passes `force=true`. Unaudited URLs pass silently, so this is not a surprise block on new pages. The bands above are the exact cutoffs the binary enforces — don't paraphrase them elsewhere.
 
 ## Creative velocity check
 
@@ -98,6 +102,8 @@ On `dashboard`, check email + SMS contribution. Under 20% of revenue → recomme
 - "why aren't ads converting" / "audit my page" / "landing page" → apply Conversion Rubric, run `landing-audit` if available
 - "what should I do next" → `dashboard` + read `memory.md`, propose top action
 - "marketing calendar" / "launch schedule" / "content gaps" → `dashboard({action: "calendar"})`
+- "set a goal" / "target $50k this month" / "what's my goal" → `{"action": "goal-set"}` / `{"action": "goal-get"}`
+- "am I on track" / "pacing" / "will I hit my target" → `dashboard` (goal block is included automatically)
 
 ## Cross-references
 

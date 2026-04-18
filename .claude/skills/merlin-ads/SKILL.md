@@ -16,7 +16,9 @@ owner: ryan
 - **Hook archetypes.** Every creative uses one: curiosity-gap, pattern-interrupt, problem-agitation, POV, social-proof-frontload, skit, before-after, direct-address, voiceover-demo, testimonial-open. Tag in `metadata.json`. QA rejects hooks <6/10 on attention pull.
 - **Don't over-segment.** Brands under $1M/mo: one campaign with broad targeting and 10–15 creatives beats ten campaigns at $50/day each. The creative IS the targeting.
 - **Don't test in ASC.** ASC optimizes delivery, not creative comparison. Always test in standard campaigns.
-- **Budget caps.** Check `maxDailyAdBudget` and `maxMonthlyAdSpend` before ad spend. Stop if exceeded.
+- **Budget caps.** `maxDailyAdBudget` is enforced per-push by `validateDailyBudget`. `maxMonthlyAdSpend` is enforced at scale-time (`meta-budget`, `meta-duplicate` with a positive `dailyBudget`) by `enforceMonthlyCap` — it rejects when `dailyBudget × daysInMonth > cap` unless the caller passes `force=true`. Prorated by actual days in the current month (Feb = 28, Mar = 31).
+- **Landing-page grade gate.** `meta-budget` and `meta-duplicate` run `enforceLandingGrade` before changing spend. If `landing-audit` has cached a score below 80 (grade C or worse) for the destination URL, the call is refused. Unaudited URLs pass silently — the gate only blocks KNOWN-bad pages. Override with `force=true`. Run `landing-audit` first to unblock properly — see `merlin-analytics` for the rubric.
+- **`force=true` override.** Every safety gate (monthly cap, landing grade) accepts `force: true` on the command to bypass. The override is logged as a `warn` activity entry so the decision is auditable. Prefer fixing the underlying issue (lower budget, improve landing page) over forcing.
 
 ## Promotion Gate (stat-test before declaring winners)
 
