@@ -30,53 +30,56 @@ const factBindingEnabled = (() => {
   } catch { /* isolation error — stay off */ }
   return false;
 })();
-let _factCache = null;          // FactCache instance — assigned by initFactBinding
-let _factVerifier = null;       // Lazy-loaded verify-facts module
-let _tailQuarantine = null;     // Per-bubble TailQuarantine
 
-function _loadVerifyFacts() {
-  if (!factBindingEnabled) return null;
-  if (_factVerifier) return _factVerifier;
-  try { _factVerifier = require('./facts/verify-facts'); return _factVerifier; }
-  catch (e) { console.warn('[facts] verify-facts load failed:', e.message); return null; }
-}
+// ── Bridge-based fact binding ─────────────────────────────────
+//
+// REGRESSION GUARD (2026-04-18): the renderer runs with
+// `contextIsolation: true, nodeIntegration: false, sandbox: false`, so
+// there is NO `require`, NO `Buffer`, NO `fs` in this scope. Earlier
+// versions of this file did `require('./facts/facts-cache')` and
+// `require('./facts/verify-facts')` at call time — both threw
+// `ReferenceError: require is not defined`, caught silently by the
+// try/catch, and fact-binding became a no-op for every production
+// user despite the feature flag being ON.
+//
+// The facts modules now live in preload (Node context). This renderer
+// holds opaque integer handles returned by `window.merlinFactBinding.*`
+// calls; every bridge method resolves the handle to the real instance
+// in preload. Do NOT reintroduce `require('./facts/…')` here — it will
+// throw in production. If you need a new capability, add it to
+// `app/preload.js`'s merlinFactBinding surface, not to renderer.js.
+//
+// `app/facts/renderer-bridge-runtime.test.js` locks the invariant with
+// a vm harness that loads renderer.js under strict contextIsolation
+// semantics (no require, no Buffer) and a mocked bridge.
+const _factBridge = (typeof window !== 'undefined' && window.merlinFactBinding) ? window.merlinFactBinding : null;
+let _factCacheHandle = 0;   // preload-side FactCache reference
+let _factWatcherHandle = 0; // preload-side file-watcher reference
+let _tailHandle = 0;        // per-bubble TailQuarantine reference
 
 /**
- * initFactBinding({sessionId, vaultKey, brand, toolsDir}) — wired by the
+ * initFactBinding({ sessionId, vaultKey, brand, toolsDir }) — wired by the
  * preload bridge (`window.merlinFactBinding.onInit(cb)` → this callback).
- * `vaultKey` arrives as a Buffer from preload; contextBridge's structured
- * clone converts Buffer → Uint8Array on the renderer side, so we accept
- * both and normalise to Buffer before handing to FactCache. Legacy hex
- * fallback retained for unit-test harnesses that call initFactBinding
- * directly without going through the bridge.
- * Safe to call even when factBindingEnabled is false (returns null).
+ * The preload bridge owns the FactCache instance and returns a handle.
+ * `vaultKey` arrives as a Uint8Array (contextBridge structured clone of
+ * the Buffer preload built from the hex). The renderer never touches the
+ * raw bytes — it forwards the Uint8Array straight back to preload's
+ * `createCache`, which normalises to Buffer internally.
+ * Safe to call even when factBindingEnabled is false (returns 0).
  */
 function initFactBinding({ sessionId, vaultKey, brand, toolsDir }) {
-  if (!factBindingEnabled) return null;
+  if (!factBindingEnabled || !_factBridge) return 0;
   try {
-    const { FactCache, watchFactsFile, defaultFactsFilePath } = require('./facts/facts-cache');
-    let vk;
-    if (Buffer.isBuffer(vaultKey)) {
-      vk = vaultKey;
-    } else if (vaultKey instanceof Uint8Array) {
-      // Structured-clone path from preload. Copy into a Buffer view so
-      // the HMAC code (expects Buffer with .slice / .equals etc.)
-      // sees a true Buffer regardless of the clone's underlying buffer.
-      vk = Buffer.from(vaultKey.buffer, vaultKey.byteOffset, vaultKey.byteLength);
-    } else {
-      // Direct-call test harness — hex string.
-      vk = Buffer.from(String(vaultKey), 'hex');
+    const h = _factBridge.createCache({ sessionId, vaultKey, brand });
+    if (!h) return 0;
+    _factCacheHandle = h;
+    if (toolsDir && sessionId) {
+      _factWatcherHandle = _factBridge.watchFactsFile({
+        toolsDir, sessionId, pollMs: 120, cacheHandle: h,
+      }) || 0;
     }
-    _factCache = new FactCache({
-      sessionId, vaultKey: vk, brand,
-      onSafeMode: (info) => console.warn('[facts] SAFE MODE', info),
-    });
-    if (toolsDir) {
-      const filePath = defaultFactsFilePath({ toolsDir, sessionId });
-      watchFactsFile(filePath, _factCache, { pollMs: 120 });
-    }
-    return _factCache;
-  } catch (e) { console.error('[facts] init failed:', e); return null; }
+    return h;
+  } catch (e) { console.error('[facts] init failed:', e); return 0; }
 }
 // Subscribe to the preload bridge. When main pushes the session-prelude
 // result over `fact-binding:init`, preload converts the hex → Buffer in
@@ -84,40 +87,52 @@ function initFactBinding({ sessionId, vaultKey, brand, toolsDir }) {
 // When the bridge isn't present (factBinding flag off in preload, or
 // test harness loading renderer.js outside Electron) this is a no-op.
 try {
-  if (typeof window !== 'undefined' && window.merlinFactBinding && typeof window.merlinFactBinding.onInit === 'function') {
-    window.merlinFactBinding.onInit((cfg) => initFactBinding(cfg || {}));
+  if (_factBridge && typeof _factBridge.onInit === 'function') {
+    _factBridge.onInit((cfg) => initFactBinding(cfg || {}));
   }
 } catch { /* preload bridge missing — stay off */ }
 
 function _factStreamStart() {
-  if (!factBindingEnabled) return;
-  const vf = _loadVerifyFacts();
-  if (!vf) return;
-  _tailQuarantine = new vf.TailQuarantine({ absoluteMs: 2000 });
+  if (!factBindingEnabled || !_factBridge) return;
+  try { _tailHandle = _factBridge.createTailQuarantine({ absoluteMs: 2000 }) || 0; }
+  catch (e) { console.warn('[facts] tail-quarantine start failed:', e && e.message); _tailHandle = 0; }
 }
 function _factStreamConsume(delta) {
-  if (!factBindingEnabled || !_tailQuarantine) return delta;
-  return _tailQuarantine.push(delta);
+  if (!factBindingEnabled || !_factBridge || !_tailHandle) return delta;
+  try { return _factBridge.tailPush(_tailHandle, delta); }
+  catch (e) { return delta; }
 }
 function _factStreamFinalize() {
-  if (!factBindingEnabled || !_tailQuarantine) return '';
-  const rest = _tailQuarantine.finalize();
-  _tailQuarantine = null;
+  if (!factBindingEnabled || !_factBridge || !_tailHandle) return '';
+  let rest = '';
+  try { rest = _factBridge.tailFinalize(_tailHandle) || ''; }
+  catch (e) { rest = ''; }
+  _tailHandle = 0;
   return rest;
 }
 function _factApplyPasses(html) {
-  if (!factBindingEnabled || !_factCache) return html;
-  const vf = _loadVerifyFacts();
-  if (!vf) return html;
-  try { return vf.runAllPasses(html, _factCache).html; }
-  catch (e) { console.warn('[facts] passes failed:', e); return html; }
+  if (!factBindingEnabled || !_factBridge || !_factCacheHandle) return html;
+  try {
+    const r = _factBridge.runAllPasses(html, _factCacheHandle);
+    return (r && typeof r.html === 'string') ? r.html : html;
+  } catch (e) { console.warn('[facts] passes failed:', e); return html; }
 }
 function _factMountCharts(rootEl) {
-  if (!factBindingEnabled || !rootEl) return;
+  // Kept for call-site compatibility: _factApplyPasses output now passes
+  // through the bridge's mountCharts string transform before innerHTML
+  // assignment (see the `currentBubble.innerHTML = ...` sites below).
+  // This function is intentionally a no-op; the real work happens in
+  // _factApplyAndMount. Left as a named function so existing call sites
+  // and profiling tools keep their referents.
+  void rootEl;
+}
+function _factApplyAndMount(html) {
+  if (!factBindingEnabled || !_factBridge || !_factCacheHandle) return html;
+  const passed = _factApplyPasses(html);
   try {
-    const { mountCharts } = require('./facts/chart-renderer');
-    mountCharts(rootEl);
-  } catch (e) { console.warn('[facts] chart mount failed:', e); }
+    const mounted = _factBridge.mountCharts(passed);
+    return typeof mounted === 'string' ? mounted : passed;
+  } catch (e) { return passed; }
 }
 
 const messages = document.getElementById('messages');
@@ -663,10 +678,12 @@ function appendText(text) {
         // Strip leading <voice>speak|silent</voice> before render so the
         // UI metadata tag never flashes visibly during streaming.
         const { speak, cleaned, resolved } = stripVoiceTag(textBuffer);
-        // Fact binding pass 1/2/3 applies to the rendered HTML. No-op when
-        // disabled or the cache is absent.
-        currentBubble.innerHTML = _factApplyPasses(renderMarkdown(cleaned));
-        _factMountCharts(currentBubble); // Swaps pass-2 placeholders for SVG
+        // Fact binding pass 1/2/3 + chart mount applies to the rendered
+        // HTML. No-op when disabled or the cache is absent. Combined into
+        // a single bridge round-trip (_factApplyAndMount) so we hit the
+        // preload once per frame instead of twice.
+        currentBubble.innerHTML = _factApplyAndMount(renderMarkdown(cleaned));
+        _factMountCharts(currentBubble); // no-op shim; see helper comment
         lastRenderedLength = textBuffer.length;
         // Streaming TTS: feed complete sentences as they arrive so the
         // wizard starts speaking while Claude is still typing. Guarded on
@@ -721,7 +738,7 @@ function finalizeBubble() {
     const tailRest = _factStreamFinalize();
     if (tailRest) textBuffer += tailRest;
     const { speak, cleaned } = stripVoiceTag(textBuffer);
-    currentBubble.innerHTML = _factApplyPasses(renderMarkdown(cleaned));
+    currentBubble.innerHTML = _factApplyAndMount(renderMarkdown(cleaned));
     _factMountCharts(currentBubble);
     // Assistant bubbles get a replay button + stored raw text so the user
     // can hear any past message even when the global toggle was off.

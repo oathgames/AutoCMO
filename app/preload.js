@@ -448,6 +448,45 @@ contextBridge.exposeInMainWorld('merlin', {
 //       this file — that would reconstitute the hex mid-flight.
 // `app/facts/preload-bridge.test.js` source-scans this file + main.js
 // to lock all three.
+//
+// ── Opaque-handle bridge (renderer has no require / no Node globals) ──
+//
+// The renderer runs with `contextIsolation: true, nodeIntegration: false`.
+// Inside that world there is no `require`, no `Buffer`, no `fs`. Before
+// this refactor, `renderer.js` did `require('./facts/facts-cache')`,
+// `require('./facts/verify-facts')`, and `require('./facts/chart-renderer')`
+// unconditionally — every call threw `ReferenceError: require is not
+// defined`, caught silently by try/catch. Result: fact-binding was a
+// no-op for every production user despite the feature flag being ON.
+//
+// Fix: this preload file (Node context) requires the three facts modules
+// directly, then exposes a curated function surface through contextBridge.
+// Class instances (FactCache, TailQuarantine) can't cross contextBridge
+// cleanly — contextBridge's structured clone strips prototypes — so we
+// keep them on the preload side in integer-keyed handle tables and let
+// the renderer reference them by handle. Every bridge method takes a
+// handle and opaque args; preload resolves the real instance and calls
+// through.
+//
+// Handle allocation uses a monotonic counter (never reused) so a stale
+// handle from a prior turn can't accidentally hit a live instance. Handle
+// tables sit at module scope; they survive page reloads of the renderer
+// only if the preload stays loaded (which Electron does). On teardown
+// (closeCache / stopWatcher / tailFinalize) the entry is deleted and
+// future calls with that handle silently no-op.
+//
+// Error handling: bridge methods swallow exceptions and log via
+// console.warn. A bad call from the renderer must never crash preload.
+const factsCache = require('./facts/facts-cache');
+const verifyFacts = require('./facts/verify-facts');
+const chartRenderer = require('./facts/chart-renderer');
+
+const _cacheHandles = new Map();   // handle -> FactCache instance
+const _watcherHandles = new Map(); // handle -> stop() function
+const _tailHandles = new Map();    // handle -> TailQuarantine instance
+let _handleSeq = 1;
+function _nextHandle() { return _handleSeq++; }
+
 contextBridge.exposeInMainWorld('merlinFactBinding', {
   onInit: (cb) => {
     if (typeof cb !== 'function') throw new Error('merlinFactBinding.onInit cb must be a function');
@@ -475,5 +514,186 @@ contextBridge.exposeInMainWorld('merlinFactBinding', {
     };
     ipcRenderer.on('fact-binding:init', handler);
     return () => ipcRenderer.removeListener('fact-binding:init', handler);
+  },
+
+  /**
+   * createCache({ sessionId, vaultKey, brand, contractHash }) → handle
+   *
+   * `vaultKey` may be either a Buffer (preload-internal) or a Uint8Array
+   * (renderer-originated). We normalise to Buffer here so the renderer
+   * never needs Buffer at all. Returns an integer handle, or 0 on
+   * failure (renderer treats 0 as "no cache, stay off").
+   */
+  createCache: (opts) => {
+    try {
+      if (!opts || typeof opts !== 'object') return 0;
+      const sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : '';
+      const brand = typeof opts.brand === 'string' ? opts.brand : '';
+      const contractHash = typeof opts.contractHash === 'string' ? opts.contractHash : '';
+      if (!sessionId) return 0;
+      let vk;
+      const raw = opts.vaultKey;
+      if (Buffer.isBuffer(raw)) {
+        vk = raw;
+      } else if (raw instanceof Uint8Array) {
+        vk = Buffer.from(raw.buffer, raw.byteOffset, raw.byteLength);
+      } else {
+        return 0;
+      }
+      if (vk.length < 16) return 0;
+      const cache = new factsCache.FactCache({
+        sessionId, vaultKey: vk, brand, contractHash,
+        onSafeMode: (info) => console.warn('[facts] SAFE MODE', info),
+      });
+      const h = _nextHandle();
+      _cacheHandles.set(h, cache);
+      return h;
+    } catch (e) {
+      console.warn('[fact-binding preload] createCache failed:', e && e.message);
+      return 0;
+    }
+  },
+
+  /**
+   * closeCache(handle) — drop the cache instance and release its memory.
+   * Any watcher still referencing the handle is NOT stopped here — call
+   * stopWatcher separately. Returns true on success, false if unknown.
+   */
+  closeCache: (handle) => {
+    if (!Number.isInteger(handle)) return false;
+    const existed = _cacheHandles.delete(handle);
+    return existed;
+  },
+
+  /**
+   * watchFactsFile({ toolsDir, sessionId, pollMs, cacheHandle }) → watcherHandle
+   *
+   * Starts a JSONL tail-reader that feeds the cache identified by
+   * cacheHandle. Returns a watcher handle the renderer can pass to
+   * stopWatcher. Returns 0 on invalid args or unknown cache.
+   */
+  watchFactsFile: (opts) => {
+    try {
+      if (!opts || typeof opts !== 'object') return 0;
+      const toolsDir = typeof opts.toolsDir === 'string' ? opts.toolsDir : '';
+      const sessionId = typeof opts.sessionId === 'string' ? opts.sessionId : '';
+      const pollMs = Number.isInteger(opts.pollMs) && opts.pollMs >= 50 ? opts.pollMs : 120;
+      const cacheHandle = Number.isInteger(opts.cacheHandle) ? opts.cacheHandle : 0;
+      if (!toolsDir || !sessionId || !cacheHandle) return 0;
+      const cache = _cacheHandles.get(cacheHandle);
+      if (!cache) return 0;
+      const filePath = factsCache.defaultFactsFilePath({ toolsDir, sessionId });
+      const stop = factsCache.watchFactsFile(filePath, cache, { pollMs });
+      const h = _nextHandle();
+      _watcherHandles.set(h, stop);
+      return h;
+    } catch (e) {
+      console.warn('[fact-binding preload] watchFactsFile failed:', e && e.message);
+      return 0;
+    }
+  },
+
+  /**
+   * stopWatcher(handle) — stop the JSONL tail-reader. Returns true on
+   * success, false if unknown.
+   */
+  stopWatcher: (handle) => {
+    if (!Number.isInteger(handle)) return false;
+    const stop = _watcherHandles.get(handle);
+    if (!stop) return false;
+    try { stop(); } catch { /* swallow */ }
+    _watcherHandles.delete(handle);
+    return true;
+  },
+
+  /**
+   * runAllPasses(html, cacheHandle) → { html, unresolvedTokens, quarantinedLiterals }
+   *
+   * Wraps verify-facts.runAllPasses. Returns the input html unchanged on
+   * invalid args / unknown cache (safe default — lets streaming keep
+   * working even if fact binding is partly broken).
+   */
+  runAllPasses: (html, cacheHandle) => {
+    if (typeof html !== 'string') return { html: String(html || ''), unresolvedTokens: 0, quarantinedLiterals: 0 };
+    if (!Number.isInteger(cacheHandle)) return { html, unresolvedTokens: 0, quarantinedLiterals: 0 };
+    const cache = _cacheHandles.get(cacheHandle);
+    if (!cache) return { html, unresolvedTokens: 0, quarantinedLiterals: 0 };
+    try {
+      const r = verifyFacts.runAllPasses(html, cache);
+      return {
+        html: r.html,
+        unresolvedTokens: r.unresolvedTokens | 0,
+        quarantinedLiterals: r.quarantinedLiterals | 0,
+      };
+    } catch (e) {
+      console.warn('[fact-binding preload] runAllPasses failed:', e && e.message);
+      return { html, unresolvedTokens: 0, quarantinedLiterals: 0 };
+    }
+  },
+
+  /**
+   * mountCharts(html) → html
+   *
+   * String-based SVG chart mount (see chart-renderer.mountChartsInHtml).
+   * Safe to call on any HTML string — returns unchanged if no placeholders
+   * are present.
+   */
+  mountCharts: (html) => {
+    if (typeof html !== 'string') return String(html || '');
+    try { return chartRenderer.mountChartsInHtml(html); }
+    catch (e) {
+      console.warn('[fact-binding preload] mountCharts failed:', e && e.message);
+      return html;
+    }
+  },
+
+  /**
+   * createTailQuarantine({ absoluteMs }) → handle
+   *
+   * Allocates a TailQuarantine instance. Pair with tailPush / tailFinalize.
+   * Returns 0 on failure.
+   */
+  createTailQuarantine: (opts) => {
+    try {
+      const absoluteMs = opts && Number.isInteger(opts.absoluteMs) && opts.absoluteMs > 0
+        ? opts.absoluteMs
+        : 2000;
+      const tq = new verifyFacts.TailQuarantine({ absoluteMs });
+      const h = _nextHandle();
+      _tailHandles.set(h, tq);
+      return h;
+    } catch (e) {
+      console.warn('[fact-binding preload] createTailQuarantine failed:', e && e.message);
+      return 0;
+    }
+  },
+
+  /** tailPush(handle, delta) → safe-to-render prefix. "" on unknown handle. */
+  tailPush: (handle, delta) => {
+    if (!Number.isInteger(handle)) return '';
+    const tq = _tailHandles.get(handle);
+    if (!tq) return '';
+    try { return tq.push(typeof delta === 'string' ? delta : String(delta || '')); }
+    catch (e) {
+      console.warn('[fact-binding preload] tailPush failed:', e && e.message);
+      return '';
+    }
+  },
+
+  /**
+   * tailFinalize(handle) → remaining tail. Also drops the handle so the
+   * TailQuarantine can be garbage collected. Subsequent calls return "".
+   */
+  tailFinalize: (handle) => {
+    if (!Number.isInteger(handle)) return '';
+    const tq = _tailHandles.get(handle);
+    if (!tq) return '';
+    let out = '';
+    try { out = tq.finalize(); }
+    catch (e) {
+      console.warn('[fact-binding preload] tailFinalize failed:', e && e.message);
+    }
+    _tailHandles.delete(handle);
+    return out;
   },
 });

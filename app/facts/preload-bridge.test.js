@@ -117,20 +117,90 @@ test('preload.js force-on flag is set pre-renderer via exposeInMainWorld', () =>
     'preload.js gate must check both version.json and MERLIN_FACT_BINDING env');
 });
 
-test('renderer.js accepts Uint8Array vaultKey (contextBridge structured-clone shape)', () => {
-  const src = stripComments(read(RENDERER_JS));
-  // After contextBridge clones a Buffer it arrives as Uint8Array in
-  // the renderer isolated world. Buffer.isBuffer returns false on a
-  // plain Uint8Array, so the renderer must handle both.
-  assert.ok(/vaultKey\s+instanceof\s+Uint8Array/.test(src),
-    'renderer.js initFactBinding must handle Uint8Array vaultKey (Buffer arrives as Uint8Array post-structured-clone)');
+test('preload.js accepts Uint8Array vaultKey (contextBridge structured-clone shape)', () => {
+  const src = stripComments(read(PRELOAD_JS));
+  // Before the opaque-handle bridge refactor, the renderer received the
+  // raw Uint8Array and normalised it to Buffer locally. Now the renderer
+  // only holds an integer handle, and preload does the Uint8Array → Buffer
+  // conversion inside `createCache`. The invariant the old test locked
+  // (Uint8Array must be a recognised shape) still matters — it just moves
+  // from renderer.js to preload.js. Uint8Array arrives when the renderer
+  // forwards a typed array through contextBridge's structured clone.
+  assert.ok(/vaultKey[\s\S]{0,120}instanceof\s+Uint8Array/.test(src),
+    'preload.js createCache must handle Uint8Array vaultKey (renderer-forwarded structured-clone shape). ' +
+    'Renderer is no longer responsible for the conversion — preload owns it.');
 });
 
 test('renderer.js subscribes via window.merlinFactBinding.onInit', () => {
   const src = stripComments(read(RENDERER_JS));
-  assert.ok(/window\.merlinFactBinding\.onInit/.test(src),
-    'renderer.js must consume the preload bridge via window.merlinFactBinding.onInit');
+  // The renderer may hold the bridge reference in a local (e.g.
+  // `_factBridge`) after reading it from window.merlinFactBinding at
+  // module init — accept either direct property access or a local
+  // alias whose binding reads window.merlinFactBinding.
+  const direct = /window\.merlinFactBinding\.onInit/.test(src);
+  const aliased = /window\.merlinFactBinding/.test(src) && /\.onInit\s*\(/.test(src);
+  assert.ok(direct || aliased,
+    'renderer.js must consume the preload bridge via window.merlinFactBinding.onInit (direct or via a local alias)');
   // And the legacy global must be gone.
   assert.ok(!/window\.__merlinInitFactBinding\s*=/.test(src),
     'renderer.js must NOT assign initFactBinding to window.__merlinInitFactBinding — the old global was how main.js reached into renderer via executeJavaScript');
+});
+
+// ── Opaque-handle bridge surface (new in v1.12.1) ───────────────────
+//
+// The renderer runs with contextIsolation + nodeIntegration:false, so
+// there is no `require`, no `Buffer`, no `fs` inside the renderer JS
+// world. Earlier builds did `require('./facts/...')` in renderer.js and
+// threw ReferenceError in production — silently swallowed by try/catch.
+// Facts modules now live in preload; the renderer calls an opaque-handle
+// bridge. These scans lock the surface shape so a refactor can't silently
+// fall back to the broken `require`-in-renderer pattern.
+
+test('preload.js exposes createCache / watchFactsFile / runAllPasses / mountCharts / tail quarantine surface', () => {
+  const src = stripComments(read(PRELOAD_JS));
+  for (const method of [
+    'createCache', 'closeCache',
+    'watchFactsFile', 'stopWatcher',
+    'runAllPasses', 'mountCharts',
+    'createTailQuarantine', 'tailPush', 'tailFinalize',
+  ]) {
+    const re = new RegExp('\\b' + method + '\\s*:\\s*(\\(|function)');
+    assert.ok(re.test(src),
+      `preload.js merlinFactBinding must expose ${method} (opaque-handle bridge method)`);
+  }
+});
+
+test('preload.js requires facts modules in Node context (not renderer)', () => {
+  const src = stripComments(read(PRELOAD_JS));
+  assert.ok(/require\(\s*['"]\.\/facts\/facts-cache['"]\s*\)/.test(src),
+    'preload.js must require facts-cache — facts modules belong in preload Node context, not renderer');
+  assert.ok(/require\(\s*['"]\.\/facts\/verify-facts['"]\s*\)/.test(src),
+    'preload.js must require verify-facts');
+  assert.ok(/require\(\s*['"]\.\/facts\/chart-renderer['"]\s*\)/.test(src),
+    'preload.js must require chart-renderer');
+});
+
+test('renderer.js does NOT require facts modules (no Node globals in isolated world)', () => {
+  const src = stripComments(read(RENDERER_JS));
+  for (const modPath of ['./facts/facts-cache', './facts/verify-facts', './facts/chart-renderer']) {
+    const re = new RegExp("require\\(\\s*['\"]" + modPath.replace(/[.\/]/g, '\\$&') + "['\"]\\s*\\)");
+    assert.ok(!re.test(src),
+      `renderer.js contains require('${modPath}') — this throws ReferenceError in production (contextIsolation + nodeIntegration:false). Route through preload's merlinFactBinding bridge.`);
+  }
+});
+
+test('renderer.js does NOT touch Buffer (undefined in isolated world)', () => {
+  const src = stripComments(read(RENDERER_JS));
+  assert.ok(!/Buffer\.isBuffer/.test(src),
+    'renderer.js must not reference Buffer.isBuffer — Buffer is undefined in the isolated world; conversion happens in preload');
+  assert.ok(!/Buffer\.from/.test(src),
+    'renderer.js must not reference Buffer.from — Buffer is undefined in the isolated world; conversion happens in preload');
+});
+
+test('renderer.js never instantiates FactCache / TailQuarantine directly', () => {
+  const src = stripComments(read(RENDERER_JS));
+  assert.ok(!/new\s+FactCache\s*\(/.test(src),
+    'renderer.js must NOT instantiate FactCache — those classes live in preload, renderer holds an opaque integer handle');
+  assert.ok(!/new\s+TailQuarantine\s*\(/.test(src),
+    'renderer.js must NOT instantiate TailQuarantine — classes live in preload');
 });
