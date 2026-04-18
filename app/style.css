@@ -19,20 +19,20 @@
   /* Surface effects (hovers, dividers, scrollbar thumbs). Dark mode uses
      white-alpha; [data-theme="light"] flips each to black-alpha so the
      same `.foo:hover` rule works in both modes. */
-  --hover-1:var(--hover-1);
-  --hover-2:var(--hover-2);
-  --hover-3:var(--hover-3);
-  --hover-4:var(--hover-4);
-  --hover-5:var(--hover-5);
-  --hover-6:var(--hover-6);
-  --hover-8:var(--hover-8);
-  --hover-10:var(--hover-10);
-  --hover-20:var(--hover-20);
-  --hover-25:var(--hover-25);
-  --shadow-sm:var(--shadow-sm);
-  --shadow-md:var(--shadow-md);
-  --shadow-lg:var(--shadow-lg);
-  --scrim:var(--scrim);
+  --hover-1:rgba(255,255,255,.015);
+  --hover-2:rgba(255,255,255,.02);
+  --hover-3:rgba(255,255,255,.03);
+  --hover-4:rgba(255,255,255,.04);
+  --hover-5:rgba(255,255,255,.05);
+  --hover-6:rgba(255,255,255,.06);
+  --hover-8:rgba(255,255,255,.08);
+  --hover-10:rgba(255,255,255,.1);
+  --hover-20:rgba(255,255,255,.2);
+  --hover-25:rgba(255,255,255,.25);
+  --shadow-sm:rgba(0,0,0,.3);
+  --shadow-md:rgba(0,0,0,.4);
+  --shadow-lg:rgba(0,0,0,.5);
+  --scrim:rgba(0,0,0,.85);
   --tooltip-bg:#1e1e22;
   --font:'Inter',system-ui,-apple-system,sans-serif;
   --radius:16px;
