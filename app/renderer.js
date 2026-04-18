@@ -1765,19 +1765,180 @@ function platformDisplayName(platform) {
   return platform.charAt(0).toUpperCase() + platform.slice(1);
 }
 
-// ── Brand + Integration Filtering ────────────────────────────
-// Vertical → integrations whitelist. Every platform shipped on a tile
-// MUST appear in at least one vertical if it's generally useful — otherwise
-// selecting a known vertical hides it entirely. Previously reddit/etsy/arcads/
-// linkedin/snapchat/twitter were missing from every list, so any ecom/agency
-// brand couldn't see Reddit or Etsy even though they're fully connected.
-const verticalIntegrations = {
-  ecom:    ['meta','tiktok','shopify','stripe','klaviyo','google','pinterest','amazon','reddit','etsy','snapchat','twitter','linkedin','fal','elevenlabs','heygen','arcads','slack','discord'],
-  game:    ['meta','tiktok','google','stripe','reddit','snapchat','twitter','fal','heygen','elevenlabs','arcads','slack','discord'],
-  saas:    ['meta','google','stripe','klaviyo','linkedin','reddit','twitter','fal','elevenlabs','heygen','arcads','slack','discord'],
-  local:   ['meta','google','stripe','reddit','fal','slack','discord'],
-  agency:  ['meta','tiktok','shopify','stripe','klaviyo','google','pinterest','amazon','reddit','etsy','linkedin','snapchat','twitter','fal','elevenlabs','heygen','arcads','slack','discord'],
+// ── Vertical Profiles (mirrors autocmo-core/vertical.go) ────────
+// Canonical business-category registry. The Go binary's vertical.go is the
+// single source of truth — every field/key here must match it exactly so
+// the setup flow, dashboard defaults, and renderer stay in sync. When you
+// add or rename a vertical: edit vertical.go first, then mirror the change
+// here. Keep this in JS (rather than IPC'ing into the binary on every
+// render) because context menus, tile filters, and offering-noun lookups
+// all fire on user events — a 100-500ms binary roundtrip per event would
+// be visibly sluggish.
+//
+// The visual-creative tools (fal/elevenlabs/heygen/arcads) and social
+// plumbing (slack/discord) are applicable to every vertical that runs
+// ads, so we append them from BASE_CREATIVE_TOOLS instead of re-listing
+// in each row. Previously these were missing from SaaS / local and
+// caused otherwise-connected tiles to hide.
+const BASE_CREATIVE_TOOLS = ['fal','elevenlabs','heygen','arcads','slack','discord'];
+const VERTICAL_PROFILES = {
+  ecommerce: {
+    key: 'ecommerce',
+    label: 'eCommerce',
+    offeringNoun: 'product',
+    offeringNounPlural: 'products',
+    audienceNoun: 'customers',
+    primaryKPI: 'revenue',
+    defaultRevenueConnector: 'shopify',
+    hasShoppableCatalog: true,
+    integrations: ['meta','tiktok','shopify','stripe','klaviyo','google','pinterest','amazon','reddit','etsy','snapchat','twitter','linkedin', ...BASE_CREATIVE_TOOLS],
+  },
+  saas: {
+    key: 'saas',
+    label: 'SaaS',
+    offeringNoun: 'plan',
+    offeringNounPlural: 'plans',
+    audienceNoun: 'users',
+    primaryKPI: 'MRR',
+    defaultRevenueConnector: 'stripe',
+    hasShoppableCatalog: false,
+    integrations: ['meta','google','linkedin','stripe','klaviyo','reddit','twitter', ...BASE_CREATIVE_TOOLS],
+  },
+  games: {
+    key: 'games',
+    label: 'Games',
+    offeringNoun: 'title',
+    offeringNounPlural: 'titles',
+    audienceNoun: 'players',
+    primaryKPI: 'installs',
+    defaultRevenueConnector: 'stripe',
+    hasShoppableCatalog: false,
+    integrations: ['meta','tiktok','google','stripe','reddit','snapchat','twitter', ...BASE_CREATIVE_TOOLS],
+  },
+  creator: {
+    key: 'creator',
+    label: 'Creator',
+    offeringNoun: 'course',
+    offeringNounPlural: 'courses',
+    audienceNoun: 'students',
+    primaryKPI: 'enrollments',
+    defaultRevenueConnector: 'stripe',
+    hasShoppableCatalog: false,
+    integrations: ['meta','tiktok','google','twitter','reddit','klaviyo','stripe', ...BASE_CREATIVE_TOOLS],
+  },
+  local: {
+    key: 'local',
+    label: 'Local Services',
+    offeringNoun: 'service',
+    offeringNounPlural: 'services',
+    audienceNoun: 'clients',
+    primaryKPI: 'leads',
+    defaultRevenueConnector: '',
+    hasShoppableCatalog: false,
+    integrations: ['meta','google','reddit', ...BASE_CREATIVE_TOOLS],
+  },
+  agency: {
+    key: 'agency',
+    label: 'Agency',
+    offeringNoun: 'engagement',
+    offeringNounPlural: 'engagements',
+    audienceNoun: 'clients',
+    primaryKPI: 'qualified leads',
+    defaultRevenueConnector: 'stripe',
+    hasShoppableCatalog: false,
+    integrations: ['linkedin','meta','google','twitter','reddit','stripe','klaviyo', ...BASE_CREATIVE_TOOLS],
+  },
+  b2b: {
+    key: 'b2b',
+    label: 'B2B',
+    offeringNoun: 'solution',
+    offeringNounPlural: 'solutions',
+    audienceNoun: 'accounts',
+    primaryKPI: 'pipeline',
+    defaultRevenueConnector: 'stripe',
+    hasShoppableCatalog: false,
+    integrations: ['linkedin','google','meta','twitter','reddit','stripe', ...BASE_CREATIVE_TOOLS],
+  },
 };
+
+// Fallback profile for brands with an unrecognized or empty vertical.
+// Never special-cases as ecommerce — if we don't know, we don't assume
+// the user has products to push, which would surface Shopify/Etsy
+// tiles to a SaaS owner.
+const UNKNOWN_VERTICAL_PROFILE = {
+  key: '',
+  label: 'Unspecified',
+  offeringNoun: 'offering',
+  offeringNounPlural: 'offerings',
+  audienceNoun: 'customers',
+  primaryKPI: 'revenue',
+  defaultRevenueConnector: '',
+  hasShoppableCatalog: false,
+  // When vertical is unknown we show every tile — better to reveal than
+  // hide, because a mis-detected vertical shouldn't amputate the UI.
+  integrations: null,
+};
+
+// Alias table — free-form user input → canonical key. Matches the
+// NormalizeVertical function in autocmo-core/vertical.go. Keep the
+// two in sync when adding verticals. "ecom" is the most common legacy
+// alias in existing brand.md files; map it to the canonical "ecommerce".
+const VERTICAL_ALIASES = {
+  'ecom': 'ecommerce',
+  'e-com': 'ecommerce',
+  'e-commerce': 'ecommerce',
+  'dtc': 'ecommerce',
+  'd2c': 'ecommerce',
+  'shopify': 'ecommerce',
+  'retail': 'ecommerce',
+  'apparel': 'ecommerce',
+  'fashion': 'ecommerce',
+  'skincare': 'ecommerce',
+  'beauty': 'ecommerce',
+  'cpg': 'ecommerce',
+  'software': 'saas',
+  'platform': 'saas',
+  'game': 'games',
+  'gaming': 'games',
+  'info-product': 'creator',
+  'course': 'creator',
+  'coach': 'creator',
+  'coaching': 'creator',
+  'newsletter': 'creator',
+  'services': 'local',
+  'service': 'local',
+  'consultancy': 'agency',
+  'consultant': 'agency',
+  'enterprise': 'b2b',
+  'b-to-b': 'b2b',
+};
+
+function normalizeVertical(raw) {
+  if (!raw) return '';
+  const lower = String(raw).trim().toLowerCase();
+  if (!lower) return '';
+  if (VERTICAL_PROFILES[lower]) return lower;
+  if (VERTICAL_ALIASES[lower]) return VERTICAL_ALIASES[lower];
+  // Substring match for compound inputs ("game studio", "marketing agency").
+  if (/\bb2b\b|business-to-business|enterprise/.test(lower)) return 'b2b';
+  if (/\bgame/.test(lower)) return 'games';
+  if (/agency|consultancy|studio/.test(lower)) return 'agency';
+  if (/ecom|shopify|apparel|skincare|cpg|online store|retail/.test(lower)) return 'ecommerce';
+  if (/saas|software|platform/.test(lower)) return 'saas';
+  if (/creator|course|coach|newsletter|info.?product/.test(lower)) return 'creator';
+  if (/local|service|plumber|dentist|clinic|hvac/.test(lower)) return 'local';
+  return '';
+}
+
+function getVerticalProfile(raw) {
+  const key = normalizeVertical(raw);
+  return VERTICAL_PROFILES[key] || UNKNOWN_VERTICAL_PROFILE;
+}
+
+// currentVerticalProfile — module-level cache, refreshed on brand change.
+// Kept in sync by updateVertical(). Consumers (kill dialog, tile filter,
+// prompt bubbles) read from here instead of re-normalizing every time.
+let currentVerticalProfile = UNKNOWN_VERTICAL_PROFILE;
 
 async function loadBrands() {
   try {
@@ -1819,20 +1980,39 @@ async function loadBrands() {
 function updateVertical(vertical) {
   const tag = document.getElementById('vertical-tag');
   const tiles = document.querySelectorAll('.magic-tile');
-  if (vertical) {
-    tag.textContent = vertical;
-    const allowed = verticalIntegrations[vertical.toLowerCase()] || null;
-    if (allowed) {
-      tiles.forEach(tile => {
-        tile.style.display = allowed.includes(tile.dataset.platform) ? '' : 'none';
-      });
+  const profile = getVerticalProfile(vertical);
+  currentVerticalProfile = profile;
+
+  if (tag) {
+    // Read-only status pill: confirms what Merlin inferred at onboarding so
+    // the user knows the tailoring is in effect. No click affordance — the
+    // vertical follows the active brand. To re-classify, edit brand.md or
+    // re-run /merlin setup for that brand.
+    if (profile.key) {
+      tag.textContent = profile.label;
+      tag.title = `Category: ${profile.label} (set during setup)`;
+      tag.style.display = '';
+    } else if (vertical) {
+      tag.textContent = vertical;
+      tag.title = 'Category: unrecognized — re-run /merlin to re-classify';
+      tag.style.display = '';
     } else {
-      // Unknown vertical — reset filter so tiles from a prior known-vertical
-      // selection don't stay hidden when the user switches brands.
-      tiles.forEach(t => { t.style.display = ''; });
+      // Hide the chip entirely until onboarding writes a vertical.
+      tag.textContent = '';
+      tag.title = '';
+      tag.style.display = 'none';
     }
+    tag.style.cursor = 'default';
+  }
+
+  // Tile filter: only hide tiles when we recognize the vertical. Unknown
+  // vertical → show everything (user hasn't picked yet, don't amputate
+  // the UI based on a guess).
+  if (profile.integrations) {
+    tiles.forEach(tile => {
+      tile.style.display = profile.integrations.includes(tile.dataset.platform) ? '' : 'none';
+    });
   } else {
-    tag.textContent = '';
     tiles.forEach(t => { t.style.display = ''; });
   }
 }
@@ -6225,7 +6405,12 @@ async function loadArchive() {
             menu.remove();
             document.querySelectorAll('.context-submenu').forEach(s => s.remove());
             document.getElementById('archive-panel').classList.add('hidden');
-            addUserBubble(`Pause ${ad.product || 'ad'} on ${ad.platform}`);
+            // Vertical-aware fallback: when the ad has no resolvable "product"
+            // (typical for SaaS/games/creator/services) use the vertical's
+            // offeringNoun (plan/title/course/service) so the user bubble
+            // and LLM prompt read naturally instead of saying "ad" twice.
+            const label = ad.product || currentVerticalProfile.offeringNoun || 'ad';
+            addUserBubble(`Pause ${label} on ${ad.platform}`);
             showTypingIndicator();
             turnStartTime = Date.now();
             turnTokens = 0;
@@ -6234,7 +6419,7 @@ async function loadArchive() {
             const killHint = killAction
               ? `Use ${killAction} with adId "${ad.adId}".`
               : `Use the appropriate pause action for ${ad.platform} with adId "${ad.adId}".`;
-            merlin.sendMessage(`Pause the ad "${ad.product || 'ad'}" on ${ad.platform} (Ad ID: ${ad.adId}). ${killHint}`);
+            merlin.sendMessage(`Pause the ad "${label}" on ${ad.platform} (Ad ID: ${ad.adId}). ${killHint}`);
           });
           menu.appendChild(pauseItem);
         }
@@ -6247,13 +6432,14 @@ async function loadArchive() {
             menu.remove();
             document.querySelectorAll('.context-submenu').forEach(s => s.remove());
             document.getElementById('archive-panel').classList.add('hidden');
-            addUserBubble(`Resume ${ad.product || 'ad'} on ${ad.platform}`);
+            const label = ad.product || currentVerticalProfile.offeringNoun || 'ad';
+            addUserBubble(`Resume ${label} on ${ad.platform}`);
             showTypingIndicator();
             turnStartTime = Date.now();
             turnTokens = 0;
             sessionActive = true;
             startTickingTimer();
-            merlin.sendMessage(`Resume the paused ad "${ad.product || 'ad'}" on ${ad.platform} (Ad ID: ${ad.adId}). Re-enable it at the same budget using the appropriate resume/update action for ${ad.platform}.`);
+            merlin.sendMessage(`Resume the paused ad "${label}" on ${ad.platform} (Ad ID: ${ad.adId}). Re-enable it at the same budget using the appropriate resume/update action for ${ad.platform}.`);
           });
           menu.appendChild(resumeItem);
         }

@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<!-- Preview harness: CSP stripped so stub runs. Not shipped. -->
+<title>Merlin</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+
+<!-- Custom titlebar -->
+<div id="titlebar">
+  <div class="titlebar-drag">
+    <span class="titlebar-title">✦ Merlin</span>
+    <span id="version-label" class="version-label" style="margin-left:6px" data-tip="" data-tip-pos="bottom"></span>
+  </div>
+  <div class="titlebar-controls">
+    <button id="agency-report-btn" class="magic-btn-inline" aria-label="Reports" data-tip="Reports" data-tip-pos="bottom"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 00-2 2v16a2 2 0 002 2h12a2 2 0 002-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg></button>
+    <button id="wisdom-header-btn" class="magic-btn-inline" aria-label="Wisdom" data-tip="Wisdom" data-tip-pos="bottom"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 3h6a4 4 0 014 4v14a3 3 0 00-3-3H2z"/><path d="M22 3h-6a4 4 0 00-4 4v14a3 3 0 013-3h7z"/></svg></button>
+    <button id="archive-btn" class="magic-btn-inline" aria-label="Archive" data-tip="Archive" data-tip-pos="bottom"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg></button>
+    <button id="magic-btn" class="magic-btn-inline" aria-label="Magic" data-tip="Magic" data-tip-pos="bottom">✦</button>
+    <button id="btn-min" class="win-ctrl" aria-label="Minimize">&#x2013;</button>
+    <button id="btn-max" class="win-ctrl" aria-label="Maximize">&#x25A1;</button>
+    <button id="btn-close" class="win-ctrl win-ctrl-close" aria-label="Close">&#x2715;</button>
+  </div>
+</div>
+
+<!-- Performance Status Bar -->
+<div id="perf-bar" class="perf-bar">
+  <div class="perf-bar-content" id="perf-bar-content">
+    <select id="brand-select" class="brand-select-perf">
+      <option value="">No brand</option>
+    </select>
+    <span id="perf-text" class="perf-text">Loading...</span>
+    <div class="perf-period-group">
+      <button class="perf-period-btn" data-days="1">1D</button>
+      <button class="perf-period-btn active" data-days="7">7D</button>
+      <button class="perf-period-btn" data-days="30">1M</button>
+      <button class="perf-period-btn" data-days="90">3M</button>
+      <button class="perf-period-btn" data-days="365">12M</button>
+    </div>
+  </div>
+</div>
+
+<!-- Onboarding Progress Bar (persistent, dismissible) -->
+<div id="progress-bar" class="progress-bar hidden">
+  <div class="progress-track">
+    <div id="progress-fill" class="progress-fill" style="width:0%"></div>
+  </div>
+  <div id="progress-steps" class="progress-steps">
+    <span class="progress-step" data-step="brand">Brand created</span>
+    <span class="progress-step" data-step="products">Products added</span>
+    <span class="progress-step" data-step="sales">Sales platform connected</span>
+    <span class="progress-step" data-step="platform">Ad platform connected</span>
+    <span class="progress-step" data-step="automation">Automation active</span>
+    <button id="progress-close" class="progress-close">Close</button>
+  </div>
+  <div id="progress-next" class="progress-next"></div>
+</div>
+
+<!-- Chat -->
+<div id="chat">
+  <div id="messages"></div>
+  <div id="chat-status" class="chat-status"></div>
+  <div id="scroll-anchor"></div>
+</div>
+
+<!-- Merlin's Magic Panel -->
+<div id="magic-panel" class="magic-panel hidden">
+  <div class="magic-header">
+    <span class="magic-title">✦ Magic</span>
+    <div class="magic-header-right">
+      <button id="subscribe-btn" class="subscribe-header-btn"><span id="trial-text">7D Left</span> &nbsp; <span class="subscribe-cta">Get Pro</span></button>
+      <button id="magic-close" class="magic-close" aria-label="Close Magic panel">&times;</button>
+    </div>
+  </div>
+
+  <div class="magic-panel-scroll">
+  <!-- Spellbook (Scheduled Tasks) -->
+  <div class="magic-section">
+    <div class="magic-section-label">Spellbook <span style="font-weight:400;text-transform:none;letter-spacing:0;opacity:.5">(Automated Tasks)</span></div>
+    <div id="spellbook-warning" class="spellbook-warning" style="display:none">Claude Desktop is closed — spells are paused</div>
+    <div id="spellbook-list" class="spellbook-list"></div>
+    <div id="spellbook-empty" class="spellbook-empty" style="display:none"></div>
+  </div>
+
+  <!-- Universal integrations — one key covers every brand in the workspace.
+       Green accent = connected, gray = available but not connected, dark
+       gray (via .unavailable) = implementation not shipped yet. Tiles are
+       hidden on startup and slotted into their group by loadConnections()
+       so the template stays simple. -->
+  <div class="magic-section">
+    <div class="magic-section-label-row">
+      <span class="magic-section-label" style="margin-bottom:0">Universal</span>
+    </div>
+    <div id="universal-tiles" class="magic-tiles">
+      <button class="magic-tile" data-platform="fal" data-scope="universal" data-tip="Image generation" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="10" fill="#7C3AED"/><path fill="#fff" d="M8 16l4-10 4 10M9.5 13h5" stroke="#fff" stroke-width="1.5" fill="none" stroke-linecap="round"/></svg></div><div class="tile-name">fal.ai</div></button>
+      <button class="magic-tile" data-platform="elevenlabs" data-scope="universal" data-tip="Voice cloning" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#1a1a2e"/><rect x="8" y="5" width="3" height="14" rx="1.5" fill="#fff"/><rect x="13" y="5" width="3" height="14" rx="1.5" fill="#fff"/></svg></div><div class="tile-name">ElevenLabs</div></button>
+      <button class="magic-tile" data-platform="heygen" data-scope="universal" data-tip="Video avatars" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#5046e5"/><path fill="#fff" d="M8 7v10l9-5z"/></svg></div><div class="tile-name">HeyGen</div></button>
+      <button class="magic-tile" data-platform="arcads" data-scope="universal" data-tip="UGC ad generation" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#FF6B35"/><path fill="#fff" d="M12 4l7 4v8l-7 4-7-4V8z" stroke="#fff" stroke-width="1" fill="none"/><circle cx="12" cy="12" r="3" fill="#fff"/></svg></div><div class="tile-name">Arcads</div></button>
+      <button class="magic-tile" data-platform="slack" data-scope="universal" data-tip="Connect Slack" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#E01E5A" d="M5.04 15.18a2.5 2.5 0 01-2.52 2.5 2.5 2.5 0 01-2.52-2.5 2.5 2.5 0 012.52-2.5h2.52v2.5zm1.26 0a2.5 2.5 0 012.52-2.5 2.5 2.5 0 012.52 2.5v6.3a2.5 2.5 0 01-2.52 2.52 2.5 2.5 0 01-2.52-2.52v-6.3z"/><path fill="#36C5F0" d="M8.82 5.04a2.5 2.5 0 01-2.5-2.52A2.5 2.5 0 018.82 0a2.5 2.5 0 012.5 2.52v2.52H8.82zm0 1.28a2.5 2.5 0 012.5 2.52 2.5 2.5 0 01-2.5 2.52H2.52A2.5 2.5 0 010 8.84a2.5 2.5 0 012.52-2.52h6.3z"/><path fill="#2EB67D" d="M18.96 8.84a2.5 2.5 0 012.52-2.52A2.5 2.5 0 0124 8.84a2.5 2.5 0 01-2.52 2.52h-2.52V8.84zm-1.26 0a2.5 2.5 0 01-2.52 2.52 2.5 2.5 0 01-2.52-2.52v-6.3A2.5 2.5 0 0115.18 0a2.5 2.5 0 012.52 2.52v6.32z"/><path fill="#ECB22E" d="M15.18 18.96a2.5 2.5 0 012.52 2.52A2.5 2.5 0 0115.18 24a2.5 2.5 0 01-2.52-2.52v-2.52h2.52zm0-1.26a2.5 2.5 0 01-2.52-2.52 2.5 2.5 0 012.52-2.52h6.3A2.5 2.5 0 0124 15.18a2.5 2.5 0 01-2.52 2.52h-6.3z"/></svg></div><div class="tile-name">Slack</div></button>
+      <button class="magic-tile" data-platform="discord" data-scope="universal" data-tip="Connect Discord" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#5865F2" d="M20.317 4.369a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.331c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.332-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.332-.946 2.418-2.157 2.418z"/></svg></div><div class="tile-name">Discord</div></button>
+    </div>
+  </div>
+
+  <!-- Brand-specific integrations — one credential set per brand. Switching
+       brands rerenders the group so the green dots follow the active brand's
+       connection state. Tiles marked `data-stubbed="true"` are shown in dark
+       gray with a "Coming soon" tooltip. -->
+  <div class="magic-section">
+    <div class="magic-section-label-row">
+      <span class="magic-section-label" style="margin-bottom:0">Brand Specific</span>
+      <span id="vertical-tag" class="vertical-tag"></span>
+    </div>
+    <div id="brand-tiles" class="magic-tiles">
+      <button class="magic-tile" data-platform="meta" data-scope="brand" data-tip="Connect Meta Ads" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#1877F2" d="M24 12.07C24 5.41 18.63 0 12 0S0 5.41 0 12.07c0 6.02 4.39 11.02 10.13 11.93v-8.44H7.08v-3.49h3.04V9.41c0-3.02 1.79-4.69 4.53-4.69 1.31 0 2.69.24 2.69.24v2.97h-1.51c-1.49 0-1.96.93-1.96 1.89v2.26h3.33l-.53 3.49h-2.8v8.44C19.61 23.09 24 18.09 24 12.07z"/></svg></div><div class="tile-name">Meta Ads</div></button>
+      <button class="magic-tile" data-platform="tiktok" data-scope="brand" data-tip="Connect TikTok Ads" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#ff0050" d="M19.59 6.69a4.83 4.83 0 01-3.77-4.25V2h-3.45v13.67a2.89 2.89 0 01-2.88 2.5 2.89 2.89 0 01-2.89-2.89 2.89 2.89 0 012.89-2.89c.28 0 .54.04.79.1V9.01a6.27 6.27 0 00-.79-.05 6.34 6.34 0 00-6.34 6.34 6.34 6.34 0 006.34 6.34 6.34 6.34 0 006.34-6.34V8.75a8.18 8.18 0 004.76 1.52V6.84a4.85 4.85 0 01-1-.15z"/></svg></div><div class="tile-name">TikTok</div></button>
+      <button class="magic-tile" data-platform="google" data-scope="brand" data-tip="Connect Google Ads" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92a5.06 5.06 0 01-2.2 3.32v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.1z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18A10.02 10.02 0 001 12c0 1.61.39 3.14 1.07 4.5l3.66-2.84.11-.57z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg></div><div class="tile-name">Google</div></button>
+      <button class="magic-tile" data-platform="amazon" data-scope="brand" data-tip="Connect Amazon" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#FF9900"/><path fill="#232F3E" d="M6.5 14.5c3 2.5 7.5 2.5 10.5 0" stroke="#232F3E" stroke-width="1.5" fill="none" stroke-linecap="round"/><path fill="#232F3E" d="M15.5 13l1.5 2-2 .5"/></svg></div><div class="tile-name">Amazon</div></button>
+      <button class="magic-tile" data-platform="reddit" data-scope="brand" data-tip="Connect Reddit Ads" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><circle cx="12" cy="12" r="12" fill="#FF4500"/><path fill="#fff" d="M19.2 12.4a1.6 1.6 0 00-2.7-1.1 7.8 7.8 0 00-4.2-1.3l.7-3.5 2.4.5a1.1 1.1 0 102.2 0 1.1 1.1 0 00-2.1-.5l-2.7-.6a.3.3 0 00-.4.3l-.8 3.8a7.8 7.8 0 00-4.3 1.3 1.6 1.6 0 10-1.7 2.6 3.2 3.2 0 000 .5c0 2.5 2.9 4.5 6.5 4.5s6.5-2 6.5-4.5a3.2 3.2 0 000-.5 1.6 1.6 0 00.6-1.5zM8.4 13.5a1.1 1.1 0 112.2 0 1.1 1.1 0 01-2.2 0zm6.2 3a4 4 0 01-5.2 0 .3.3 0 01.4-.4 3.4 3.4 0 004.4 0 .3.3 0 01.4.4zm-.2-1.9a1.1 1.1 0 110-2.2 1.1 1.1 0 010 2.2z"/></svg></div><div class="tile-name">Reddit</div></button>
+      <!-- LinkedIn has a full Go implementation; OAuth credentials wire up in the next release cycle. -->
+      <button class="magic-tile" data-platform="linkedin" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="4" fill="#0A66C2"/><path fill="#fff" d="M7.5 9.5h-2.5v8h2.5v-8zM6.25 8.25a1.45 1.45 0 100-2.9 1.45 1.45 0 000 2.9zM19 17.5h-2.5v-4c0-1-.2-1.75-1.25-1.75-1 0-1.25.75-1.25 1.75v4H11.5v-8H14v1.1c.4-.6 1.2-1.3 2.5-1.3 2 0 2.5 1.3 2.5 3v5.2z"/></svg></div><div class="tile-name">LinkedIn</div></button>
+      <button class="magic-tile" data-platform="shopify" data-scope="brand" data-tip="Connect Shopify" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#96bf48" d="M15.34 2.61a.26.26 0 00-.24-.2 3.67 3.67 0 00-.67-.01s-1.12.08-1.87.24c-.19-.56-.52-1.07-.92-1.47C10.94.46 10 .25 9.26.25c-.04 0-.08 0-.12.01-1.02-.04-1.87.55-2.53 1.44-.49.66-.87 1.49-1.07 2.14-.77.24-1.32.41-1.39.43-.43.14-.45.15-.5.55C3.6 5.19 2 17.68 2 17.68l10.22 1.77 5.53-1.36S15.35 2.64 15.34 2.61z"/></svg></div><div class="tile-name">Shopify</div></button>
+      <button class="magic-tile" data-platform="stripe" data-scope="brand" data-tip="Connect Stripe (read-only revenue reporting)" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#635BFF"/><path fill="#fff" d="M13.3 9.5c0-.6.5-.9 1.3-.9 1.2 0 2.6.4 3.8 1V6.2c-1.3-.5-2.6-.7-3.8-.7-3.1 0-5.2 1.6-5.2 4.3 0 4.2 5.7 3.5 5.7 5.3 0 .7-.6 1-1.4 1-1.3 0-2.9-.5-4.2-1.3v3.4c1.4.6 2.9.9 4.2.9 3.2 0 5.4-1.6 5.4-4.3 0-4.4-5.8-3.6-5.8-5.3z"/></svg></div><div class="tile-name">Stripe</div></button>
+      <button class="magic-tile" data-platform="etsy" data-scope="brand" data-tip="Connect Etsy" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#F1641E"/><path fill="#fff" d="M7 7h5.5v1.5H9v3h3v1.5H9v3h3.5V17.5H7z" stroke="#fff" stroke-width="0.5"/></svg></div><div class="tile-name">Etsy</div></button>
+      <!-- Klaviyo has a full Go implementation; OAuth credentials wire up in the next release cycle. -->
+      <button class="magic-tile" data-platform="klaviyo" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#2DD881" d="M12 2L2 12l4.5 4.5L12 22l5.5-5.5L22 12z"/></svg></div><div class="tile-name">Klaviyo</div></button>
+      <!-- Pinterest / Snapchat / X — implementation exists in the binary,
+           OAuth credentials pending platform review. Dark gray tile. -->
+      <button class="magic-tile" data-platform="pinterest" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><path fill="#E60023" d="M12 0C5.37 0 0 5.37 0 12c0 5.08 3.15 9.42 7.6 11.18-.1-.95-.2-2.42.04-3.46.22-.95 1.4-5.94 1.4-5.94s-.36-.72-.36-1.78c0-1.66.97-2.91 2.17-2.91 1.02 0 1.52.77 1.52 1.69 0 1.03-.65 2.57-.99 3.99-.28 1.19.6 2.16 1.77 2.16 2.13 0 3.77-2.25 3.77-5.49 0-2.87-2.06-4.87-5.01-4.87-3.41 0-5.42 2.56-5.42 5.2 0 1.03.4 2.13.89 2.73a.36.36 0 01.08.34c-.09.38-.29 1.19-.33 1.36-.05.22-.18.27-.41.16-1.55-.72-2.52-2.99-2.52-4.81 0-3.92 2.85-7.52 8.21-7.52 4.31 0 7.66 3.07 7.66 7.17 0 4.28-2.7 7.72-6.44 7.72-1.26 0-2.44-.65-2.84-1.42l-.77 2.95c-.28 1.08-1.04 2.43-1.55 3.26C9.58 23.81 10.77 24 12 24c6.63 0 12-5.37 12-12S18.63 0 12 0z"/></svg></div><div class="tile-name">Pinterest</div></button>
+      <button class="magic-tile" data-platform="snapchat" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#FFFC00"/><path fill="#000" d="M12 4c-2.8 0-4.3 1.8-4.5 4.4 0 .5-.1 1.4-.4 1.7-.3.2-1 .4-1.4.5-.3.1-.4.3-.3.5.1.3.5.4.9.5.6.1 1 .3 1.1.7.1.4-.2 1.2-.5 1.8-.6 1.3-2 2.3-2.8 2.6-.3.1-.4.4-.3.6.2.4.8.6 1.8.4.2 0 .4 0 .5.2.1.3.2.7.4.9.1.2.4.2.7.2.5 0 1.1-.2 2-.2 1.5 0 2.3.9 3 .9s1.5-.9 3-.9c.9 0 1.5.2 2 .2.3 0 .5 0 .7-.2.2-.2.3-.6.4-.9.1-.2.3-.2.5-.2 1 .2 1.6 0 1.8-.4.1-.2 0-.5-.3-.6-.8-.3-2.2-1.3-2.8-2.6-.3-.6-.6-1.4-.5-1.8.1-.4.5-.6 1.1-.7.4-.1.8-.2.9-.5.1-.2 0-.4-.3-.5-.4-.1-1.1-.3-1.4-.5-.3-.3-.4-1.2-.4-1.7C16.3 5.8 14.8 4 12 4z"/></svg></div><div class="tile-name">Snapchat</div></button>
+      <button class="magic-tile" data-platform="twitter" data-scope="brand" data-stubbed="true" data-tip="Coming soon — OAuth pending" data-tip-pos="bottom"><div class="tile-icon"><svg viewBox="0 0 24 24" width="22" height="22"><rect width="24" height="24" rx="6" fill="#000"/><path fill="#fff" d="M13.9 10.5L19.3 4h-1.3l-4.7 5.6L9.5 4H4.2l5.7 8.4L4.2 19.2h1.3l5-5.9 4 5.9h5.3l-5.9-8.7zm-1.8 2.1l-.6-.8L6 5h2l3.7 5.4.6.8 4.8 7h-2l-3.9-5.7z"/></svg></div><div class="tile-name">X</div></button>
+    </div>
+    <div id="request-platform" class="request-platform">
+      <button id="request-toggle" class="request-toggle">Request a platform</button>
+      <div id="request-form" class="request-form hidden">
+        <input id="request-input" type="text" placeholder="e.g. Snapchat, X, LinkedIn..." maxlength="100">
+        <button id="request-send" class="request-send">Send</button>
+      </div>
+      <div id="request-thanks" class="request-thanks hidden" role="status" aria-live="polite">✦ Sent! We'll look into it.</div>
+    </div>
+  </div>
+
+  <!-- Share Merlin (Referrals) -->
+  <div class="magic-section">
+    <div class="magic-section-label"><span style="background:linear-gradient(135deg,#a78bfa,#34d399);-webkit-background-clip:text;-webkit-text-fill-color:transparent">Share Merlin</span></div>
+    <div class="referral-card">
+      <div class="referral-sublabel">Your link</div>
+      <div class="referral-link-row">
+        <input id="referral-link" class="referral-link-input" readonly value="loading...">
+        <button id="referral-copy" class="referral-copy-btn">Copy</button>
+      </div>
+      <div id="referral-stats" class="referral-stats"></div>
+      <div class="referral-hint">Each friend who installs and enters your code adds +7 trial days, up to 3 friends (+21 days).</div>
+
+      <div class="referral-divider"></div>
+
+      <div class="referral-sublabel">Got a friend's code?</div>
+      <div class="referral-apply-row" id="referral-apply-row">
+        <input id="referral-apply-input" class="referral-apply-input" type="text" maxlength="8" placeholder="e.g. a1b2c3d4" autocomplete="off" spellcheck="false">
+        <button id="referral-apply-btn" class="referral-apply-btn">Apply</button>
+      </div>
+      <div id="referral-apply-status" class="referral-apply-status"></div>
+    </div>
+  </div>
+
+  <!-- Community -->
+  <div class="magic-section">
+    <a href="https://discord.gg/k3zav72dqA" target="_blank" rel="noopener" class="discord-link">
+      <svg viewBox="0 0 24 24" width="18" height="18" class="discord-icon"><path fill="currentColor" d="M20.317 4.369a19.791 19.791 0 00-4.885-1.515.074.074 0 00-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 00-5.487 0 12.64 12.64 0 00-.617-1.25.077.077 0 00-.079-.037A19.736 19.736 0 003.677 4.37a.07.07 0 00-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 00.031.057 19.9 19.9 0 005.993 3.03.078.078 0 00.084-.028c.462-.63.874-1.295 1.226-1.994a.076.076 0 00-.041-.106 13.107 13.107 0 01-1.872-.892.077.077 0 01-.008-.128 10.2 10.2 0 00.372-.292.074.074 0 01.077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 01.078.01c.12.098.246.198.373.292a.077.077 0 01-.006.127 12.299 12.299 0 01-1.873.892.077.077 0 00-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 00.084.028 19.839 19.839 0 006.002-3.03.077.077 0 00.032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 00-.031-.03zM8.02 15.331c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.332-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.086-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.095 2.157 2.42 0 1.332-.946 2.418-2.157 2.418z"/></svg>
+      <span>Talk to us on Discord</span>
+    </a>
+  </div>
+
+  </div><!-- end magic-panel-scroll -->
+</div>
+
+<!-- Archive Panel -->
+<div id="archive-panel" class="archive-panel hidden">
+  <div class="magic-header">
+    <span class="magic-title">✦ Archive</span>
+    <div class="magic-header-right">
+      <button id="archive-expand" class="magic-close" aria-label="Expand" data-tip="Expand" data-tip-pos="bottom">←</button>
+      <button id="activity-btn" class="subscribe-header-btn"><span class="subscribe-cta">Activity</span></button>
+      <button id="archive-close" class="magic-close" aria-label="Close Archive panel">&times;</button>
+    </div>
+  </div>
+  <div class="archive-panel-scroll">
+    <div class="archive-filters">
+      <div class="archive-filter-row">
+        <button class="archive-filter active" data-filter="live">Ads</button>
+        <button class="archive-filter" data-filter="image">Images</button>
+        <button class="archive-filter" data-filter="video">Videos</button>
+        <button class="archive-filter" data-filter="swipes">Swipes</button>
+        <button id="archive-refresh-btn" class="archive-refresh-btn" aria-label="Refresh live ads from connected platforms" title="Refresh live ads">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/></svg>
+        </button>
+      </div>
+      <input id="archive-search" type="text" class="archive-search" placeholder="Search brand, product, model...">
+    </div>
+    <div id="archive-grid" class="archive-grid"></div>
+    <div id="archive-empty" class="archive-empty" style="display:none">
+      <div class="empty-icon">✦</div>
+      <p>No content yet</p>
+      <p class="archive-empty-sub">Tell Merlin "make me an ad" to create your first creative</p>
+    </div>
+    <div id="archive-loading" class="archive-loading" style="display:none">Loading...</div>
+  </div>
+</div>
+
+<!-- Scroll to bottom indicator -->
+<button id="scroll-bottom-btn" class="scroll-bottom-btn hidden" aria-label="Scroll to bottom">
+  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+</button>
+
+<!-- Input bar -->
+<div id="input-bar">
+  <button id="mobile-btn" aria-label="Mobile access" class="icon-btn">
+    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"/><line x1="12" y1="18" x2="12" y2="18"/></svg>
+  </button>
+  <textarea id="input" placeholder="Message Merlin..." rows="1" spellcheck="true"></textarea>
+  <!-- Voice controls: mic button (always visible) + speaker button that
+       slides up on hover (discoverable without cluttering the resting state).
+       The speaker button is the voice-output toggle for TTS; clicking it
+       latches the .on state so it stays visible after mouse-leave until
+       toggled off again. See renderer.js "Voice Output" section. -->
+  <div class="voice-controls">
+    <button id="speaker-btn" aria-label="Toggle voice output" data-tip="Voice output" class="speaker-btn" aria-pressed="false">
+      <svg class="speaker-icon-off" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><line x1="23" y1="9" x2="17" y2="15"/><line x1="17" y1="9" x2="23" y2="15"/></svg>
+      <svg class="speaker-icon-on" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 010 7.07"/><path d="M19.07 4.93a10 10 0 010 14.14"/></svg>
+    </button>
+    <button id="mic-btn" aria-label="Voice input" data-tip="Voice input" class="mic-btn">
+      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 1a3 3 0 00-3 3v8a3 3 0 006 0V4a3 3 0 00-3-3z"/><path d="M19 10v2a7 7 0 01-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
+    </button>
+  </div>
+  <button id="send-btn" aria-label="Send">
+    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 2 L11 13"/><path d="M22 2 L15 22 L11 13 L2 9 Z"/></svg>
+  </button>
+</div>
+
+<!-- Revenue Tracker (Merlin Made Me) -->
+<div id="stats-overlay" class="overlay hidden">
+  <div class="stats-card" id="stats-card">
+    <button id="stats-close" class="qr-close" aria-label="Close revenue tracker">&times;</button>
+    <div id="stats-brand-name" class="stats-brand"></div>
+    <div class="stats-header">
+      <span class="stats-sparkle">✦</span>
+      <span class="stats-subtitle">powered by Merlin</span>
+    </div>
+
+    <div class="stats-period-row">
+      <div id="stats-period" class="stats-period">This month</div>
+      <div class="stats-period-toggle" role="tablist" aria-label="Reporting window">
+        <button type="button" class="stats-period-btn" data-days="1" role="tab">1D</button>
+        <button type="button" class="stats-period-btn" data-days="7" role="tab">7D</button>
+        <button type="button" class="stats-period-btn" data-days="30" role="tab">30D</button>
+        <button type="button" class="stats-period-btn" data-days="90" role="tab">90D</button>
+        <button type="button" class="stats-period-btn" data-days="365" role="tab">12M</button>
+      </div>
+    </div>
+
+    <div class="stats-hero-number">
+      <span id="stats-revenue" class="stats-revenue">--</span>
+      <span id="stats-revenue-label" class="stats-revenue-label">revenue from Merlin's ads</span>
+      <div id="stats-trend-pill" class="stats-trend-pill hidden"></div>
+    </div>
+
+    <div class="stats-bar-wrap">
+      <div class="stats-bar">
+        <div id="stats-bar-spend" class="stats-bar-segment stats-bar-spend" style="width:50%">
+          <span class="stats-bar-label"></span>
+        </div>
+        <div id="stats-bar-revenue" class="stats-bar-segment stats-bar-revenue" style="width:50%">
+          <span class="stats-bar-label"></span>
+        </div>
+      </div>
+    </div>
+
+    <div id="stats-story" class="stats-story"></div>
+
+    <div class="stats-grid stats-grid-3">
+      <div class="stats-cell"><span id="stats-spend" class="stats-val">--</span><span class="stats-label">ad spend</span></div>
+      <div class="stats-cell"><span id="stats-roas" class="stats-val">--</span><span class="stats-label">return</span></div>
+      <div class="stats-cell"><span id="stats-customers" class="stats-val">--</span><span class="stats-label">new customers</span></div>
+    </div>
+
+    <div id="stats-top-ad" class="stats-top-ad"></div>
+
+    <div class="stats-footer">
+      <button id="stats-share" class="stats-share-btn">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8"/><polyline points="16 6 12 2 8 6"/><line x1="12" y1="2" x2="12" y2="15"/></svg>
+        Share
+      </button>
+      <span class="stats-watermark">✦ Merlin</span>
+    </div>
+  </div>
+</div>
+
+<!-- Wisdom Overlay (full-frame takeover) -->
+<div id="wisdom-overlay" class="wisdom-fullframe hidden" role="dialog" aria-modal="true" aria-labelledby="wisdom-title">
+  <div class="wisdom-header">
+    <div class="wisdom-title-row">
+      <span id="wisdom-title" class="magic-title">✦ Wisdom</span>
+      <span id="wisdom-sample" class="wisdom-sample"></span>
+    </div>
+    <div class="wisdom-header-actions">
+      <button id="wisdom-info-btn" class="wisdom-info-btn" aria-label="About Wisdom data" data-tip="Wisdom is built from anonymized, aggregated metrics (CTR, CPC, format, timing) shared across all Merlin users. No brand names, ad copy, or personal data is shared.">&#9432;</button>
+      <button id="wisdom-refresh-btn" class="wisdom-icon-btn" aria-label="Refresh Wisdom data" title="Refresh">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"/><polyline points="1 20 1 14 7 14"/><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"/></svg>
+      </button>
+      <button id="wisdom-close" class="magic-close" aria-label="Close Wisdom panel">&times;</button>
+    </div>
+  </div>
+  <div class="wisdom-scroll">
+    <div id="wisdom-grid" class="wisdom-grid"></div>
+  </div>
+</div>
+
+<!-- QR Code Modal -->
+<div id="qr-modal" class="overlay hidden">
+  <div class="qr-card">
+    <button id="qr-close" class="qr-close">&times;</button>
+    <div class="qr-title">✦ Mobile Access</div>
+    <p class="qr-desc">Scan with your phone to chat with Merlin on the go</p>
+    <img id="qr-image" class="qr-image" alt="QR Code">
+    <p id="qr-url" class="qr-url"></p>
+  </div>
+</div>
+
+<!-- Offline banner -->
+<div id="offline-banner" class="hidden">You're offline — reconnect to use Merlin</div>
+
+<!-- Approval card (hidden) -->
+<div id="approval" class="hidden">
+  <div id="approval-label"></div>
+  <div id="approval-cost"></div>
+  <div id="approval-budget" class="approval-budget"></div>
+  <div id="approval-actions">
+    <button id="btn-approve" class="btn-action btn-approve-style">Allow</button>
+    <button id="btn-deny" class="btn-action btn-deny-style">Not now</button>
+  </div>
+</div>
+
+<!-- Update toast -->
+<div id="update-toast" class="hidden">
+  <div id="update-text"></div>
+  <div style="display:flex;gap:8px;margin-top:8px">
+    <button id="update-btn" class="btn-action btn-approve-style">Update</button>
+    <button id="update-dismiss" class="btn-action btn-deny-style">Later</button>
+  </div>
+</div>
+
+<!-- Inline modal (replaces native prompt/alert) -->
+<div id="merlin-modal" class="overlay hidden">
+  <div class="merlin-modal-card">
+    <button id="merlin-modal-close" class="merlin-modal-close">&times;</button>
+    <div id="merlin-modal-title" class="merlin-modal-title"></div>
+    <div id="merlin-modal-body" class="merlin-modal-body"></div>
+    <input id="merlin-modal-input" class="merlin-modal-input hidden" type="text" placeholder="">
+    <div id="merlin-modal-error" class="merlin-modal-error"></div>
+    <div class="merlin-modal-actions">
+      <button id="merlin-modal-confirm" class="btn-action btn-approve-style">OK</button>
+      <button id="merlin-modal-cancel" class="btn-action btn-deny-style">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- Help nudge (appears on frustration detection) -->
+<div id="help-nudge" class="help-nudge hidden">
+  <span class="help-nudge-icon">✦</span>
+  <span class="help-nudge-text">Stuck? Just ask Merlin — he can troubleshoot anything.</span>
+  <button id="help-nudge-close" class="help-nudge-close">&times;</button>
+</div>
+
+<!-- ToS acceptance (first launch only) -->
+<div id="tos-overlay" class="overlay hidden">
+  <div class="setup-card">
+    <div class="setup-mascot">✦</div>
+    <h1>Welcome to Merlin</h1>
+    <p class="setup-sub">Your AI Marketing Wizard</p>
+    <div style="margin:16px 0;text-align:left">
+      <label style="display:flex;align-items:start;gap:8px;cursor:pointer">
+        <input type="checkbox" id="tos-checkbox" style="margin-top:4px">
+        <span style="font-size:13px;color:var(--muted)">I agree to the <a href="https://merlingotme.com/terms" target="_blank" style="color:var(--accent)">Terms of Service</a> and <a href="https://merlingotme.com/privacy" target="_blank" style="color:var(--accent)">Privacy Policy</a></span>
+      </label>
+      <label style="display:flex;align-items:start;gap:8px;cursor:pointer;margin-top:10px">
+        <!-- REGRESSION GUARD (2026-04-14, Codex P3 #5): DO NOT re-add
+             the `checked` attribute. Pre-checked marketing consent is a
+             dark pattern under both GDPR and general UX best practice,
+             and this is the very first interaction a new user has with
+             Merlin. Users who want product updates can opt in
+             explicitly; users who don't shouldn't have to uncheck a
+             box they never agreed to. -->
+        <input type="checkbox" id="email-optin-checkbox" style="margin-top:4px">
+        <span style="font-size:13px;color:var(--muted)">Send me product updates, tips, and special offers (you can unsubscribe anytime)</span>
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
+        <input type="checkbox" id="tos-has-referral" style="margin:0">
+        <span style="font-size:13px;color:var(--muted)">I have a referral code from a friend</span>
+      </label>
+      <div id="tos-referral-wrap" class="hidden" style="margin-top:10px;display:flex;gap:6px">
+        <input id="tos-referral-input" class="referral-apply-input" type="text" maxlength="8" placeholder="e.g. a1b2c3d4" autocomplete="off" spellcheck="false" style="flex:1">
+      </div>
+      <div id="tos-referral-status" class="referral-apply-status"></div>
+    </div>
+    <button id="tos-accept-btn" class="btn-primary" disabled>Get Started</button>
+  </div>
+</div>
+
+<!-- Setup overlay removed: users go straight to chat after ToS.
+     Claude auth is requested inline when the user sends their first message. -->
+
+<script src="preview-stub.js"></script>
+<script src="marked.min.js"></script>
+<script src="purify.min.js"></script>
+<script src="sentence-splitter.js"></script>
+<script src="renderer.js"></script>
+</body>
+</html>

@@ -80,6 +80,8 @@
         "!LICENSE.txt",
         "!CLAUDE.md",
         "!memory.md",
+        "!app/preview-harness.html",
+        "!app/preview-stub.js",
         "!node_modules/onnxruntime-node/bin/napi-v3/darwin${/*}",
         "!node_modules/onnxruntime-node/bin/napi-v3/linux${/*}"
       ]
@@ -100,6 +102,8 @@
         "!LICENSE.txt",
         "!CLAUDE.md",
         "!memory.md",
+        "!app/preview-harness.html",
+        "!app/preview-stub.js",
         "!node_modules/onnxruntime-node/bin/napi-v3/win32${/*}",
         "!node_modules/onnxruntime-node/bin/napi-v3/linux${/*}"
       ],
