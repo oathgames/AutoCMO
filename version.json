@@ -1,5 +1,5 @@
 {
-  "version": "1.6.0",
+  "version": "1.6.1",
   "updatable": [
     "CLAUDE.md",
     "README.txt",
@@ -28,11 +28,17 @@
     ".claude/tools/.merlin-audit*",
     "results/"
   ],
+  "removed": [
+    ".claude/commands/merlin-platforms.md",
+    ".claude/commands/merlin-setup.md"
+  ],
   "preserveUserBrands": "assets/brands/* except assets/brands/example/ (example is updatable, user brands are not)",
   "binaryName": "Merlin",
   "repo": "oathgames/Merlin",
-  "notes": "v1.6.0: Skill-routing migration. The monolithic /merlin router (merlin-platforms.md + merlin-setup.md, ~61 KB always-resident) is replaced by 8 domain SKILLs under .claude/skills/<name>/SKILL.md that route via Claude Agent SDK description matching. Only each skill's ~200-char description loads at startup (~8 KB total); full bodies load on demand when a user utterance matches. Hygiene is enforced at build time: test/validate-skills.js checks frontmatter, description quality, byte budgets, action coverage vs autocmo-core/main.go, and description-collision via cosine similarity. test/run-routing-corpus.js guards against corpus drift. Monthly audit workflow pulls aggregated telemetry from wisdom-api and opens a draft PR only when routing drift is detected — all fixes remain manual review.",
+  "notes": "v1.6.1: Skill-migration cleanup. Adds a `removed` array to version.json + a Phase 3 delete step in the update flow so retired files (v1.6.0 dropped .claude/commands/merlin-platforms.md and merlin-setup.md) actually leave existing installs on /update instead of lingering as orphans. Also hardens the monthly routing-telemetry audit: if WISDOM_READ_TOKEN is missing from repo secrets, the audit now fails loud instead of silently producing an empty-telemetry 'no drift' result. curl switched to --fail-with-body so API errors don't get mistaken for empty activity. v1.6.0: Skill-routing migration. The monolithic /merlin router (merlin-platforms.md + merlin-setup.md, ~61 KB always-resident) is replaced by 8 domain SKILLs under .claude/skills/<name>/SKILL.md that route via Claude Agent SDK description matching. Only each skill's ~200-char description loads at startup (~8 KB total); full bodies load on demand when a user utterance matches. Hygiene is enforced at build time: test/validate-skills.js checks frontmatter, description quality, byte budgets, action coverage vs autocmo-core/main.go, and description-collision via cosine similarity. test/run-routing-corpus.js guards against corpus drift. Monthly audit workflow pulls aggregated telemetry from wisdom-api and opens a draft PR only when routing drift is detected — all fixes remain manual review.",
   "whatsNew": [
+    "Orphan-file cleanup on /update: version.json now supports a `removed` array alongside `updatable`. During Phase 3 of the update flow (after new files are written + rollback backups cleared), the updater iterates `removed`, runs the same appRoot-confinement safety check used for updatable entries, and unlinks each path. Missing files are a no-op. For v1.6.1 this retires the v1.5.1 merlin-platforms.md + merlin-setup.md prose routers that v1.6.0 replaced with SKILLs — without this, those files would linger on every existing install.",
+    "Monthly audit fail-loud on missing secret: skills-lint.yml now checks `[ -n \"$WISDOM_READ_TOKEN\" ]` before hitting wisdom-api. If the secret is not configured, the job fails with an `::error::` annotation instead of silently producing an empty-telemetry file that the next step would interpret as 'no drift.' curl also switched to `--fail-with-body` so upstream 4xx/5xx responses are distinguished from legitimate empty-window results.",
     "Skill-routing migration: /merlin now delegates to 8 SKILLs (merlin-ads, merlin-analytics, merlin-content, merlin-ecom, merlin-seo, merlin-setup, merlin-social, clarify-intent) discovered by the Claude Agent SDK via settingSources: ['project']. Only descriptions load at startup; bodies load on demand when intent matches. Cold-start context drops ~53 KB.",
     "New CI gate (skills-lint.yml): validate-skills.js + run-routing-corpus.js run on every PR that touches skills, the router, version.json, or the validator. Blocks merge on malformed frontmatter, vague descriptions, byte-budget overruns, unknown action references, description collisions, or missing routing-corpus coverage. --check-updatable verifies every SKILL is listed in version.json:updatable.",
     "Monthly routing-telemetry audit: scheduled on the 1st of each month. Pulls anonymized (skill, intent_match, fallback_used) counts from api.merlingotme.com/audit/routing-telemetry, compiles a markdown report, and opens a draft PR with label audit,skills,manual-review only if fallback rate >25% or a skill logged zero invocations. Fixes remain manual — never automatic.",

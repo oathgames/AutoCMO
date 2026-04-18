@@ -125,16 +125,27 @@ function cosine(a, b) {
 }
 
 function collectActionReferences(body) {
-  // Match both `mcp__merlin__tool({action: "name"})` and bare `action: "name"`
-  // patterns since skill bodies mix both.
-  const refs = new Set();
-  const patterns = [
-    /mcp__merlin__[a-z_]+\(\{\s*action:\s*"([a-z_-]+)"/g,
-    /"action":\s*"([a-z_-]+)"/g,
-  ];
-  for (const re of patterns) {
-    let m;
-    while ((m = re.exec(body)) !== null) refs.add(m[1]);
+  // Skill bodies reference actions two ways:
+  //   A) MCP-wrapped:  `mcp__merlin__shopify({action: "cohorts"})` — the MCP
+  //      tool wrapper in app/mcp-tools.js routes this to the Go binary as
+  //      `shopify-cohorts` (prefixed). The raw case in main.go is the
+  //      prefixed name, never the bare one.
+  //   B) Bare:         `"action": "name"` — these usually come from direct
+  //      binary examples where the exact Go case name is quoted.
+  //
+  // Return one entry per reference with BOTH forms as acceptance candidates
+  // for pattern (A). validateActionCoverage passes if ANY candidate resolves.
+  const refs = [];
+  const mcpRe = /mcp__merlin__([a-z_]+)\(\{\s*action:\s*"([a-z_-]+)"/g;
+  let m;
+  while ((m = mcpRe.exec(body)) !== null) {
+    const tool = m[1];
+    const action = m[2];
+    refs.push({ raw: action, candidates: [action, `${tool}-${action}`, `${tool.replace(/_/g, '-')}-${action}`] });
+  }
+  const bareRe = /"action":\s*"([a-z_-]+)"/g;
+  while ((m = bareRe.exec(body)) !== null) {
+    refs.push({ raw: m[1], candidates: [m[1]] });
   }
   return refs;
 }
@@ -226,9 +237,10 @@ function validateActionCoverage(skill, body, mainGoActions, warnings) {
   if (!mainGoActions) return; // source not present
   const refs = collectActionReferences(body);
   for (const ref of refs) {
-    if (!mainGoActions.has(ref)) {
+    const hit = ref.candidates.some((c) => mainGoActions.has(c));
+    if (!hit) {
       warnings.push(
-        `${skill.name}: references action "${ref}" which is NOT in autocmo-core/main.go — rename or stale?`
+        `${skill.name}: references action "${ref.raw}" which is NOT in autocmo-core/main.go (tried: ${ref.candidates.join(', ')}) — rename or stale?`
       );
     }
   }

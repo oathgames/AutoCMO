@@ -57,13 +57,35 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      - name: Verify WISDOM_READ_TOKEN is configured
+        # Fail-loud sanity check: if the secret is missing from the repo
+        # config, the curl below would send a bare `Bearer ` header and
+        # the API would return an error body. The previous `|| echo '[]'`
+        # fallback would then silently swallow that into an empty
+        # telemetry file — so a "no drift detected" result could mean
+        # "genuinely no drift" OR "audit never ran because auth failed."
+        # Fail here so missing-secret runs are visibly red instead of
+        # quietly fake-green.
+        env:
+          WISDOM_READ_TOKEN: ${{ secrets.WISDOM_READ_TOKEN }}
+        run: |
+          if [ -z "$WISDOM_READ_TOKEN" ]; then
+            echo "::error::WISDOM_READ_TOKEN secret is not set — audit cannot run."
+            echo "Configure it at: Settings → Secrets and variables → Actions"
+            exit 1
+          fi
       - name: Pull aggregated routing telemetry from wisdom-api
         # Telemetry is anonymized counts of (skill, intent_match, fallback_used)
-        # per skill. Endpoint fails closed if no data available (returns []).
+        # per skill. Endpoint returns [] when there's no activity in the window
+        # — that's a legitimate empty result, distinct from auth failure
+        # (which the previous step refuses to let reach here).
+        env:
+          WISDOM_READ_TOKEN: ${{ secrets.WISDOM_READ_TOKEN }}
         run: |
-          curl -sS -H "Authorization: Bearer ${{ secrets.WISDOM_READ_TOKEN }}" \
+          curl -sS --fail-with-body \
+            -H "Authorization: Bearer $WISDOM_READ_TOKEN" \
             "https://api.merlingotme.com/audit/routing-telemetry?days=30" \
-            -o test/.telemetry.json || echo "[]" > test/.telemetry.json
+            -o test/.telemetry.json
       - name: Compile audit report
         id: audit
         run: node test/validate-skills.js --audit-report > test/.audit-report.md
