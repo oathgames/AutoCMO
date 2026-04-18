@@ -113,6 +113,10 @@ contextBridge.exposeInMainWorld('merlin', {
   refreshPerf: (brand, days) => ipcRenderer.invoke('refresh-perf', assertBrand(brand), Number.isInteger(days) && days > 0 && days <= 365 ? days : undefined),
   getPerfUpdated: (brand) => ipcRenderer.invoke('get-perf-updated', assertBrand(brand)),
   getActivityFeed: (brand, limit) => ipcRenderer.invoke('get-activity-feed', assertBrand(brand), assertInt(limit, 50)),
+  // getActivityFeedFull reads the brand's activity.jsonl in its entirety
+  // (subject to a 10 MB safety cap). Used by the export + search-all paths
+  // in the activity feed, where tailing 50 entries is not enough.
+  getActivityFeedFull: (brand) => ipcRenderer.invoke('get-activity-feed-full', assertBrand(brand)),
 
   // Archive
   getArchiveItems: (filters) => ipcRenderer.invoke('get-archive-items', assertObj(filters)),

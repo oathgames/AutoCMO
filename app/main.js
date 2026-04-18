@@ -4472,6 +4472,42 @@ ipcMain.handle('get-agency-report', async (_, requestedDays, brandNames) => {
   };
 });
 
+// ── Activity feed: read brand's activity.jsonl (full file) ──
+// Used by Activity view's search/export path. 10 MB cap is a safety
+// against runaway reads — the Go side already rotates at 10 MB, so this
+// is effectively "the current window" from the user's perspective.
+ipcMain.handle('get-activity-feed-full', (_, brandName) => {
+  if (!brandName) return [];
+  if (!/^[a-z0-9_-]+$/i.test(brandName)) return [];
+  const logPath = path.join(appRoot, 'assets', 'brands', brandName, 'activity.jsonl');
+  try {
+    if (!fs.existsSync(logPath)) return [];
+    const stat = fs.statSync(logPath);
+    if (stat.size > 10 * 1024 * 1024) {
+      // Refuse to load >10 MB in one shot — fall back to tail behavior.
+      const fd = fs.openSync(logPath, 'r');
+      const tailSize = 10 * 1024 * 1024;
+      const buf = Buffer.alloc(tailSize);
+      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      fs.closeSync(fd);
+      let content = buf.toString('utf8');
+      const firstNewline = content.indexOf('\n');
+      if (firstNewline > 0) content = content.slice(firstNewline + 1);
+      return parseJsonl(content);
+    }
+    return parseJsonl(fs.readFileSync(logPath, 'utf8'));
+  } catch { return []; }
+});
+function parseJsonl(text) {
+  const out = [];
+  for (const line of (text || '').split('\n')) {
+    const t = line.trim();
+    if (!t) continue;
+    try { out.push(JSON.parse(t)); } catch {}
+  }
+  return out.reverse(); // newest first, consistent with get-activity-feed
+}
+
 // ── Activity feed: read brand's activity.jsonl ──────────────
 ipcMain.handle('get-activity-feed', (_, brandName, limit = 30) => {
   if (!brandName) {

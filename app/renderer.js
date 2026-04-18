@@ -11,7 +11,7 @@ const sendBtn = document.getElementById('send-btn');
 const approval = document.getElementById('approval');
 
 // Platform-specific UI adjustments
-if (merlin.platform === 'darwin') {
+if (typeof merlin !== 'undefined' && merlin.platform === 'darwin') {
   // Hide Windows-style controls on Mac (traffic lights are native)
   document.querySelectorAll('.win-ctrl').forEach(el => el.style.display = 'none');
   // Add left padding for traffic lights
@@ -6209,6 +6209,14 @@ function showArchiveView() {
   loadArchive();
 }
 
+// Activity view state — held in module scope so the toolbar filters,
+// search box, and the fetched entries all stay in sync without having
+// to thread them through every helper. Declared ahead of showActivityView
+// because the activity-btn click handler can fire before later `let`
+// declarations execute, and `let` is in the temporal dead zone until its
+// declaration line runs.
+let _activityState = { items: [], filter: 'all', query: '', full: false };
+
 function showActivityView() {
   _archiveView = 'activity';
   document.getElementById('activity-btn').textContent = 'Gallery';
@@ -6224,137 +6232,280 @@ document.getElementById('activity-btn').addEventListener('click', () => {
   else showArchiveView();
 });
 
-async function loadActivityFeed() {
-  const panel = document.getElementById('archive-panel');
+async function loadActivityFeed(forceFull = false) {
   const existing = document.getElementById('activity-feed-section');
   if (existing) existing.remove();
 
   try {
     const activityBrand = document.getElementById('brand-select')?.value || null;
-    let items = await merlin.getActivityFeed(activityBrand, 50);
+    const wantFull = forceFull || _activityState.full;
+    let items = wantFull
+      ? await merlin.getActivityFeedFull(activityBrand)
+      : await merlin.getActivityFeed(activityBrand, 100);
     if (!Array.isArray(items)) items = [];
+    _activityState.items = items;
+    _activityState.full = wantFull;
 
     const section = document.createElement('div');
     section.id = 'activity-feed-section';
     section.className = 'activity-section';
 
-    if (!items || items.length === 0) {
-      section.innerHTML = '<div class="activity-section-label">Activity</div><div style="color:var(--text-dim);padding:20px 0;text-align:center;font-size:12px"><div style="font-size:24px;opacity:.4;margin-bottom:6px">✦</div>No activity yet<br><span style="opacity:.7">Actions appear here as you create ads and run campaigns</span></div>';
-      const grid = document.getElementById('archive-grid');
-      grid.parentNode.insertBefore(section, grid);
-      return;
-    }
+    // Toolbar: search + type filter chips + export/copy-all. Always shown
+    // even when the feed is empty — users connecting Merlin for the first
+    // time still see the controls, not a dead panel.
+    const toolbar = renderActivityToolbar();
+    section.appendChild(toolbar);
 
-    let lastDate = '';
-    items.forEach(item => {
-      const d = item.ts ? new Date(item.ts) : new Date();
-      const dateStr = formatArchiveDate(d);
-      if (dateStr !== lastDate) {
-        const header = document.createElement('div');
-        header.className = 'activity-section-label';
-        header.textContent = dateStr;
-        section.appendChild(header);
-        lastDate = dateStr;
-      }
+    const body = document.createElement('div');
+    body.id = 'activity-feed-body';
+    section.appendChild(body);
 
-      const div = document.createElement('div');
-      div.className = 'activity-item';
-
-      const validTypes = ['create', 'optimize', 'publish', 'report', 'error'];
-      const safeType = validTypes.includes(item.type) ? item.type : 'create';
-      const dotClass = `activity-dot activity-dot-${safeType}`;
-      const action = item.action || '';
-      const detail = item.detail || '';
-      const product = item.product ? ` · ${item.product}` : '';
-
-      // Convert the raw action + detail into a plain-English description.
-      //
-      // REGRESSION GUARD (2026-04-15, human-readable-activity incident):
-      // Spell entries used to render as the raw UUID — "a5c5e05c3107f48c0
-      // completed" — because the default case did
-      // `spellName = action.replace('spell-','')` which for auto-created
-      // spells (taskId is a 16-char hex hash) produces the hash itself,
-      // not a name. The `detail` field ALREADY contains a human sentence
-      // ("Check mad-chill product completeness") — we just weren't
-      // reading it. Always prefer `detail` over action-derived labels.
-      // If you add a new action, either extend this switch with a short
-      // label OR make sure the binary writes a readable `detail` string
-      // on the activity.jsonl entry.
-      const cleanDetail = (s) => {
-        if (!s || typeof s !== 'string') return '';
-        // Trim, strip leading emoji/punctuation, cap at 120 chars.
-        const out = s.trim().replace(/^[\-\s·•]+/, '');
-        return out.length > 120 ? out.slice(0, 117) + '…' : out;
-      };
-      const humanizeSpellId = (id) => {
-        if (!id) return 'Spell';
-        // Strip "spell-" prefix and any leading brand segment
-        // ("ivoryella-daily-ads" → "daily ads").
-        const stripped = id.replace(/^spell-/, '');
-        // If it looks like a raw hex hash (8+ hex chars, no dashes),
-        // there's nothing nice to show — fall through to "Scheduled spell".
-        if (/^[0-9a-f]{8,}$/i.test(stripped)) return 'Scheduled spell';
-        // Otherwise reshape "daily-ads" → "Daily ads".
-        const words = stripped.replace(/-/g, ' ').trim();
-        if (!words) return 'Scheduled spell';
-        return words.charAt(0).toUpperCase() + words.slice(1);
-      };
-      const prettyDetail = cleanDetail(detail);
-      // Is this detail a technical metadata string (e.g. "model:kling
-      // duration:15s") or a real sentence? Metadata strings stay out of
-      // the activity UI — we show the preset label instead.
-      const isTechDetail = (s) => {
-        if (!s) return true;
-        // All lowercase colon-separated key:value pairs = technical.
-        if (/^[a-z0-9_:.\s-]+$/.test(s) && s.includes(':') && !/\s[A-Z]/.test(s)) return true;
-        return false;
-      };
-      const friendlyDetail = isTechDetail(prettyDetail) ? '' : prettyDetail;
-
-      let desc = '';
-      switch (action) {
-        case 'video': desc = friendlyDetail || `New video${product}`; break;
-        case 'image': desc = friendlyDetail || `New ad image${product}`; break;
-        case 'blog': desc = friendlyDetail || 'Blog post published'; break;
-        case 'kill': desc = `Ad paused${friendlyDetail ? ' — ' + friendlyDetail : ''}`; break;
-        case 'scale': desc = `Winner scaled${friendlyDetail ? ' — ' + friendlyDetail : ''}`; break;
-        case 'meta-push': desc = friendlyDetail || 'Ad live on Meta'; break;
-        case 'tiktok-push': desc = friendlyDetail || 'Ad live on TikTok'; break;
-        case 'google-ads-push': desc = friendlyDetail || 'Ad live on Google'; break;
-        case 'amazon-ads-push': desc = friendlyDetail || 'Ad live on Amazon'; break;
-        case 'reddit-create-ad': desc = friendlyDetail || 'Ad live on Reddit'; break;
-        case 'linkedin-push': desc = friendlyDetail || 'Ad live on LinkedIn'; break;
-        case 'dashboard': desc = friendlyDetail || 'Performance check'; break;
-        case 'report': desc = friendlyDetail || 'Report generated'; break;
-        default:
-          if (action && action.startsWith('spell-')) {
-            // Prefer the human detail; fall back to a prettified name.
-            const spellName = humanizeSpellId(action);
-            const failed = prettyDetail.toLowerCase().includes('failed')
-              || (item.type === 'error');
-            if (prettyDetail && !prettyDetail.toLowerCase().endsWith('completed')
-                             && !prettyDetail.toLowerCase().endsWith('failed')) {
-              desc = failed ? `⚠ ${prettyDetail}` : `✓ ${prettyDetail}`;
-            } else {
-              desc = failed ? `⚠ ${spellName} failed` : `✓ ${spellName} completed`;
-            }
-          } else if (prettyDetail) {
-            desc = prettyDetail;
-          } else if (action) {
-            desc = action.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
-          } else {
-            desc = 'Activity';
-          }
-      }
-
-      const time = item.ts ? new Date(item.ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
-      div.innerHTML = `<span class="${dotClass}"></span><span>${escapeHtml(desc)}</span><span class="activity-time">${time}</span>`;
-      section.appendChild(div);
-    });
+    renderActivityBody(body);
 
     const grid = document.getElementById('archive-grid');
     grid.parentNode.insertBefore(section, grid);
   } catch (err) { console.warn('[activity]', err); }
+}
+
+function renderActivityToolbar() {
+  const bar = document.createElement('div');
+  bar.className = 'activity-toolbar';
+  bar.innerHTML = `
+    <input id="activity-search" type="text" placeholder="Search activity..." class="activity-search" value="${escapeHtml(_activityState.query)}">
+    <div class="activity-filters">
+      <button class="activity-chip ${_activityState.filter==='all'?'active':''}" data-filter="all">All</button>
+      <button class="activity-chip ${_activityState.filter==='error'?'active':''}" data-filter="error">Errors</button>
+      <button class="activity-chip ${_activityState.filter==='auth'?'active':''}" data-filter="auth">Auth</button>
+      <button class="activity-chip ${_activityState.filter==='config'?'active':''}" data-filter="config">Config</button>
+      <button class="activity-chip ${_activityState.filter==='publish'?'active':''}" data-filter="publish">Ads</button>
+    </div>
+    <div class="activity-actions">
+      <button id="activity-loadall" class="activity-action-btn" title="${_activityState.full ? 'Loaded full log' : 'Load full log'}">${_activityState.full ? '✓ Full' : 'Full log'}</button>
+      <button id="activity-copy" class="activity-action-btn" title="Copy filtered entries">Copy</button>
+      <button id="activity-export" class="activity-action-btn" title="Export to JSON file">Export</button>
+    </div>
+  `;
+  bar.querySelector('#activity-search').addEventListener('input', (e) => {
+    _activityState.query = e.target.value.trim().toLowerCase();
+    const body = document.getElementById('activity-feed-body');
+    if (body) renderActivityBody(body);
+  });
+  bar.querySelectorAll('.activity-chip').forEach(btn => {
+    btn.addEventListener('click', () => {
+      _activityState.filter = btn.dataset.filter;
+      bar.querySelectorAll('.activity-chip').forEach(b => b.classList.toggle('active', b === btn));
+      const body = document.getElementById('activity-feed-body');
+      if (body) renderActivityBody(body);
+    });
+  });
+  bar.querySelector('#activity-loadall').addEventListener('click', async () => {
+    if (_activityState.full) return;
+    _activityState.full = true;
+    await loadActivityFeed(true);
+  });
+  bar.querySelector('#activity-copy').addEventListener('click', () => {
+    const filtered = filterActivity(_activityState.items);
+    const text = filtered.map(formatActivityForCopy).join('\n');
+    navigator.clipboard.writeText(text).catch(() => {});
+    flashActionBtn('#activity-copy', 'Copied');
+  });
+  bar.querySelector('#activity-export').addEventListener('click', () => {
+    const filtered = filterActivity(_activityState.items);
+    const blob = new Blob([JSON.stringify(filtered, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const brand = document.getElementById('brand-select')?.value || 'brand';
+    a.href = url;
+    a.download = `merlin-activity-${brand}-${new Date().toISOString().slice(0,10)}.json`;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    flashActionBtn('#activity-export', 'Exported');
+  });
+  return bar;
+}
+
+function flashActionBtn(sel, label) {
+  const btn = document.querySelector(sel);
+  if (!btn) return;
+  const prev = btn.textContent;
+  btn.textContent = label;
+  btn.classList.add('flash');
+  setTimeout(() => { btn.textContent = prev; btn.classList.remove('flash'); }, 900);
+}
+
+function filterActivity(items) {
+  const q = _activityState.query;
+  const f = _activityState.filter;
+  return items.filter(item => {
+    if (f !== 'all') {
+      if (f === 'error') { if ((item.severity || item.type) !== 'error') return false; }
+      else if (item.type !== f) return false;
+    }
+    if (!q) return true;
+    const hay = [item.action, item.detail, item.product, item.sessionId, item.type]
+      .filter(Boolean).join(' ').toLowerCase();
+    return hay.includes(q);
+  });
+}
+
+// Unity-player-log style single-line format. Timestamps are UTC ISO so
+// support tickets are unambiguous across time zones.
+function formatActivityForCopy(item) {
+  const ts = item.ts || '';
+  const sev = (item.severity || item.type || 'info').toUpperCase().padEnd(5);
+  const sid = item.sessionId ? `[${item.sessionId}] ` : '';
+  const ver = item.version ? ` v${item.version}` : '';
+  const prod = item.product ? ` {${item.product}}` : '';
+  const action = item.action || '';
+  const detail = item.detail || '';
+  return `${ts} ${sev} ${sid}${action}${prod}${ver} — ${detail}`;
+}
+
+function renderActivityBody(body) {
+  body.innerHTML = '';
+  const items = filterActivity(_activityState.items);
+
+  if (items.length === 0) {
+    const hasAny = _activityState.items.length > 0;
+    body.innerHTML = hasAny
+      ? '<div class="activity-empty-filtered">No matches for this filter.</div>'
+      : '<div class="activity-empty"><div class="activity-empty-icon">✦</div>No activity yet<br><span class="activity-empty-sub">Actions appear here as you create ads and run campaigns</span></div>';
+    return;
+  }
+
+  let lastDate = '';
+  items.forEach(item => {
+    const d = item.ts ? new Date(item.ts) : new Date();
+    const dateStr = formatArchiveDate(d);
+    if (dateStr !== lastDate) {
+      const header = document.createElement('div');
+      header.className = 'activity-section-label';
+      header.textContent = dateStr;
+      body.appendChild(header);
+      lastDate = dateStr;
+    }
+    body.appendChild(renderActivityItem(item));
+  });
+}
+
+function renderActivityItem(item) {
+  const div = document.createElement('div');
+  div.className = 'activity-item';
+  const severity = item.severity || (item.type === 'error' ? 'error' : 'info');
+  if (severity === 'error') div.classList.add('activity-item--error');
+  else if (severity === 'warn') div.classList.add('activity-item--warn');
+
+  const validTypes = ['create', 'optimize', 'publish', 'report', 'error', 'auth', 'config', 'sync', 'launch', 'scan', 'manage', 'setup', 'info'];
+  const safeType = validTypes.includes(item.type) ? item.type : 'info';
+  const dotClass = `activity-dot activity-dot-${safeType}`;
+  const action = item.action || '';
+  const detail = item.detail || '';
+  const product = item.product ? ` · ${item.product}` : '';
+
+  // Convert the raw action + detail into a plain-English description.
+  //
+  // REGRESSION GUARD (2026-04-15, human-readable-activity incident):
+  // Spell entries used to render as the raw UUID — "a5c5e05c3107f48c0
+  // completed" — because the default case did
+  // `spellName = action.replace('spell-','')` which for auto-created
+  // spells (taskId is a 16-char hex hash) produces the hash itself,
+  // not a name. The `detail` field ALREADY contains a human sentence
+  // ("Check mad-chill product completeness") — we just weren't
+  // reading it. Always prefer `detail` over action-derived labels.
+  // If you add a new action, either extend this switch with a short
+  // label OR make sure the binary writes a readable `detail` string
+  // on the activity.jsonl entry.
+  const cleanDetail = (s) => {
+    if (!s || typeof s !== 'string') return '';
+    const out = s.trim().replace(/^[\-\s·•]+/, '');
+    return out.length > 120 ? out.slice(0, 117) + '…' : out;
+  };
+  const humanizeSpellId = (id) => {
+    if (!id) return 'Spell';
+    const stripped = id.replace(/^spell-/, '');
+    if (/^[0-9a-f]{8,}$/i.test(stripped)) return 'Scheduled spell';
+    const words = stripped.replace(/-/g, ' ').trim();
+    if (!words) return 'Scheduled spell';
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  };
+  const prettyDetail = cleanDetail(detail);
+  const isTechDetail = (s) => {
+    if (!s) return true;
+    if (/^[a-z0-9_:.\s-]+$/.test(s) && s.includes(':') && !/\s[A-Z]/.test(s)) return true;
+    return false;
+  };
+  const friendlyDetail = isTechDetail(prettyDetail) ? '' : prettyDetail;
+
+  let desc = '';
+  switch (action) {
+    case 'video': desc = friendlyDetail || `New video${product}`; break;
+    case 'image': desc = friendlyDetail || `New ad image${product}`; break;
+    case 'blog': desc = friendlyDetail || 'Blog post published'; break;
+    case 'kill': desc = `Ad paused${friendlyDetail ? ' — ' + friendlyDetail : ''}`; break;
+    case 'scale': desc = `Winner scaled${friendlyDetail ? ' — ' + friendlyDetail : ''}`; break;
+    case 'meta-push': desc = friendlyDetail || 'Ad live on Meta'; break;
+    case 'tiktok-push': desc = friendlyDetail || 'Ad live on TikTok'; break;
+    case 'google-ads-push': desc = friendlyDetail || 'Ad live on Google'; break;
+    case 'amazon-ads-push': desc = friendlyDetail || 'Ad live on Amazon'; break;
+    case 'reddit-create-ad': desc = friendlyDetail || 'Ad live on Reddit'; break;
+    case 'linkedin-push': desc = friendlyDetail || 'Ad live on LinkedIn'; break;
+    case 'dashboard': desc = friendlyDetail || 'Performance check'; break;
+    case 'report': desc = friendlyDetail || 'Report generated'; break;
+    default:
+      if (action && action.startsWith('spell-')) {
+        const spellName = humanizeSpellId(action);
+        const failed = prettyDetail.toLowerCase().includes('failed')
+          || (item.type === 'error');
+        if (prettyDetail && !prettyDetail.toLowerCase().endsWith('completed')
+                         && !prettyDetail.toLowerCase().endsWith('failed')) {
+          desc = failed ? `⚠ ${prettyDetail}` : `✓ ${prettyDetail}`;
+        } else {
+          desc = failed ? `⚠ ${spellName} failed` : `✓ ${spellName} completed`;
+        }
+      } else if (prettyDetail) {
+        desc = prettyDetail;
+      } else if (action) {
+        desc = action.replace(/-/g, ' ').replace(/\b\w/g, c => c.toUpperCase());
+      } else {
+        desc = 'Activity';
+      }
+  }
+
+  const time = item.ts ? new Date(item.ts).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' }) : '';
+  div.innerHTML = `
+    <span class="${dotClass}"></span>
+    <span class="activity-desc">${escapeHtml(desc)}</span>
+    <span class="activity-time">${time}</span>
+  `;
+
+  // Click the row to reveal the raw JSON entry. This is the "Unity player
+  // log" affordance — support asks "paste me the line", the user clicks,
+  // hits copy, done. No export required for a single entry.
+  div.addEventListener('click', (e) => {
+    // Ignore clicks that land on the copy button inside an expanded panel.
+    if (e.target.closest('.activity-raw-copy')) return;
+    const next = div.nextElementSibling;
+    if (next && next.classList.contains('activity-raw')) {
+      next.remove();
+      return;
+    }
+    const raw = document.createElement('div');
+    raw.className = 'activity-raw';
+    const pretty = JSON.stringify(item, null, 2);
+    raw.innerHTML = `
+      <button class="activity-raw-copy" title="Copy JSON">Copy</button>
+      <pre>${escapeHtml(pretty)}</pre>
+    `;
+    raw.querySelector('.activity-raw-copy').addEventListener('click', (ev) => {
+      ev.stopPropagation();
+      navigator.clipboard.writeText(formatActivityForCopy(item) + '\n' + pretty).catch(() => {});
+      const b = ev.currentTarget; const prev = b.textContent;
+      b.textContent = 'Copied'; setTimeout(() => (b.textContent = prev), 900);
+    });
+    div.after(raw);
+  });
+
+  return div;
 }
 
 // ── Archive Panel ──────────────────────────────────────────
