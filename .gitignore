@@ -73,6 +73,7 @@ Thumbs.db
 .merlin-subscription
 .merlin-wisdom.json
 .merlin-state.json
+.merlin-threads.json
 .merlin-briefing.json
 .merlin-license-token
 .merlin-referral-bonus

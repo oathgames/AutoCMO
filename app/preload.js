@@ -95,6 +95,11 @@ contextBridge.exposeInMainWorld('merlin', {
   getConnectedPlatforms: (brand) => ipcRenderer.invoke('get-connected-platforms', assertBrand(brand)),
   getBrands: () => ipcRenderer.invoke('get-brands'),
 
+  // Brand context threads — each brand has its own SDK session + bubble log.
+  // switchBrand aborts the current turn and resumes the target brand's thread.
+  switchBrand: (brand) => ipcRenderer.invoke('switch-brand', assertBrand(brand)),
+  getBrandThread: (brand) => ipcRenderer.invoke('get-brand-thread', assertBrand(brand)),
+
   // State persistence
   saveState: (data) => ipcRenderer.invoke('save-state', assertObj(data)),
   loadState: () => ipcRenderer.invoke('load-state'),
@@ -182,6 +187,10 @@ contextBridge.exposeInMainWorld('merlin', {
   onSdkMessage: (cb) => {
     const h = (_, msg) => cb(msg); ipcRenderer.on('sdk-message', h);
     return () => ipcRenderer.removeListener('sdk-message', h);
+  },
+  onBrandSwitched: (cb) => {
+    const h = (_, data) => cb(data); ipcRenderer.on('brand-switched', h);
+    return () => ipcRenderer.removeListener('brand-switched', h);
   },
   onApprovalRequest: (cb) => {
     const h = (_, data) => cb(data); ipcRenderer.on('approval-request', h);

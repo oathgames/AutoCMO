@@ -5,6 +5,7 @@ const os = require('os');
 const wsServer = require('./ws-server');
 const relayClient = require('./relay-client');
 const { generateQRDataUri } = require('./qr');
+const threads = require('./threads');
 
 // Register merlin:// as a privileged scheme BEFORE app ready. Without this,
 // <video src="merlin://..."> fails two ways:
@@ -886,6 +887,12 @@ let _suppressNextResponse = false; // Suppress SDK responses for internal action
 // when credentials are missing, cleared when the next session successfully drains
 // the queue or when the renderer explicitly abandons the pending auth.
 let _queueFrozenForAuth = false;
+
+// True while switch-brand is mid-flight. Prevents rapid dropdown mashing
+// from starting two sessions back-to-back (both would race on the
+// activeQuery singleton). Serializes switches without blocking message
+// sends from the renderer.
+let _switchInProgress = false;
 
 
 // Auto-expire pending approvals after 15 minutes
@@ -1801,7 +1808,7 @@ function inferBrandDomain() {
   } catch { return null; }
 }
 
-async function startSession() {
+async function startSession(brandOverride) {
   // Clear the auth-recovery flag at the top of every startSession. If we
   // were frozen for auth and we're now starting a new session, either the
   // user just completed login (in which case the queue should drain) or the
@@ -1826,10 +1833,16 @@ async function startSession() {
   const sdkModule = await importClaudeAgentSdk();
   const { query } = sdkModule;
 
-  // Determine the active brand — must match what the welcome message shows
+  // Determine the active brand — must match what the welcome message shows.
+  // brandOverride wins over persisted state so switch-brand IPC can atomically
+  // restart the session on the target brand without racing a state write.
   let activeBrand = '';
-  const savedState = readState();
-  if (savedState.activeBrand) activeBrand = savedState.activeBrand;
+  if (typeof brandOverride === 'string' && brandOverride) {
+    activeBrand = brandOverride;
+  } else {
+    const savedState = readState();
+    if (savedState.activeBrand) activeBrand = savedState.activeBrand;
+  }
   if (!activeBrand) {
     try {
       const brandsDir = path.join(appRoot, 'assets', 'brands');
@@ -1849,11 +1862,21 @@ async function startSession() {
     ? ` DOMAIN HINT: The user's email domain is "${inferredDomain}". When asking for their website, pre-fill the first AskUserQuestion option as: label: "${inferredDomain}", description: "Is this your brand? We'll scan it automatically". Add a second option: label: "Different website", description: "Enter a different URL". And a third: label: "Just exploring", description: "See what Merlin can do — no setup needed".`
     : '';
 
+  // If this brand has a prior SDK session, resume it — Claude picks up with
+  // full conversation memory of the prior turn. No preamble, no re-greet.
+  const resumeSessionId = activeBrand ? threads.getSessionId(appRoot, activeBrand) : null;
+
   async function* messageGenerator() {
-    const setupInstructions = activeBrand
-      ? `A brand already exists: "${activeBrand}". Do NOT ask for a website. Do NOT run setup. Just count the products in assets/brands/${activeBrand}/products/ and say "✦ ${activeBrand.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())} is ready — [X] products loaded. What would you like to create?"`
-      : `No brands exist yet. Use the AskUserQuestion tool to ask "What's your website?" with these options: (1) label: "Set up my brand", description: "Enter your website URL and we'll auto-detect your brand, products, and colors" (2) label: "Just exploring", description: "See what Merlin can do — no setup needed".${domainHint} When the user provides their website URL, start working IMMEDIATELY — scrape the site with WebFetch, extract brand colors, find products, identify competitors with WebSearch. Do ALL of this in parallel. Show results as you find them. If the user selects "Just exploring", give a 3-sentence pitch and ask what they'd like to try.`;
-    yield { type: 'user', message: { role: 'user', content: `Run /merlin — silent preflight. ${setupInstructions}` } };
+    // Only run the /merlin welcome preamble on a fresh session. On resume,
+    // Claude already knows the brand state — re-running setup would replay
+    // the "Ready, what would you like to create?" prompt over existing
+    // conversation history, which is confusing.
+    if (!resumeSessionId) {
+      const setupInstructions = activeBrand
+        ? `A brand already exists: "${activeBrand}". Do NOT ask for a website. Do NOT run setup. Just count the products in assets/brands/${activeBrand}/products/ and say "✦ ${activeBrand.replace(/[-_]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())} is ready — [X] products loaded. What would you like to create?"`
+        : `No brands exist yet. Use the AskUserQuestion tool to ask "What's your website?" with these options: (1) label: "Set up my brand", description: "Enter your website URL and we'll auto-detect your brand, products, and colors" (2) label: "Just exploring", description: "See what Merlin can do — no setup needed".${domainHint} When the user provides their website URL, start working IMMEDIATELY — scrape the site with WebFetch, extract brand colors, find products, identify competitors with WebSearch. Do ALL of this in parallel. Show results as you find them. If the user selects "Just exploring", give a 3-sentence pitch and ask what they'd like to try.`;
+      yield { type: 'user', message: { role: 'user', content: `Run /merlin — silent preflight. ${setupInstructions}` } };
+    }
     // Drain any messages queued before SDK was ready
     while (pendingMessageQueue.length > 0) {
       yield pendingMessageQueue.shift();
@@ -1967,18 +1990,28 @@ async function startSession() {
     'on the next line.',
   ].join('\n');
 
+  const queryOptions = {
+    cwd: appRoot,
+    permissionMode: 'acceptEdits',
+    includePartialMessages: true,
+    settingSources: ['project'],
+    canUseTool: handleToolApproval,
+    env: { ...sessionEnv, CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: '360000' },
+    mcpServers: mcpConfig,
+    appendSystemPrompt: VOICE_TAG_INSTRUCTION,
+  };
+  // Per-brand SDK session resume. When a brand has a prior sessionId, Claude
+  // picks up the prior conversation state (system prompt, memory, tool
+  // history) from ~/.claude/projects/... — no context leaks from other
+  // brands, because each brand uses a distinct session file.
+  if (resumeSessionId) {
+    queryOptions.resume = resumeSessionId;
+    console.log(`[threads] resuming session ${resumeSessionId.slice(0, 8)}… for brand "${activeBrand}"`);
+  }
+
   activeQuery = query({
     prompt: messageGenerator(),
-    options: {
-      cwd: appRoot,
-      permissionMode: 'acceptEdits',
-      includePartialMessages: true,
-      settingSources: ['project'],
-      canUseTool: handleToolApproval,
-      env: { ...sessionEnv, CLAUDE_CODE_STREAM_CLOSE_TIMEOUT: '360000' },
-      mcpServers: mcpConfig,
-      appendSystemPrompt: VOICE_TAG_INSTRUCTION,
-    },
+    options: queryOptions,
   });
 
   // Capture user email from Claude account (for telemetry + Stripe pre-fill + domain inference)
@@ -2055,6 +2088,32 @@ async function startSession() {
 
   try {
     for await (const msg of activeQuery) {
+      // Per-brand session-id capture. The SDK emits one init message per
+      // session; on a fresh session it's a brand-new UUID, on resume it
+      // echoes the resumed ID. Either way, pin it to the current brand so
+      // the next startSession(brand) can resume here.
+      if (activeBrand && msg && msg.type === 'system' && msg.subtype === 'init' && typeof msg.session_id === 'string') {
+        threads.setSessionId(appRoot, activeBrand, msg.session_id);
+      }
+      // Capture the final assistant text for the per-brand bubble log so the
+      // renderer can rehydrate the chat on brand switch. We use the 'result'
+      // message (subtype: 'success') which carries the completed response
+      // string — streaming 'assistant' frames come through in partials and
+      // would require reconstruction. Internal/silent turns are skipped.
+      if (
+        activeBrand
+        && msg && msg.type === 'result' && msg.subtype === 'success'
+        && typeof msg.result === 'string' && msg.result.length > 0
+        && !_suppressNextResponse
+      ) {
+        // Strip the leading <voice>speak|silent</voice> tag — UI metadata
+        // only, not part of the message content.
+        const stripped = msg.result.replace(/^\s*<voice>(?:speak|silent)<\/voice>\s*/i, '');
+        if (stripped.length > 0) {
+          threads.appendBubble(appRoot, activeBrand, 'claude', stripped);
+        }
+      }
+
       if (win && !win.isDestroyed()) {
         const serialized = structuredClone(msg);
         serialized._internal = _suppressNextResponse;
@@ -2146,6 +2205,25 @@ async function startSession() {
     console.error('[SDK session error]', errMsg);
     // Write to error log for production debugging (no DevTools in packaged builds)
     try { fs.appendFileSync(path.join(appRoot, '.merlin-errors.log'), `${new Date().toISOString()} SDK: ${errMsg}\n${err.stack || ''}\n`); } catch {}
+
+    // Failed-resume fallback. If we asked the SDK to resume a session UUID
+    // that no longer exists on disk (user cleared ~/.claude/projects, moved
+    // machines, SDK format change, etc.), don't leave the brand stuck. Clear
+    // the stale sessionId and restart — next send-message creates a fresh
+    // session and writes its UUID back via the init capture. Common symptom
+    // wording covered: "session not found", "no such session", "resume
+    // target", "cannot resume". Narrow match so we don't eat unrelated errors.
+    const isResumeFailure = resumeSessionId
+      && /session\s+(not\s+found|does\s+not\s+exist|missing)|no\s+such\s+session|resume\s+target|cannot\s+resume|invalid\s+session/i.test(errMsg);
+    if (isResumeFailure && activeBrand) {
+      console.warn(`[threads] resume failed for brand "${activeBrand}" (session ${resumeSessionId.slice(0, 8)}…); clearing and retrying fresh`);
+      try { threads.clearThread(appRoot, activeBrand); } catch {}
+      // Mark the pending queue as preserved so the upcoming fresh session
+      // drains whatever the user asked for.
+      setTimeout(() => { startSession(activeBrand).catch(() => {}); }, 50);
+      return; // skip the sdk-error broadcast — recovery is silent
+    }
+
     if (win && !win.isDestroyed()) {
       // Auth-related failures route through the unified requireAuth() entry
       // point, which auto-triggers login and replays the pending message on
@@ -2578,6 +2656,122 @@ ipcMain.handle('stop-generation', () => {
   return { success: true };
 });
 
+// Per-brand thread swap. Aborts any in-flight SDK turn, persists the new
+// active brand, and starts a fresh session resumed from the target brand's
+// SDK session UUID (if it exists). Returns the target brand's bubble log
+// so the renderer can rehydrate the chat synchronously before the session
+// fully reboots.
+//
+// Why this is explicit-only: conversation isolation is the whole point —
+// we never infer a switch from message content (e.g. user mentioning
+// another brand). Only the brand-select dropdown (or the equivalent
+// programmatic IPC from a UI chip) fires this handler.
+ipcMain.handle('switch-brand', async (_, targetBrand) => {
+  if (typeof targetBrand !== 'string' || targetBrand === '' || targetBrand === '__add__') {
+    return { success: false, error: 'invalid brand' };
+  }
+  // Basic charset guard — brand is a directory name under assets/brands/.
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/i.test(targetBrand)) {
+    return { success: false, error: 'invalid brand format' };
+  }
+  // Serialize concurrent switches. Rapid dropdown toggles must not spawn
+  // two parallel startSession() calls — the activeQuery singleton would
+  // race and one would be silently dropped.
+  if (_switchInProgress) {
+    return { success: false, error: 'switch already in progress — try again' };
+  }
+  _switchInProgress = true;
+  try {
+    // Confirm the brand folder actually exists before we swap. Switching to
+    // a ghost brand would leave the UI pointing at nothing.
+    try {
+      const brandDir = path.join(appRoot, 'assets', 'brands', targetBrand);
+      if (!fs.statSync(brandDir).isDirectory()) {
+        return { success: false, error: 'brand not found' };
+      }
+    } catch {
+      return { success: false, error: 'brand not found' };
+    }
+
+    const prevState = readState();
+    const prevBrand = prevState.activeBrand || '';
+    if (prevBrand === targetBrand && activeQuery) {
+      // No-op — already on this brand and session is healthy. Still return
+      // the thread so renderer can confirm state.
+      const thread = threads.getThread(appRoot, targetBrand);
+      return { success: true, brand: targetBrand, bubbles: thread.bubbles, sessionId: thread.sessionId };
+    }
+
+    // 1) Abort any in-flight SDK turn. The for-await loop unwinds and the
+    //    finally block resets activeQuery = null. We also clear the pending
+    //    queue so messages destined for the old brand don't bleed into the
+    //    new session.
+    if (resolveNextMessage) {
+      try { resolveNextMessage(null); } catch {}
+    }
+    pendingMessageQueue = [];
+    // Clear any orphaned approvals from the old session — the user will be
+    // asked again if the new brand's session needs them.
+    for (const [id, entry] of pendingApprovals) {
+      try { clearTimeout(entry.timer); entry.fn(false); } catch {}
+    }
+    pendingApprovals.clear();
+
+    // 2) Wait briefly for the SDK loop to unwind so the next startSession()
+    //    doesn't trip the `if (activeQuery)` guard. If it still hasn't
+    //    cleared after the grace period, we bail and let the next send-message
+    //    retry — better than leaving the UI half-swapped.
+    const deadline = Date.now() + 2000;
+    while (activeQuery && Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    if (activeQuery) {
+      return { success: false, error: 'previous session did not stop in time — try again' };
+    }
+
+    // 3) Persist the new active brand.
+    writeState({ activeBrand: targetBrand });
+    threads.touch(appRoot, targetBrand);
+
+    // 4) Read the target brand's bubble log BEFORE restarting — renderer uses
+    //    this to rehydrate the chat immediately.
+    const thread = threads.getThread(appRoot, targetBrand);
+
+    // 5) Start a new session, resumed from the target brand's sessionId (if any).
+    //    Do NOT await — session boot includes a subscription check + SDK import
+    //    that can take a second. The renderer already has `bubbles` and will
+    //    paint instantly; the SDK comes online in the background.
+    startSession(targetBrand).catch((e) => {
+      console.error('[switch-brand] startSession failed:', e && e.message);
+      if (win && !win.isDestroyed()) {
+        win.webContents.send('sdk-error', `Failed to start session for brand "${targetBrand}": ${e && e.message || 'unknown error'}`);
+      }
+    });
+
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('brand-switched', { brand: targetBrand, previousBrand: prevBrand });
+    }
+
+    return {
+      success: true,
+      brand: targetBrand,
+      previousBrand: prevBrand,
+      bubbles: thread.bubbles,
+      sessionId: thread.sessionId,
+    };
+  } finally {
+    _switchInProgress = false;
+  }
+});
+
+// Read-only fetch of a brand's bubble log. Renderer uses this on startup
+// (and optionally on re-render) to paint the chat from persisted history.
+ipcMain.handle('get-brand-thread', (_, brand) => {
+  if (typeof brand !== 'string' || !brand) return { bubbles: [], sessionId: null };
+  const thread = threads.getThread(appRoot, brand);
+  return { bubbles: thread.bubbles, sessionId: thread.sessionId, lastActiveAt: thread.lastActiveAt };
+});
+
 ipcMain.handle('get-account-info', async () => {
   try {
     if (!activeQuery) return null;
@@ -2873,6 +3067,15 @@ ipcMain.handle('send-message', (_, text, options = {}) => {
   }
   // Inject current active brand so Claude always knows which brand the user selected
   const content = injectActiveBrand(text);
+  // Log user bubble to the brand thread so the renderer can rehydrate on
+  // brand switch. Skip silent/internal messages — those are system
+  // plumbing (spell toggles, welcomes) and shouldn't appear in chat history.
+  if (!options.silent) {
+    try {
+      const activeBrand = readState().activeBrand || '';
+      if (activeBrand) threads.appendBubble(appRoot, activeBrand, 'user', text);
+    } catch (e) { console.warn('[threads] user bubble log failed:', e.message); }
+  }
   const msg = { type: 'user', message: { role: 'user', content } };
   if (resolveNextMessage) {
     resolveNextMessage(msg);
