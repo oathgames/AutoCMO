@@ -1175,19 +1175,30 @@ async function createWindow() {
 
     // ── Fact-binding Phase 12 rollout bridge ─────────────────────────
     // Runs the binary's session-prelude to mint/retrieve a per-session
-    // HKDF seed, then forwards {sessionId, vaultKey(hex), brand, toolsDir}
-    // into the renderer's initFactBinding(). Guarded by TWO switches:
+    // HKDF seed, then forwards {sessionId, vaultKeyHex, brand, toolsDir}
+    // into the renderer via the `fact-binding:init` IPC channel. Preload
+    // (app/preload.js) listens, converts hex → Buffer in Node context,
+    // and hands the Buffer to renderer.js's initFactBinding() through
+    // the `window.merlinFactBinding.onInit(cb)` bridge. Guarded by TWO
+    // switches (same as preload.js, kept in lockstep):
     //   (a) version.json featureFlags.factBinding === true  (production)
     //   (b) process.env.MERLIN_FACT_BINDING === '1'         (dev override)
-    // Either suffices to turn on. Both missing → the bridge is a no-op
-    // and renderer.js keeps factBindingEnabled at its default false.
+    // Either suffices to turn on. Both missing → bridge is a no-op and
+    // renderer.js keeps factBindingEnabled at its default false.
     //
-    // Why this is safe to leave in the shipped binary with the flag off:
-    // - zero new IPC traffic when factBinding is off (the spawn never runs)
-    // - zero filesystem writes (the key-file is created only on session-prelude)
-    // - zero new event handlers in renderer (initFactBinding is idempotent)
+    // REGRESSION GUARD (2026-04-18): NEVER interpolate vaultKeyHex into
+    // an executeJavaScript source string. The prior architecture did
+    // exactly that (`win.webContents.executeJavaScript('window.x=…'+hex+…)`)
+    // and the HMAC key landed in the renderer's JS global scope,
+    // readable from DevTools and any renderer-process memory read. The
+    // current design keeps the hex confined to:
+    //   main (Node) → ipcRenderer.send → preload (Node) → Buffer.from(hex)
+    // and the renderer only ever sees the Buffer. `window` after init
+    // contains no 64-char hex substring. `app/facts/preload-bridge.test.js`
+    // source-scans this file + preload.js to lock the invariant.
     //
-    // NEVER log vaultKey — it seeds the HMAC for every fact in the session.
+    // NEVER log vaultKey / vaultKeyHex — it seeds the HMAC for every
+    // fact in the session. Presence checks only (`!vaultKeyHex`).
     try {
       let factBindingOn = false;
       try {
@@ -1217,17 +1228,22 @@ async function createWindow() {
           if (!parsed || parsed.ok !== true) { console.warn('[fact-binding] session-prelude not ok'); return; }
           const { sessionId: sid, brand, vaultKeyHex } = parsed;
           if (!sid || !vaultKeyHex) return;
-          // Push into the renderer. We set the force-on window flag first
-          // so the module-level guard in renderer.js flips true when
-          // initFactBinding runs. `toolsDir` passes the path so the cache
-          // can find the JSONL file.
-          const js = `
-            window.__merlinFactBindingForceOn = true;
-            window.__merlinInitFactBinding && window.__merlinInitFactBinding(${JSON.stringify({
-              sessionId: sid, brand: brand || '', vaultKey: vaultKeyHex, toolsDir,
-            })});
-          `;
-          win.webContents.executeJavaScript(js).catch(() => {});
+          // Deliver to preload via IPC. webContents.send serialises the
+          // object over the native IPC channel — it does NOT land in any
+          // JS source string the renderer can read. Preload converts hex
+          // to Buffer in its Node context and passes the Buffer to the
+          // renderer callback (see preload.js `merlinFactBinding.onInit`).
+          // The renderer never sees vaultKeyHex.
+          try {
+            win.webContents.send('fact-binding:init', {
+              sessionId: sid,
+              brand: brand || '',
+              vaultKeyHex,
+              toolsDir,
+            });
+          } catch (sendErr) {
+            console.warn('[fact-binding] init send failed:', sendErr && sendErr.message);
+          }
         });
       }
     } catch (e) {

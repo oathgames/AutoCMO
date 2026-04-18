@@ -1,4 +1,47 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const fsNode = require('fs');
+const pathNode = require('path');
+
+// ── Fact-binding rollout gate (MUST run before renderer.js evaluates) ──
+//
+// `factBindingEnabled` in renderer.js is a `const` resolved at module-init
+// time (see the Phase 12 rollout comment there). It reads
+// `window.__merlinFactBindingForceOn === true` exactly once. Preload
+// scripts evaluate BEFORE the renderer <script src="renderer.js"> tag
+// runs, so this is the ONLY place we can set that flag early enough for
+// the const to capture true.
+//
+// Previously this flag-set lived in main.js inside a `ready-to-show`
+// handler that pushed `window.__merlinFactBindingForceOn = true` via
+// `win.webContents.executeJavaScript(...)`. That fires AFTER renderer.js
+// has already evaluated — meaning `factBindingEnabled` already captured
+// false, and every downstream helper short-circuited to a no-op. Real
+// users on v1.12.0 got fact-binding disabled despite shipping with
+// `version.json.featureFlags.factBinding: true`. Moving the decision
+// into preload fixes that timing bug AND lets us use the clean IPC
+// bridge below (see `merlinFactBinding.onInit`) instead of an
+// executeJavaScript source string that interpolates the HMAC key.
+//
+// REGRESSION GUARD (2026-04-18): do NOT move this read back into
+// main.js's `ready-to-show` handler — the flag must be set pre-renderer.
+// If you need the main-process copy of the decision (e.g. to gate the
+// session-prelude binary spawn), duplicate the read in main.js; both
+// sides must agree on the same version.json/env signals.
+try {
+  let factOn = false;
+  try {
+    const v = JSON.parse(fsNode.readFileSync(pathNode.resolve(__dirname, '..', 'version.json'), 'utf8'));
+    if (v && v.featureFlags && v.featureFlags.factBinding === true) factOn = true;
+  } catch { /* missing / malformed version.json — stay off */ }
+  if (process.env.MERLIN_FACT_BINDING === '1') factOn = true;
+  if (factOn) {
+    // exposeInMainWorld freezes the property on `window` — the renderer
+    // sees `window.__merlinFactBindingForceOn === true` synchronously
+    // before its own scripts run. A true primitive, no accessor that
+    // could leak additional state.
+    contextBridge.exposeInMainWorld('__merlinFactBindingForceOn', true);
+  }
+} catch { /* preload must never block window creation */ }
 
 // ── IPC Input Validation ──────────────────────────────────────
 // Defense-in-depth: validate types and lengths before forwarding
@@ -377,5 +420,60 @@ contextBridge.exposeInMainWorld('merlin', {
     const handler = (_event, payload) => callback(payload);
     ipcRenderer.on('voice-output-chunk', handler);
     return () => ipcRenderer.removeListener('voice-output-chunk', handler);
+  },
+});
+
+// ── Fact-binding init bridge ──────────────────────────────────
+//
+// Main sends `{ sessionId, vaultKeyHex, brand, toolsDir }` on the
+// `fact-binding:init` channel once the Go binary's session-prelude
+// action returns the per-session HMAC seed. This preload handler
+// converts the hex string to a Buffer IN NODE CONTEXT and hands the
+// Buffer to the renderer via the registered callback. The hex NEVER
+// crosses into the renderer's JS world:
+//   - no `executeJavaScript` source string containing the hex
+//   - no `window.<name> = hex` assignment
+//   - no IPC payload the renderer can read directly
+// DevTools snapshot of `window` contains no 64-char hex substring
+// after init; memory-dump analysis would find the Buffer bytes but
+// not a hex-encoded string representation.
+//
+// REGRESSION GUARD (2026-04-18): if you change this bridge, keep
+// three invariants intact:
+//   (1) hex → Buffer happens inside this preload handler (Node ctx),
+//   (2) the bridge delivers the Buffer via function-arg (structured
+//       clone → Uint8Array in renderer), never via
+//       exposeInMainWorld of a named property, and
+//   (3) no `.toString('hex')` or `.toString()` on the Buffer inside
+//       this file — that would reconstitute the hex mid-flight.
+// `app/facts/preload-bridge.test.js` source-scans this file + main.js
+// to lock all three.
+contextBridge.exposeInMainWorld('merlinFactBinding', {
+  onInit: (cb) => {
+    if (typeof cb !== 'function') throw new Error('merlinFactBinding.onInit cb must be a function');
+    const handler = (_e, payload) => {
+      try {
+        if (!payload || typeof payload !== 'object') return;
+        const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId : '';
+        const vaultKeyHex = typeof payload.vaultKeyHex === 'string' ? payload.vaultKeyHex : '';
+        const brand = typeof payload.brand === 'string' ? payload.brand : '';
+        const toolsDir = typeof payload.toolsDir === 'string' ? payload.toolsDir : '';
+        if (!sessionId) return;
+        // HKDF output for the HMAC seed is 32 bytes → 64 hex chars.
+        // Allow 32–128 hex chars for forward-compat (larger seed),
+        // reject anything outside that so a malformed main-side
+        // payload doesn't smuggle garbage into FactCache.
+        if (!/^[0-9a-f]{32,128}$/i.test(vaultKeyHex)) return;
+        const vaultKey = Buffer.from(vaultKeyHex, 'hex');
+        cb({ sessionId, vaultKey, brand, toolsDir });
+      } catch (err) {
+        // Swallow — fact-binding failing init must never surface a
+        // noisy error to the user. The renderer stays in its
+        // default-off state on error.
+        console.warn('[fact-binding preload] init handler failed:', err && err.message);
+      }
+    };
+    ipcRenderer.on('fact-binding:init', handler);
+    return () => ipcRenderer.removeListener('fact-binding:init', handler);
   },
 });

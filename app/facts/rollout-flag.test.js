@@ -66,12 +66,20 @@ test('Phase 12: window force-on beats missing env', () => {
   assert.equal(resolveFactBindingEnabled({ windowForceOn: true, globalEnv: undefined }), true);
 });
 
-test('Phase 12: version.json featureFlags block is present and default-off', () => {
+test('Phase 12: version.json featureFlags block is present and typed', () => {
+  // Note: this assertion used to demand `factBinding === false` as the
+  // pre-rollout safety default. Post-v1.12.0 the explicit rollout has
+  // shipped with `true`, so the test now locks the WEAKER invariant
+  // (flag is a boolean, block is structured right) and lets the
+  // shipped value vary between releases. The semantic gate lives in
+  // renderer.js's `factBindingEnabled` IIFE + preload's pre-renderer
+  // force-on setter — if those diverge from version.json, the routing
+  // tests and the preload-bridge.test.js scan catch it.
   const raw = fs.readFileSync(path.join(__dirname, '..', '..', 'version.json'), 'utf8');
   const v = JSON.parse(raw);
   assert.ok(v.featureFlags, 'version.json is missing featureFlags block');
-  assert.equal(v.featureFlags.factBinding, false,
-    'factBinding must default to false until explicit rollout');
+  assert.equal(typeof v.featureFlags.factBinding, 'boolean',
+    'factBinding must be a boolean (true post-v1.12.0 rollout, false pre-rollout)');
   assert.ok(typeof v.featureFlags._doc === 'string' && v.featureFlags._doc.length > 20,
     '_doc must be non-empty so the block survives future refactors');
 });
