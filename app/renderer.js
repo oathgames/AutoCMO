@@ -1090,6 +1090,31 @@ function humanizeUpdateError(raw) {
   return 'Update couldn\'t install. Try again in a moment.';
 }
 
+// REGRESSION GUARD (2026-04-19, Transcription-failed-modal incident):
+// transcription errors come back from main.js as classified codes
+// (transcribe:empty / :corrupt / :ffmpeg / :whisper / :missing-tools /
+// :too-large). The previous path piped raw ffmpeg stderr — including hex
+// addresses and a cryptic exit code like 3199971767 — straight into a
+// modal, violating the "every user-visible error passes through
+// friendlyError()" rule. This helper is the single user-facing mapping;
+// if you add a new error code in main.js, add a matching branch here.
+// Keep copy short, actionable, and free of technical jargon — it lands
+// in a modal right after the user tried to speak.
+function humanizeTranscriptionError(code, detail) {
+  const c = typeof code === 'string' ? code : '';
+  if (c === 'transcribe:empty') return 'I didn\'t catch any audio — hold the mic button a little longer and try again.';
+  if (c === 'transcribe:corrupt') return 'The recording got cut short. Try again — hold the mic until you\'re done speaking before releasing.';
+  if (c === 'transcribe:too-large') return 'That recording is too long. Try a shorter clip.';
+  if (c === 'transcribe:missing-tools') return detail || 'Voice input isn\'t installed. Reinstall Merlin to restore it.';
+  if (c === 'transcribe:ffmpeg' || c === 'transcribe:whisper') return 'Something went wrong transcribing that. Try again — if it keeps failing, restart Merlin.';
+  // Legacy / unclassified — strings from older main.js builds still land here.
+  const s = String(detail || code || '').trim();
+  if (!s) return 'Transcription failed. Try again.';
+  if (/ebml|invalid data|header parsing/i.test(s)) return 'The recording got cut short. Try again — hold the mic until you\'re done speaking before releasing.';
+  if (/ffmpeg exit|whisper exit/i.test(s)) return 'Something went wrong transcribing that. Try again — if it keeps failing, restart Merlin.';
+  return 'Transcription failed. Try again.';
+}
+
 // ── SDK Message Handling ────────────────────────────────────
 let firstMessage = true;
 let hasShownSparkleHint = false;
@@ -2056,20 +2081,54 @@ merlin.onRemoteUserMessage((text) => {
 });
 
 // ── Mobile QR ───────────────────────────────────────────────
+function paintQrPayload(img, url, note, payload) {
+  img.src = payload.qrDataUri;
+  url.textContent = payload.pwaUrl;
+  // Surface the fallback so a phone on cellular doesn't silently get a LAN
+  // URL that only works on the same WiFi.
+  if (payload.mode === 'lan') {
+    note.textContent = payload.relayError
+      ? `Roaming unavailable (${payload.relayError}) — same-WiFi fallback only.`
+      : 'Roaming unavailable — same-WiFi fallback only.';
+    note.classList.remove('hidden');
+  } else {
+    note.textContent = '';
+    note.classList.add('hidden');
+  }
+}
+
 document.getElementById('mobile-btn').addEventListener('click', async () => {
   const modal = document.getElementById('qr-modal');
   const img = document.getElementById('qr-image');
   const url = document.getElementById('qr-url');
-  // Open the modal first in a neutral state so a slow relay handshake doesn't
-  // make the button feel dead on click — silent no-op was the original
-  // complaint when the button existed but the handler was missing.
+  const note = document.getElementById('qr-mode-note');
+  // Main pre-warms the QR at app start, so the IPC almost always returns a
+  // cached payload in <5ms. Race that against a 60ms timer: if the cache is
+  // warm we paint *before* showing the modal (no broken-image flash); if
+  // it's cold we open the modal with a placeholder so the button still
+  // feels responsive while the relay handshake completes.
+  const ipc = merlin.getMobileQR();
+  const fast = await Promise.race([
+    ipc.then(p => ({ ok: true, payload: p }), e => ({ ok: false, err: e })),
+    new Promise(resolve => setTimeout(() => resolve(null), 60)),
+  ]);
+  if (fast && fast.ok) {
+    paintQrPayload(img, url, note, fast.payload);
+    modal.classList.remove('hidden');
+    return;
+  }
+  // Cold path — show neutral placeholder, then paint when IPC settles.
+  // Either the 60ms timer beat the IPC (fast === null) or the IPC settled
+  // with an error (fast.ok === false) and we surface it via catch.
   img.removeAttribute('src');
   url.textContent = 'Generating pairing QR…';
+  note.textContent = '';
+  note.classList.add('hidden');
   modal.classList.remove('hidden');
   try {
-    const { qrDataUri, pwaUrl } = await merlin.getMobileQR();
-    img.src = qrDataUri;
-    url.textContent = pwaUrl;
+    if (fast && !fast.ok) throw fast.err;
+    const payload = await ipc;
+    paintQrPayload(img, url, note, payload);
   } catch (err) {
     // Rule 6: raw IPC errors must pass through friendlyError before surfacing
     // to the user — `err.message` can carry Go stack traces or relay details
@@ -4662,9 +4721,13 @@ async function transcribeCurrent(isInterim) {
       else input.classList.remove('voice-interim');
       autoResize();
     } else if (result && result.error && !isInterim) {
+      // "empty" isn't really a failure — the user either didn't speak or
+      // clicked too quickly. Silently drop it; no modal. Any other code
+      // gets the humanized message.
+      if (result.error === 'transcribe:empty') return;
       showModal({
         title: 'Transcription failed',
-        body: result.error,
+        body: humanizeTranscriptionError(result.error, result.errorDetail),
         confirmLabel: 'OK',
       });
     }
@@ -4675,7 +4738,7 @@ async function transcribeCurrent(isInterim) {
       console.warn('transcribeAudio threw:', err);
       showModal({
         title: 'Transcription failed',
-        body: String(err && err.message ? err.message : err),
+        body: humanizeTranscriptionError('', err && err.message ? err.message : String(err)),
         confirmLabel: 'OK',
       });
     }
@@ -7238,7 +7301,28 @@ function createArchiveCard(item) {
         <span>${time}</span>
       </div>
       ${extraBadges ? `<div class="archive-card-meta" style="margin-top:2px;gap:4px">${extraBadges}</div>` : ''}
-    </div>`;
+    </div>
+    <button class="archive-card-delete" type="button" aria-label="Delete ${escapeHtml(title)}" data-tip="Delete" data-tip-pos="bottom">
+      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <polyline points="3 6 5 6 21 6"/>
+        <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/>
+        <path d="M10 11v6"/>
+        <path d="M14 11v6"/>
+        <path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/>
+      </svg>
+    </button>`;
+
+  const deleteBtn = card.querySelector('.archive-card-delete');
+  if (deleteBtn) {
+    deleteBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      requestArchiveCardDelete(card, item, title);
+    });
+    deleteBtn.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.stopPropagation(); }
+    });
+  }
 
   const activate = (e) => {
     // Pairing mode: if at least one swipe-card (competitor) is already selected,
@@ -7259,6 +7343,51 @@ function createArchiveCard(item) {
     }
   });
   return card;
+}
+
+// Resolve delete targets for an archive card using the same source-aware logic
+// as the right-click context menu (see REGRESSION GUARD in the contextmenu
+// handler): loose items delete their own file list, run items delete the run
+// folder. Never widens to the brand folder.
+function resolveArchiveDeleteTargets(card) {
+  const source = card?.dataset?.source || '';
+  if (source === 'loose' && card?.dataset?.files) {
+    try {
+      const parsed = JSON.parse(card.dataset.files);
+      if (Array.isArray(parsed)) {
+        const files = parsed.filter(p => typeof p === 'string' && p);
+        if (files.length) return files;
+      }
+    } catch {}
+  }
+  if (source === 'run' && card?.dataset?.folder) return [card.dataset.folder];
+  if (card?.dataset?.folder) return [card.dataset.folder];
+  return [];
+}
+
+async function requestArchiveCardDelete(card, item, title) {
+  const targets = resolveArchiveDeleteTargets(card);
+  if (targets.length === 0) { showCopyToast('Nothing to delete'); return; }
+  const isVideo = item?.type === 'video';
+  const label = isVideo ? 'video' : 'image';
+  const safeTitle = title || (isVideo ? 'Video Ad' : 'Ad Image');
+  showModal({
+    title: 'Delete this ' + label + '?',
+    body: '"' + safeTitle + '" will be permanently removed from disk. This cannot be undone.',
+    confirmLabel: 'Delete',
+    cancelLabel: 'Cancel',
+    onConfirm: async () => {
+      const target = targets.length > 1 ? targets : targets[0];
+      const result = await merlin.deleteFile(target);
+      if (result?.success) {
+        showCopyToast('Deleted');
+        card.style.opacity = '0';
+        setTimeout(() => card.remove(), 300);
+      } else {
+        showCopyToast('Delete failed');
+      }
+    }
+  });
 }
 
 // Lazy-load video <source>s inside an archive grid. Hydrates `data-lazy-src`

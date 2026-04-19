@@ -48,6 +48,10 @@ jobs:
         run: node app/sentence-splitter.test.js
       - name: update-runner terminal-visibility lockdown
         run: node app/update-runner.test.js
+      - name: tts-worker validation + ONNX backend matcher
+        run: node --test app/tts-worker.test.js
+      - name: transcription error humanizer
+        run: node --test app/transcribe-error.test.js
       # MCP reliability primitives — the refactor that lets Merlin scale
       # from a single-SKU brand to a 30k-product catalog without getting
       # a client banned. Every primitive + its plumb-through has a test.
