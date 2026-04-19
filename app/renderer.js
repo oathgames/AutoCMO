@@ -2092,9 +2092,23 @@ document.getElementById('mobile-btn').addEventListener('click', async () => {
   url.textContent = 'Generating pairing QR…';
   modal.classList.remove('hidden');
   try {
-    const { qrDataUri, pwaUrl } = await merlin.getMobileQR();
+    const { qrDataUri, pwaUrl, mode, relayError } = await merlin.getMobileQR();
     img.src = qrDataUri;
     url.textContent = pwaUrl;
+    // Surface the fallback so a phone on cellular doesn't silently get a LAN
+    // URL that only works on the same WiFi. Pre-fix users reported "I clicked
+    // connect and nothing happened" because the relay subdomain wasn't
+    // deployed and the renderer swallowed the mode swap.
+    const note = document.getElementById('qr-mode-note');
+    if (mode === 'lan') {
+      note.textContent = relayError
+        ? `Roaming unavailable (${relayError}) — same-WiFi fallback only.`
+        : 'Roaming unavailable — same-WiFi fallback only.';
+      note.classList.remove('hidden');
+    } else {
+      note.textContent = '';
+      note.classList.add('hidden');
+    }
   } catch (err) {
     // Rule 6: raw IPC errors must pass through friendlyError before surfacing
     // to the user — `err.message` can carry Go stack traces or relay details
