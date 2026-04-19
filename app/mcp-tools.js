@@ -21,6 +21,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { redactOutput } = require('./mcp-redact');
+const { extractArtifacts } = require('./artifact-parser');
 const envelope = require('./mcp-envelope');
 const errors = require('./mcp-errors');
 const { defineTool } = require('./mcp-define-tool');
@@ -267,7 +268,17 @@ async function runBinary(ctx, action, args, opts = {}) {
 
       // Redact BOTH stdout and stderr
       const sanitized = redactOutput(stdout || '', stderr || '');
-      resolve({ text: sanitized || 'Done.', error: err ? true : false });
+      // Extract artifact bundles emitted by the binary's sentinel block.
+      // `cleanText` substitutes each sentinel with a markdown gallery so
+      // Claude echoes the inline previews verbatim; `bundles` is the
+      // structured payload for the renderer to draw a gallery card. See
+      // app/artifact-parser.js for the contract (REGRESSION GUARD 2026-04-19).
+      const { cleanText, bundles } = extractArtifacts(sanitized);
+      resolve({
+        text: cleanText || 'Done.',
+        artifacts: bundles && bundles.length ? bundles : undefined,
+        error: err ? true : false,
+      });
     });
 
     if (ctx.activeChildProcesses) ctx.activeChildProcesses.add(child);
