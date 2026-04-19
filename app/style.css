@@ -416,6 +416,104 @@ a:hover{text-decoration:underline}
 .artifact{margin:8px 0;border-radius:8px;overflow:hidden}
 .artifact iframe{display:block}
 
+/* ── Merlin generated-artifact gallery ──────────────────── */
+/* Emitted by app/artifact-parser.js when the binary's sentinel block
+   wraps a generation pipeline result. Replaces the legacy "Image: D:/..."
+   stdout lines (REGRESSION GUARD 2026-04-19, inline-artifact-render). */
+.merlin-gallery{
+  margin:14px 0;
+  padding:14px;
+  background:var(--surface, #11141a);
+  border:1px solid var(--border, rgba(255,255,255,.08));
+  border-radius:14px;
+  overflow:hidden;
+}
+.merlin-gallery-header{
+  display:flex;
+  align-items:baseline;
+  justify-content:space-between;
+  gap:12px;
+  margin-bottom:12px;
+  flex-wrap:wrap;
+}
+.merlin-gallery-title{
+  font-size:13px;
+  font-weight:600;
+  color:var(--text, #e7e9ee);
+  letter-spacing:.01em;
+}
+.merlin-gallery-meta{
+  font-size:11px;
+  color:var(--text-dim, #8a91a0);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+.merlin-gallery-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fill, minmax(180px, 1fr));
+  gap:10px;
+}
+/* Single audio item: full width since waveforms benefit from it */
+.merlin-gallery[data-kind="audio"] .merlin-gallery-grid{
+  grid-template-columns:1fr;
+}
+/* Single video clip: cap at 480px so it doesn't dominate the chat */
+.merlin-gallery[data-kind="video"][data-count="1"] .merlin-gallery-grid{
+  grid-template-columns:minmax(0, 480px);
+}
+.merlin-artifact{
+  margin:0;
+  display:flex;
+  flex-direction:column;
+  background:var(--bg, #0b0d12);
+  border:1px solid var(--border, rgba(255,255,255,.06));
+  border-radius:10px;
+  overflow:hidden;
+  transition:transform .15s ease, border-color .15s ease;
+}
+.merlin-artifact:hover{
+  transform:translateY(-1px);
+  border-color:var(--accent, #7c5cff);
+}
+.merlin-artifact img,
+.merlin-artifact video{
+  display:block;
+  width:100%;
+  height:auto;
+  max-height:360px;
+  object-fit:cover;
+  background:#000;
+}
+.merlin-artifact audio{
+  display:block;
+  width:100%;
+  margin:8px 0;
+}
+.merlin-artifact figcaption{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:8px;
+  padding:8px 10px;
+  font-size:11px;
+  color:var(--text-dim, #8a91a0);
+  font-family:ui-monospace, SFMono-Regular, Menlo, monospace;
+  border-top:1px solid var(--border, rgba(255,255,255,.06));
+  white-space:nowrap;
+  overflow:hidden;
+  text-overflow:ellipsis;
+}
+.merlin-artifact-qa{
+  flex-shrink:0;
+  padding:1px 6px;
+  border-radius:4px;
+  background:#3a1a1a;
+  color:#ff6b6b;
+  font-weight:600;
+  font-size:10px;
+  letter-spacing:.04em;
+  cursor:help;
+}
+
 /* ── Option Chips (AskUserQuestion) ──────────────────────── */
 .question-text{
   font-size:13px;

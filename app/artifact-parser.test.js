@@ -1,0 +1,167 @@
+// Tests for artifact-parser.js — the bridge between Go binary stdout and
+// the renderer's inline artifact gallery. The parser is what made the
+// "I can't see them, can you render them here?" regression impossible:
+// every failure mode below is a real way the chat could lose previews.
+
+'use strict';
+
+const test = require('node:test');
+const assert = require('node:assert/strict');
+
+const {
+  SENTINEL_OPEN,
+  SENTINEL_CLOSE,
+  extractArtifacts,
+  renderGalleryMarkdown,
+  toMerlinUrl,
+} = require('./artifact-parser');
+
+function wrap(json) {
+  return `${SENTINEL_OPEN}\n${json}\n${SENTINEL_CLOSE}`;
+}
+
+test('toMerlinUrl encodes path segments and normalizes backslashes', () => {
+  assert.equal(toMerlinUrl('results/img/foo bar.png'), 'merlin://results/img/foo%20bar.png');
+  assert.equal(toMerlinUrl('D:\\autocmo-work\\results\\img\\001.png'), 'merlin://D%3A/autocmo-work/results/img/001.png');
+  assert.equal(toMerlinUrl('merlin://already/encoded.png'), 'merlin://already/encoded.png');
+  assert.equal(toMerlinUrl(''), '');
+  assert.equal(toMerlinUrl(null), '');
+});
+
+test('extractArtifacts returns no bundles when no sentinel is present', () => {
+  const stdout = 'Plain stdout with no sentinel block.';
+  const out = extractArtifacts(stdout);
+  assert.deepEqual(out.bundles, []);
+  assert.equal(out.cleanText, stdout);
+  assert.equal(out.galleryMarkdown, '');
+});
+
+test('extractArtifacts handles empty/null input safely', () => {
+  assert.deepEqual(extractArtifacts(''), { bundles: [], cleanText: '', galleryMarkdown: '' });
+  assert.deepEqual(extractArtifacts(null), { bundles: [], cleanText: '', galleryMarkdown: '' });
+  assert.deepEqual(extractArtifacts(undefined), { bundles: [], cleanText: '', galleryMarkdown: '' });
+});
+
+test('extractArtifacts strips a single image bundle and substitutes gallery HTML', () => {
+  const bundle = {
+    kind: 'image',
+    runDir: 'results/img_20260419_120000',
+    brand: 'madchill',
+    product: 'hoodie',
+    model: 'banana-pro-edit',
+    items: [
+      { path: 'results/img_20260419_120000/001/portrait.png', kind: 'image', label: '001 portrait', format: 'portrait' },
+      { path: 'results/img_20260419_120000/001/square.png',   kind: 'image', label: '001 square',   format: 'square'   },
+    ],
+    summary: '2 images generated',
+  };
+  const stdout = `Working...\n${wrap(JSON.stringify(bundle))}\nDone.`;
+  const { bundles, cleanText, galleryMarkdown } = extractArtifacts(stdout);
+
+  assert.equal(bundles.length, 1);
+  assert.equal(bundles[0].items.length, 2);
+  assert.equal(bundles[0].model, 'banana-pro-edit');
+
+  // Sentinel is gone, gallery is in
+  assert.ok(!cleanText.includes(SENTINEL_OPEN), 'open sentinel must be stripped');
+  assert.ok(!cleanText.includes(SENTINEL_CLOSE), 'close sentinel must be stripped');
+  assert.ok(cleanText.includes('merlin-gallery'), 'gallery wrapper must be present');
+  assert.ok(cleanText.includes('2 images generated'), 'headline must be present');
+  assert.ok(cleanText.includes('banana-pro-edit'), 'model meta must be present');
+
+  // Each item became a <figure> with an <img>
+  assert.match(cleanText, /<figure class="merlin-artifact merlin-artifact-image">/);
+  assert.equal((cleanText.match(/<figure /g) || []).length, 2);
+  assert.match(cleanText, /<img src="merlin:\/\/results\/img_20260419_120000\/001\/portrait\.png"/);
+
+  // Surrounding text preserved
+  assert.ok(cleanText.startsWith('Working...'));
+  assert.ok(cleanText.trim().endsWith('Done.'));
+
+  // Independent gallery markdown payload
+  assert.ok(galleryMarkdown.includes('merlin-gallery'));
+});
+
+test('extractArtifacts handles multiple sentinel blocks (chained pipelines)', () => {
+  const a = { kind: 'image', items: [{ path: 'a.png', kind: 'image', label: 'A' }] };
+  const b = { kind: 'audio', items: [{ path: 'b.mp3', kind: 'audio', label: 'B voice' }] };
+  const stdout = [
+    'first pipeline',
+    wrap(JSON.stringify(a)),
+    'between',
+    wrap(JSON.stringify(b)),
+    'last',
+  ].join('\n');
+
+  const out = extractArtifacts(stdout);
+  assert.equal(out.bundles.length, 2);
+  assert.equal((out.cleanText.match(/<div class="merlin-gallery"/g) || []).length, 2);
+  assert.match(out.cleanText, /<audio src="merlin:\/\/b\.mp3"/);
+  assert.match(out.cleanText, /<img src="merlin:\/\/a\.png"/);
+});
+
+test('extractArtifacts on malformed JSON leaves the original block instead of vanishing', () => {
+  const stdout = `before\n${wrap('{ this is not json }')}\nafter`;
+  const out = extractArtifacts(stdout);
+  // No bundle parsed, no gallery emitted — but the original JSON blob is
+  // preserved in cleanText so the user at least sees raw output rather
+  // than silent loss.
+  assert.equal(out.bundles.length, 0);
+  assert.ok(out.cleanText.includes('{ this is not json }'),
+    'malformed payload must be preserved so we never silently swallow output');
+  assert.ok(!out.cleanText.includes('merlin-gallery'));
+});
+
+test('renderGalleryMarkdown renders video items with <video> tags', () => {
+  const md = renderGalleryMarkdown({
+    kind: 'video',
+    model: 'seedance-2',
+    items: [
+      { path: 'results/ad/master.mp4', kind: 'video', label: 'master cut' },
+      { path: 'results/ad/feed_4x5.mp4', kind: 'video', label: '4:5 feed' },
+    ],
+  });
+  assert.match(md, /<video src="merlin:\/\/results\/ad\/master\.mp4" controls/);
+  assert.match(md, /data-kind="video"/);
+  assert.match(md, /<figcaption>master cut<\/figcaption>/);
+});
+
+test('renderGalleryMarkdown surfaces QA failure badges for flagged items', () => {
+  const md = renderGalleryMarkdown({
+    kind: 'image',
+    items: [
+      { path: 'a.png', kind: 'image', label: 'pass', qa: { pass: true, score: 0.9 } },
+      { path: 'b.png', kind: 'image', label: 'fail', qa: { pass: false, reason: 'ref-mismatch' } },
+    ],
+  });
+  // Only the failing item gets the badge, with the reason in the title attr.
+  assert.equal((md.match(/merlin-artifact-qa/g) || []).length, 1);
+  assert.match(md, /title="ref-mismatch"/);
+});
+
+test('renderGalleryMarkdown returns empty string when bundle has no items', () => {
+  assert.equal(renderGalleryMarkdown(null), '');
+  assert.equal(renderGalleryMarkdown({ kind: 'image' }), '');
+  assert.equal(renderGalleryMarkdown({ kind: 'image', items: [] }), '');
+});
+
+test('renderGalleryMarkdown escapes HTML in labels and metadata', () => {
+  const md = renderGalleryMarkdown({
+    kind: 'image',
+    brand: 'evil & co <script>',
+    items: [{ path: 'a.png', kind: 'image', label: '"><img src=x>' }],
+  });
+  // Raw <script> / unescaped quotes must NOT survive into the gallery.
+  assert.ok(!md.includes('<script>'), 'brand HTML must be escaped');
+  assert.ok(!md.includes('"><img src=x>'), 'label HTML must be escaped');
+  assert.match(md, /evil &amp; co/);
+});
+
+test('extractArtifacts singular grammar for one image', () => {
+  const out = extractArtifacts(wrap(JSON.stringify({
+    kind: 'image',
+    items: [{ path: 'one.png', kind: 'image', label: 'only' }],
+  })));
+  assert.match(out.cleanText, /1 image generated/);
+  assert.ok(!out.cleanText.includes('1 images'), 'must use singular');
+});
