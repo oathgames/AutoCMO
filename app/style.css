@@ -2089,6 +2089,16 @@ body.platform-mac .titlebar-drag{
   word-break:break-all;
   line-height:1.4;
 }
+.qr-mode-note{
+  margin-top:10px;
+  padding:8px 12px;
+  font-size:11px;
+  line-height:1.4;
+  color:var(--warning, #b58105);
+  background:var(--warning-bg, rgba(255,193,7,0.08));
+  border:1px solid var(--warning-border, rgba(255,193,7,0.25));
+  border-radius:8px;
+}
 
 /* ── Inline Modal (replaces native prompt/alert) ─────────── */
 /* The modal shares the .overlay class with full-screen overlays like
