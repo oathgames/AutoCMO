@@ -2071,8 +2071,10 @@ document.getElementById('mobile-btn').addEventListener('click', async () => {
     img.src = qrDataUri;
     url.textContent = pwaUrl;
   } catch (err) {
-    const raw = String(err && err.message || err);
-    url.textContent = 'Could not generate pairing QR: ' + raw;
+    // Rule 6: raw IPC errors must pass through friendlyError before surfacing
+    // to the user — `err.message` can carry Go stack traces or relay details
+    // we don't want leaking into the QR modal.
+    url.textContent = friendlyError(String(err && err.message || err), 'Mobile');
   }
 });
 
