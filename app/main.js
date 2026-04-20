@@ -8,6 +8,7 @@ const { generateQRDataUri } = require('./qr');
 const threads = require('./threads');
 const { createInitBarrier } = require('./async-barrier');
 const { verifyChecksumsSignature } = require('./update-verifier');
+const { cleanWhisperTranscript } = require('./whisper-transcript-clean');
 
 // Register merlin:// as a privileged scheme BEFORE app ready. Without this,
 // <video src="merlin://..."> fails two ways:
@@ -3539,14 +3540,18 @@ async function transcribeAudioImpl(audioBytes) {
       w.on('error', (err) => reject({ code: 'transcribe:whisper', detail: String(err && err.message ? err.message : err) }));
     });
 
-    // whisper-cli sometimes prefixes lines with "[BLANK_AUDIO]" or logs
-    const cleaned = transcript
-      .split('\n')
-      .map(l => l.trim())
-      .filter(l => l && !l.startsWith('[') && !l.startsWith('whisper_'))
-      .join(' ')
-      .trim();
-
+    // whisper-cli sometimes prefixes lines with "[BLANK_AUDIO]" or logs,
+    // AND ggml-small.en-q5_1 (plus tiny.en) hallucinates subtitle-watermark
+    // lines like "Subs by www.zeoranger.co.uk" / "Thanks for watching!"
+    // when the audio is silence or low-SNR. Both classes of noise are
+    // stripped by `cleanWhisperTranscript` — see app/whisper-transcript-clean.js
+    // for the full rationale. If the sanitizer leaves an empty string,
+    // surface it as `transcribe:empty` so the renderer coaches the retry
+    // instead of silently injecting the watermark into chat.
+    const cleaned = cleanWhisperTranscript(transcript);
+    if (!cleaned) {
+      return { error: 'transcribe:empty', errorDetail: 'No speech detected (only whisper diagnostics or subtitle-watermark hallucination)' };
+    }
     return { transcript: cleaned };
   } catch (err) {
     if (err && typeof err.code === 'string' && err.code.startsWith('transcribe:')) {
