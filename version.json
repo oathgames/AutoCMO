@@ -52,6 +52,7 @@
     "app/spellbook.js",
     "app/threads.js",
     "app/tts-worker.js",
+    "app/update-verifier.js",
     "app/voice-activity-detector.js",
     "app/ws-server.js",
     "app/facts/chart-renderer.js",
