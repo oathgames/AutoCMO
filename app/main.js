@@ -1327,9 +1327,34 @@ async function createWindow() {
   const mobileHandlers = {
     onSendMessage: (text) => {
       if (typeof text !== 'string' || text.length > 50000) return; // validate input
+      // REGRESSION GUARD (2026-04-20, pwa-message-queue): PWA-origin messages
+      // must share the same queue + session-start fallback as the desktop IPC
+      // path (ipcMain.handle('send-message')). Before this guard, a phone
+      // message sent while resolveNextMessage was null (no active SDK turn
+      // awaiting input — cold start, after a result event, or after a crash)
+      // was silently dropped: the phone showed its own user bubble locally,
+      // but Claude never received it and no reply ever came back. Both mobile
+      // transports (LAN ws-server.js and relay relay-client.js) route through
+      // this handler, so the fix covers both. Log to the brand thread so the
+      // bubble rehydrates on brand switch, queue if no awaiter, start a
+      // session if none is running.
       const content = injectActiveBrand(text);
+      try {
+        const activeBrand = readState().activeBrand || '';
+        if (activeBrand) threads.appendBubble(appRoot, activeBrand, 'user', text);
+      } catch (e) { console.warn('[threads] remote user bubble log failed:', e.message); }
+      const msg = { type: 'user', message: { role: 'user', content } };
       if (resolveNextMessage) {
-        resolveNextMessage({ type: 'user', message: { role: 'user', content } });
+        resolveNextMessage(msg);
+      } else {
+        if (_queueFrozenForAuth) {
+          pendingMessageQueue = [];
+          _queueFrozenForAuth = false;
+        }
+        if (pendingMessageQueue.length < 50) {
+          pendingMessageQueue.push(msg);
+          if (!activeQuery) startSession();
+        }
       }
       if (win && !win.isDestroyed()) {
         win.webContents.send('remote-user-message', text);
