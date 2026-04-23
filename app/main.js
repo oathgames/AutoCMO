@@ -155,24 +155,111 @@ function installApplicationMenu() {
   }
 })();
 
-// Report crashes to Wisdom API for structured error monitoring
-process.on('uncaughtException', (err) => {
-  console.error('[CRASH]', err);
+// §6.4 / §6.5 — Crash telemetry + auto-restart with loop cap.
+//
+// Strategy: every hard error (uncaughtException OR renderer crash) fires
+// a best-effort wisdom ping, then relaunches AT MOST 3 times in a 10-
+// minute window. Past the cap the process exits without relaunch so a
+// deterministic crash (bad config, corrupt state) doesn't pin the CPU
+// in a spin loop that's worse UX than a single "Merlin crashed" dialog.
+//
+// The cap lives on disk because every relaunch is a fresh process and
+// in-memory counters reset. Stored under StateDir as .merlin-relaunch
+// (a small JSON {windowStartMs, count}). Lives next to merlin-config
+// so it's covered by the hook blocklist.
+//
+// For unhandledRejection: previously console-log only. Now forwarded to
+// the wisdom ping channel as `e: 'unhandled_rejection'`. This is NOT a
+// relaunch trigger — rejected promises rarely indicate a process-wide
+// fault and relaunching on every one would trigger the 3/10 cap on an
+// install with any chatty async library.
+
+const RELAUNCH_STATE_FILE = '.merlin-relaunch';
+const RELAUNCH_CAP = 3;
+const RELAUNCH_WINDOW_MS = 10 * 60 * 1000;
+
+function _relaunchStatePath() {
+  try { return stateFile(RELAUNCH_STATE_FILE); } catch { return null; }
+}
+function _readRelaunchState() {
+  const p = _relaunchStatePath();
+  if (!p) return { windowStartMs: 0, count: 0 };
+  try {
+    const raw = fs.readFileSync(p, 'utf8');
+    const parsed = JSON.parse(raw);
+    if (parsed && typeof parsed === 'object') {
+      return {
+        windowStartMs: Number(parsed.windowStartMs) || 0,
+        count: Number(parsed.count) || 0,
+      };
+    }
+  } catch {}
+  return { windowStartMs: 0, count: 0 };
+}
+function _writeRelaunchState(state) {
+  const p = _relaunchStatePath();
+  if (!p) return;
+  try {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(state), { mode: 0o600 });
+  } catch {}
+}
+function _tryRelaunchWithCap() {
+  const now = Date.now();
+  const state = _readRelaunchState();
+  // Window-reset: if the tracked window is stale, the crash is NOT part
+  // of a burst — fresh budget.
+  if (now - state.windowStartMs > RELAUNCH_WINDOW_MS) {
+    state.windowStartMs = now;
+    state.count = 0;
+  }
+  state.count += 1;
+  _writeRelaunchState(state);
+  if (state.count > RELAUNCH_CAP) {
+    console.error(`[CRASH] relaunch cap hit (${state.count}/${RELAUNCH_CAP} in ${RELAUNCH_WINDOW_MS / 60000}min) — exiting without relaunch`);
+    try { app.exit(1); } catch { process.exit(1); }
+    return;
+  }
+  console.error(`[CRASH] relaunching (${state.count}/${RELAUNCH_CAP} in window)`);
+  try { app.relaunch(); } catch {}
+  try { app.exit(1); } catch { process.exit(1); }
+}
+
+function _pingWisdomCrash(kind, err) {
   try {
     const https = require('https');
+    const msg = err && err.message ? String(err.message) : String(err || '');
+    const stack = err && err.stack ? String(err.stack) : '';
     const payload = JSON.stringify({
       id: '', v: require('../package.json').version, p: process.platform,
-      e: 'crash', error: err.message, stack: (err.stack || '').slice(0, 500),
+      e: kind, error: msg.slice(0, 500), stack: stack.slice(0, 500),
     });
     const req = https.request('https://api.merlingotme.com/api/ping', {
       method: 'POST',
+      timeout: 3000,
       headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) },
     });
+    req.on('error', () => {}); // best-effort — never let the ping throw
     req.write(payload);
     req.end();
   } catch (e) { console.error('[ping]', e.message); }
+}
+
+process.on('uncaughtException', (err) => {
+  console.error('[CRASH]', err);
+  _pingWisdomCrash('crash', err);
+  _tryRelaunchWithCap();
 });
-process.on('unhandledRejection', (reason) => { console.error('[UNHANDLED]', reason); });
+
+// §6.5 — unhandled promise rejections were console-only. Forward to the
+// wisdom crash channel as 'unhandled_rejection'. We do NOT relaunch on
+// these — a stray unhandled rejection rarely indicates process-wide
+// damage and blind relaunches would saturate the cap on installs with
+// any chatty async library.
+process.on('unhandledRejection', (reason) => {
+  console.error('[UNHANDLED]', reason);
+  _pingWisdomCrash('unhandled_rejection', reason instanceof Error ? reason : new Error(String(reason)));
+});
 
 // App install location (where Electron binary + asar + extraResources live)
 // extraResources go to: Mac = Contents/Resources/, Windows = resources/
@@ -1275,6 +1362,43 @@ async function createWindow() {
   // §2.7: flush any merlin:// deep link that arrived before the window loaded.
   win.webContents.on('did-finish-load', () => {
     flushPendingDeepLink();
+  });
+
+  // §6.2 — Handle a dead renderer. Before this lived here, a renderer
+  // crash (OOM from a runaway marked+DOMPurify reparse, WebGL driver
+  // panic, GPU process kill) left the main process alive with a blank
+  // window and no way back — users had to force-quit. The Electron
+  // event fires for every renderer fault: reason ∈ { 'crashed',
+  // 'killed', 'oom', 'launch-failed', 'integrity-failure' }, all of
+  // which warrant a reload banner + a wisdom ping so we know about it.
+  //
+  // Reload strategy: webContents.reload() if the window is still
+  // visible (user still has the app focused — single refresh, minimal
+  // surprise). If the window is hidden / blurred, let it be — a
+  // next-launch reload is less disruptive than grabbing focus to show
+  // a banner.
+  win.webContents.on('render-process-gone', (_event, details) => {
+    const reason = (details && details.reason) || 'unknown';
+    const exitCode = (details && details.exitCode) || 0;
+    console.error(`[render-crash] reason=${reason} exitCode=${exitCode}`);
+    _pingWisdomCrash('render_crash', new Error(`render-process-gone: ${reason} (exit ${exitCode})`));
+    // Don't fight Electron's default behaviour for launch-failed —
+    // that's a pre-ready state where reload() would throw.
+    if (reason === 'launch-failed') return;
+    try {
+      if (!win.isDestroyed()) {
+        // Show a reload banner via the renderer if it survives the
+        // reload — the renderer's main.js hook listens for this
+        // channel to surface a toast: "Merlin reloaded after a
+        // crash — your last message is in the input box."
+        win.webContents.once('did-finish-load', () => {
+          try { win.webContents.send('post-crash-reload', { reason, exitCode }); } catch {}
+        });
+        win.webContents.reload();
+      }
+    } catch (e) {
+      console.error('[render-crash] reload failed:', e.message);
+    }
   });
 
   // Open external links in OS default browser (opens Discord app if installed)
