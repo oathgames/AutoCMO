@@ -182,41 +182,226 @@ const appInstall = app.isPackaged
     : path.join(path.dirname(app.getPath('exe')), 'resources'))
   : path.join(__dirname, '..');
 
-// Workspace location (where brands, config, results live).
-// macOS: ~/Library/Application Support/Merlin — avoids iCloud Documents sync which
-// causes conflicts with binaries, vault files, and temp+rename state writes.
-// Windows: Documents/Merlin — user-accessible, no sync issues.
-const appRoot = app.isPackaged
-  ? (process.platform === 'darwin'
-    ? path.join(app.getPath('userData')) // ~/Library/Application Support/Merlin
-    : path.join(app.getPath('documents'), 'Merlin'))
-  : path.join(__dirname, '..');
-// Ensure workspace exists early — the SDK probe uses it as cwd and fails
+// Workspace layout (RSI §1.3 — Cluster-B contract, 2026-04-23):
+//   ContentDir  — user-visible files: brands/, assets/, results/, activity.jsonl.
+//   StateDir    — hot state, FLAT layout: merlin-config.json, .merlin-vault*,
+//                 .merlin-ratelimit*, .merlin-audit*, .merlin-tokens*,
+//                 .merlin-config-tmp-*. NO .claude/tools/ nesting for new installs.
+//
+// Per-OS defaults:
+//   Windows: ContentDir = %USERPROFILE%\Merlin,  StateDir = %APPDATA%\Merlin
+//   macOS:   ContentDir = ~/Merlin,              StateDir = ~/Library/Application Support/Merlin
+//   Linux:   ContentDir = ~/Merlin,              StateDir = $XDG_CONFIG_HOME/Merlin (or ~/.config/Merlin)
+//   Dev:     ContentDir = StateDir = <repo root>  (unchanged from legacy).
+//
+// StateDir resolution order (per Cluster-B contract):
+//   (1) process.env.MERLIN_STATE_DIR   (primary, wins over pointer file)
+//   (2) <ContentDir>/MERLIN_STATE_DIR.txt contents (UTF-8, absolute path, no trailing NL required)
+//   (3) legacy <ContentDir>/.claude/tools/  (back-compat for installs that predate this PR)
+//   (4) default per-OS StateDir
+//
+// `appRoot` remains an alias for ContentDir — existing call sites that read
+// brands/assets/results/activity.jsonl stay correct. New code that touches
+// hot state must use `stateDir` or the `stateFile(name)` helper.
+function defaultContentDir() {
+  if (!app.isPackaged) return path.join(__dirname, '..');
+  // Windows: user-visible %USERPROFILE%\Merlin. macOS + Linux: ~/Merlin.
+  return path.join(os.homedir(), 'Merlin');
+}
+function defaultStateDir() {
+  if (!app.isPackaged) return path.join(__dirname, '..');
+  if (process.platform === 'win32') {
+    // APPDATA (Roaming) — NOT LOCALAPPDATA. Matches Cluster-B's
+    // determineWorkspacePaths() exactly; APPDATA roams with the user profile.
+    const appData = process.env.APPDATA || path.join(os.homedir(), 'AppData', 'Roaming');
+    return path.join(appData, 'Merlin');
+  }
+  if (process.platform === 'darwin') {
+    return path.join(app.getPath('userData')); // ~/Library/Application Support/Merlin
+  }
+  // Linux: prefer XDG_CONFIG_HOME, then ~/.config/Merlin.
+  const xdg = process.env.XDG_CONFIG_HOME;
+  if (xdg && path.isAbsolute(xdg)) return path.join(xdg, 'Merlin');
+  return path.join(os.homedir(), '.config', 'Merlin');
+}
+function resolveStateDir(contentDir) {
+  // (1) Env var wins.
+  const envVal = process.env.MERLIN_STATE_DIR;
+  if (envVal && envVal.trim()) {
+    const v = envVal.trim();
+    try {
+      if (path.isAbsolute(v)) { fs.mkdirSync(v, { recursive: true }); return v; }
+    } catch {}
+  }
+  // (2) Pointer file in ContentDir.
+  try {
+    const ptrPath = path.join(contentDir, 'MERLIN_STATE_DIR.txt');
+    if (fs.existsSync(ptrPath)) {
+      const v = fs.readFileSync(ptrPath, 'utf8').trim();
+      if (v && path.isAbsolute(v)) {
+        try { fs.mkdirSync(v, { recursive: true }); } catch {}
+        return v;
+      }
+    }
+  } catch {}
+  // (3) Legacy nested path (only when it actually holds state).
+  try {
+    const legacy = path.join(contentDir, '.claude', 'tools');
+    if (fs.existsSync(path.join(legacy, 'merlin-config.json'))) {
+      return legacy;
+    }
+  } catch {}
+  // (4) Default per-OS.
+  const def = defaultStateDir();
+  try { fs.mkdirSync(def, { recursive: true }); } catch {}
+  return def;
+}
+
+const appRoot = defaultContentDir();
+// Ensure ContentDir exists early — the SDK probe uses it as cwd and fails
 // with ENOENT if it doesn't exist yet (race with bootstrapWorkspace on first launch).
 try { fs.mkdirSync(appRoot, { recursive: true }); } catch {}
 
-// macOS migration: move workspace from ~/Documents/Merlin (iCloud-synced) to
-// ~/Library/Application Support/Merlin (not synced). One-time, idempotent.
-if (app.isPackaged && process.platform === 'darwin') {
-  const oldRoot = path.join(app.getPath('documents'), 'Merlin');
-  if (oldRoot !== appRoot && fs.existsSync(oldRoot) && fs.existsSync(path.join(oldRoot, '.claude'))) {
-    try {
-      // Only migrate if new location is empty (prevent overwriting existing data)
-      const newHasData = fs.existsSync(path.join(appRoot, '.claude'));
-      if (!newHasData) {
-        const { execSync } = require('child_process');
-        const { execFileSync } = require('child_process');
-        execFileSync('cp', ['-Rn', oldRoot + '/', appRoot + '/'], { timeout: 30000 });
-        // Leave a breadcrumb so user knows where their data went
-        fs.writeFileSync(path.join(oldRoot, 'MOVED.txt'),
-          `Your Merlin workspace moved to:\n${appRoot}\n\nThis avoids iCloud sync conflicts.\nYou can safely delete this folder.\n`);
-        console.log(`[migration] Workspace migrated from ${oldRoot} to ${appRoot}`);
-      }
-    } catch (e) {
-      console.error('[migration] macOS workspace move failed:', e.message);
-    }
+const stateDir = resolveStateDir(appRoot);
+try { fs.mkdirSync(stateDir, { recursive: true }); } catch {}
+
+// Write the pointer file once we've resolved StateDir — so subsequent launches,
+// Go binary calls, and sibling tools (bootstrapper, scheduled tasks) converge on
+// the same path without needing the env var. Idempotent: skip if already correct.
+function writeStateDirPointer() {
+  if (!app.isPackaged) return;
+  try {
+    const ptrPath = path.join(appRoot, 'MERLIN_STATE_DIR.txt');
+    let existing = null;
+    try { existing = fs.readFileSync(ptrPath, 'utf8').trim(); } catch {}
+    if (existing === stateDir) return;
+    fs.writeFileSync(ptrPath, stateDir, 'utf8');
+  } catch (e) {
+    console.warn('[workspace] pointer write failed:', e.message);
   }
 }
+writeStateDirPointer();
+
+// Helpers for FLAT StateDir file paths. Use these for NEW state file writes.
+// Existing call sites that use path.join(appRoot, '.claude', 'tools', name)
+// continue to work when a legacy install's StateDir IS that nested directory;
+// Cluster-B's bootstrapper migration flattens new installs into StateDir.
+function stateFile(name) { return path.join(stateDir, name); }
+
+// Workspace migration (RSI §1.3 — app side).
+// Cluster-B's bootstrapper handles migration at install time, BUT users who
+// launch Merlin after a manual extract, dev tree, or upgrade-without-bootstrapper
+// hop need the same treatment from the Electron side. Idempotent: skip any file
+// that already exists at the destination.
+//
+// Historical: macOS migration from ~/Documents/Merlin → ~/Library/Application Support/Merlin
+// shipped in v0.9.x. This version generalizes it to also handle
+//   (a) Windows Documents/Merlin  →  %USERPROFILE%\Merlin + %APPDATA%\Merlin split
+//   (b) macOS Library/App Support/Merlin (monolithic)  →  ~/Merlin + Library split
+//   (c) Any legacy <ContentDir>/.claude/tools/ contents  →  FLAT StateDir
+const STATE_FILE_PATTERNS = [
+  /^merlin-config\.json$/i,
+  /^\.merlin-config-[a-z0-9_-]+\.json$/i,
+  /^\.merlin-config-tmp-[a-z0-9_-]+\.json$/i,
+  /^\.merlin-tokens/i,
+  /^\.merlin-vault/i,
+  /^\.merlin-ratelimit/i,
+  /^\.merlin-audit/i,
+];
+function isStateFileName(name) {
+  return STATE_FILE_PATTERNS.some((re) => re.test(name));
+}
+function logMigration(line) {
+  try {
+    const logPath = path.join(appRoot, 'activity.jsonl');
+    fs.mkdirSync(appRoot, { recursive: true });
+    fs.appendFileSync(logPath, JSON.stringify({ ts: new Date().toISOString(), kind: 'migration', ...line }) + '\n');
+  } catch {}
+}
+function migrateTreeToSplit(oldRoot) {
+  // Walk oldRoot, routing state files to stateDir (FLAT), everything else
+  // to appRoot preserving relative path. Skip-on-exists. Idempotent.
+  let stateMoved = 0, contentMoved = 0, skipped = 0;
+  function walk(relDir) {
+    const abs = path.join(oldRoot, relDir);
+    let entries;
+    try { entries = fs.readdirSync(abs, { withFileTypes: true }); } catch { return; }
+    for (const ent of entries) {
+      const relPath = path.join(relDir, ent.name);
+      const absSrc = path.join(oldRoot, relPath);
+      if (ent.isDirectory()) {
+        // Skip breadcrumb / pointer files we may have written in prior runs.
+        if (relPath === '.' || ent.name === 'MOVED.txt' || ent.name === 'MOVED-TO-NEW-LOCATION.txt') continue;
+        walk(relPath);
+        continue;
+      }
+      if (!ent.isFile()) continue;
+      if (isStateFileName(ent.name)) {
+        const dst = path.join(stateDir, ent.name);
+        try {
+          if (fs.existsSync(dst)) { skipped++; continue; }
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          fs.copyFileSync(absSrc, dst);
+          stateMoved++;
+        } catch (e) { console.warn('[migration] state copy failed:', absSrc, e.message); }
+      } else {
+        // Content: preserve relative path, but collapse `.claude/tools/` state leftovers
+        // (the isStateFileName check already handled that branch; anything else under
+        // .claude/tools — e.g. binaries — stays content-side because the installer
+        // owns those, and legacy dev layouts may expect them there).
+        const dst = path.join(appRoot, relPath);
+        try {
+          if (fs.existsSync(dst)) { skipped++; continue; }
+          fs.mkdirSync(path.dirname(dst), { recursive: true });
+          fs.copyFileSync(absSrc, dst);
+          contentMoved++;
+        } catch (e) { console.warn('[migration] content copy failed:', absSrc, e.message); }
+      }
+    }
+  }
+  walk('.');
+  return { stateMoved, contentMoved, skipped };
+}
+function maybeMigrateFromDocuments() {
+  if (!app.isPackaged) return;
+  try {
+    const candidates = [];
+    const documentsDir = (() => { try { return app.getPath('documents'); } catch { return null; } })();
+    if (documentsDir) candidates.push(path.join(documentsDir, 'Merlin'));
+    // Mac-only legacy: Library/App Support/Merlin held BOTH content and state in one tree.
+    if (process.platform === 'darwin') {
+      const legacyMono = path.join(app.getPath('userData'));
+      if (legacyMono !== stateDir && legacyMono !== appRoot) candidates.push(legacyMono);
+    }
+    for (const oldRoot of candidates) {
+      if (!oldRoot || oldRoot === appRoot || oldRoot === stateDir) continue;
+      if (!fs.existsSync(oldRoot)) continue;
+      // Only migrate if it looks like a real Merlin workspace.
+      const looksLikeWorkspace =
+        fs.existsSync(path.join(oldRoot, '.claude')) ||
+        fs.existsSync(path.join(oldRoot, 'assets', 'brands')) ||
+        fs.existsSync(path.join(oldRoot, 'merlin-config.json'));
+      if (!looksLikeWorkspace) continue;
+      // Breadcrumb guards re-run.
+      const breadcrumb = path.join(oldRoot, 'MOVED-TO-NEW-LOCATION.txt');
+      if (fs.existsSync(breadcrumb)) continue;
+      const result = migrateTreeToSplit(oldRoot);
+      try {
+        fs.writeFileSync(breadcrumb,
+          `Your Merlin workspace moved to split locations:\n` +
+          `  Content (brands, assets, results): ${appRoot}\n` +
+          `  State   (config, vault, tokens):   ${stateDir}\n\n` +
+          `This split keeps hot state out of OneDrive / iCloud sync.\n` +
+          `You can safely delete this folder after verifying the new ones.\n`);
+      } catch {}
+      console.log(`[migration] ${oldRoot} → ContentDir=${appRoot} StateDir=${stateDir} (state=${result.stateMoved} content=${result.contentMoved} skipped=${result.skipped})`);
+      logMigration({ source: oldRoot, contentDir: appRoot, stateDir, ...result });
+    }
+  } catch (e) {
+    console.error('[migration] workspace migration failed:', e.message);
+  }
+}
+maybeMigrateFromDocuments();
 
 // ── Node.js Runtime for SDK Subprocesses ────────────────────
 // The Claude Agent SDK spawns `node cli.js` as a subprocess. Non-developer
