@@ -356,6 +356,21 @@ contextBridge.exposeInMainWorld('merlin', {
     ipcRenderer.on('oauth-pending', h);
     return () => ipcRenderer.removeListener('oauth-pending', h);
   },
+  // §3.10: onboarding checkpoint persistence. Schema v1 whitelist:
+  // { pending_products_for_autopilot, vertical_confirmed, autopilot_asked,
+  //   goal, setup_step, tos_accepted_at, referral_captured }. Renderer reads
+  // at startup to resume the right screen; writes partial updates as the
+  // user advances through referral → goal → init().
+  readOnboardingCheckpoint: () => ipcRenderer.invoke('onboarding-checkpoint-read'),
+  writeOnboardingCheckpoint: (partial) => ipcRenderer.invoke('onboarding-checkpoint-write', partial),
+  // §6.2: fired once on did-finish-load after a render-process-gone reload.
+  // Renderer shows a one-shot "Merlin recovered from a hiccup" toast.
+  // Payload: { reason, exitCode }.
+  onPostCrashReload: (cb) => {
+    const h = (_, payload) => { try { cb(payload); } catch {} };
+    ipcRenderer.on('post-crash-reload', h);
+    return () => ipcRenderer.removeListener('post-crash-reload', h);
+  },
   onTrialExpired: (cb) => {
     const h = () => cb(); ipcRenderer.on('trial-expired', h);
     return () => ipcRenderer.removeListener('trial-expired', h);
