@@ -2600,14 +2600,33 @@ async function startSession(brandOverride) {
       }
 
       if (win && !win.isDestroyed()) {
-        const serialized = structuredClone(msg);
-        serialized._internal = _suppressNextResponse;
-        // Clear suppression flag ONLY on 'result' (full turn complete, not partial 'assistant')
-        if (_suppressNextResponse && msg.type === 'result') {
-          _suppressNextResponse = false;
+        // §4.1 — kill the structuredClone storm. The old code deep-cloned
+        // every stream event (including tool-result trees that can be
+        // 100s of KB) purely so we could stamp `_internal` without
+        // mutating the SDK's own object. On a busy renderer (100+
+        // stream events/s) this added measurable latency to tool
+        // execution.
+        //
+        // Renderer only checks `msg._internal` as a truthy flag
+        // (`if (msg._internal) return;` — see renderer.js:1271), so:
+        //   - hot path (suppression OFF): send msg directly. Absence of
+        //     `_internal` is equivalent to `_internal: false`. Zero
+        //     allocation. Electron IPC + ws-server JSON.stringify each
+        //     do their own serialization downstream — we don't need a
+        //     pre-clone.
+        //   - cold path (suppression ON): shallow-spread once to stamp
+        //     `_internal: true` without polluting the SDK's object.
+        //     O(top-level keys) instead of deep O(tree).
+        // `_suppressNextResponse` clears on the terminating `result`
+        // message — that's where the mutation happens, so clear AFTER
+        // the send is kicked off.
+        let outbound = msg;
+        if (_suppressNextResponse) {
+          outbound = { ...msg, _internal: true };
+          if (msg.type === 'result') _suppressNextResponse = false;
         }
-        win.webContents.send('sdk-message', serialized);
-        wsServer.broadcast('sdk-message', serialized);
+        win.webContents.send('sdk-message', outbound);
+        wsServer.broadcast('sdk-message', outbound);
 
         // Cache dashboard/insights responses for the revenue tracker
         if (msg.type === 'tool_result' || msg.type === 'tool_use') {
