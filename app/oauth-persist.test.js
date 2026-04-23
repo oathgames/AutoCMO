@@ -11,6 +11,8 @@
 const assert = require('assert');
 const {
   VAULT_SENSITIVE_KEYS,
+  CONFIG_FIELD_ALLOWLIST,
+  isSensitiveConfigKey,
   isVaultRedactionMarker,
   splitOAuthPersistFields,
 } = require('./oauth-persist');
@@ -163,6 +165,50 @@ test('VAULT_SENSITIVE_KEYS covers every OAuth provider the Go binary writes', ()
   for (const key of expected) {
     assert.ok(VAULT_SENSITIVE_KEYS.includes(key), `missing ${key} from VAULT_SENSITIVE_KEYS`);
   }
+});
+
+test('foreplayApiKey and googleAdsDeveloperToken are vaulted', () => {
+  // REGRESSION GUARD (2026-04-23, codex review): these two were accepted
+  // by CONFIG_FIELD_ALLOWLIST but missing from VAULT_SENSITIVE_KEYS, so
+  // every UI paste of a Foreplay key or Google Ads dev token landed in
+  // merlin-config.json as plaintext. Keep both here; do not "simplify" by
+  // removing this assertion — the allowlist cross-check below would still
+  // flag it, but a dedicated test makes the fix visible in git blame.
+  assert.ok(VAULT_SENSITIVE_KEYS.includes('foreplayApiKey'),
+    'foreplayApiKey must be vaulted — it is a Foreplay ad-library API key');
+  assert.ok(VAULT_SENSITIVE_KEYS.includes('googleAdsDeveloperToken'),
+    'googleAdsDeveloperToken must be vaulted — it is a Google-console dev secret');
+  assert.strictEqual(isSensitiveConfigKey('foreplayApiKey'), true);
+  assert.strictEqual(isSensitiveConfigKey('googleAdsDeveloperToken'), true);
+  assert.strictEqual(isSensitiveConfigKey('googleAdsCustomerId'), false,
+    'customer IDs are public identifiers, not secrets');
+  assert.strictEqual(isSensitiveConfigKey(null), false);
+  assert.strictEqual(isSensitiveConfigKey(undefined), false);
+});
+
+test('every sensitive-looking key in CONFIG_FIELD_ALLOWLIST is in VAULT_SENSITIVE_KEYS', () => {
+  // The root-cause invariant. `save-config-field` in main.js accepts any key
+  // in CONFIG_FIELD_ALLOWLIST and writes the value to disk. If a key LOOKS
+  // like a secret (ends in Token / Key / Secret / WebhookUrl) but is NOT in
+  // VAULT_SENSITIVE_KEYS, the handler skips the vault path and lands the
+  // raw value in merlin-config.json. That is how foreplayApiKey and
+  // googleAdsDeveloperToken regressed. This test pins the invariant so the
+  // next time someone adds a new secret to the allowlist, CI fails until
+  // they also add it to VAULT_SENSITIVE_KEYS.
+  const sensitiveSuffix = /(Token|Key|Secret|WebhookUrl)$/;
+  // Empty by design — if a public field accidentally matches the suffix
+  // pattern but is genuinely non-secret, add it here with a comment
+  // explaining why. Today: none.
+  const KNOWN_NON_SENSITIVE_MATCHES = new Set([]);
+  const offenders = [];
+  for (const key of CONFIG_FIELD_ALLOWLIST) {
+    if (!sensitiveSuffix.test(key)) continue;
+    if (KNOWN_NON_SENSITIVE_MATCHES.has(key)) continue;
+    if (!VAULT_SENSITIVE_KEYS.includes(key)) offenders.push(key);
+  }
+  assert.deepStrictEqual(offenders, [],
+    `CONFIG_FIELD_ALLOWLIST contains sensitive-looking key(s) not in VAULT_SENSITIVE_KEYS: ${offenders.join(', ')}. ` +
+    `save-config-field would persist the value as plaintext. Add each key to VAULT_SENSITIVE_KEYS in oauth-persist.js.`);
 });
 
 console.log(`\n${passed} passed, ${failed} failed`);

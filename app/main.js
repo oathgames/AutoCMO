@@ -3340,33 +3340,44 @@ ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
   return runOAuthFlow(platform, brandName, extra);
 });
 
-// Save a single config field (for API key entry from UI)
+// Save a single config field (for API key entry from UI).
 // Allowlist prevents injection of internal metadata keys (_migrationVersion, _userEmail, etc.)
-const CONFIG_FIELD_ALLOWLIST = new Set([
-  'metaAccessToken', 'metaAdAccountId', 'metaPageId', 'metaPixelId', 'metaConfigId',
-  'tiktokAccessToken', 'tiktokAdvertiserId', 'tiktokPixelId',
-  'shopifyStore', 'shopifyAccessToken',
-  'googleAccessToken', 'googleRefreshToken', 'googleAdsCustomerId', 'googleAdsDeveloperToken', 'googleApiKey',
-  'amazonAccessToken', 'amazonRefreshToken', 'amazonProfileId', 'amazonSellerId',
-  'klaviyoAccessToken', 'klaviyoApiKey',
-  'pinterestAccessToken', 'pinterestRefreshToken',
-  'falApiKey', 'elevenLabsApiKey', 'heygenApiKey', 'arcadsApiKey', 'foreplayApiKey',
-  'slackBotToken', 'slackWebhookUrl', 'slackChannel',
-  'discordGuildId', 'discordChannelId',
-  'productName', 'productUrl', 'productDescription', 'vertical', 'outputDir',
-  'maxDailyAdBudget', 'maxMonthlyAdSpend', 'autoPublishAds', 'blogPublishMode',
-  'qualityGate', 'falModel', 'imageModel', 'startAtLogin', 'dailyAdBudget',
-]);
+// and lives in oauth-persist.js alongside VAULT_SENSITIVE_KEYS so the two
+// lists stay in sync — allowlist entries that match VAULT_SENSITIVE_KEYS
+// are routed through the vault below instead of hitting disk as plaintext.
+//
+// REGRESSION GUARD (2026-04-23, codex review): prior to this change,
+// foreplayApiKey and googleAdsDeveloperToken were accepted here but
+// missing from VAULT_SENSITIVE_KEYS, so writeBrandTokens / writeConfig
+// persisted the raw secret into JSON. The shared allowlist + isSensitiveConfigKey
+// helper makes it a one-liner to add a new key to both lists; the
+// cross-check test in oauth-persist.test.js blocks CI if they drift.
 ipcMain.handle('save-config-field', (_, key, value, brandName) => {
   try {
     if (!key || typeof key !== 'string' || key.startsWith('_') || !CONFIG_FIELD_ALLOWLIST.has(key)) {
       return { success: false, error: 'Unknown config field' };
     }
+    // Sensitive keys: write the real value to the vault (brand-scoped, or
+    // _global for brandless writes) and persist the @@VAULT:...@@ placeholder
+    // into the JSON config. An empty / non-string value clears both so a
+    // "blank out the field" flow can't resurrect an old token via a stale
+    // placeholder.
+    let persistValue = value;
+    if (isSensitiveConfigKey(key)) {
+      const vaultBrand = brandName || '_global';
+      if (typeof value === 'string' && value.length > 0) {
+        vaultPut(vaultBrand, key, value);
+        persistValue = `@@VAULT:${key}@@`;
+      } else {
+        vaultDelete(vaultBrand, key);
+        persistValue = '';
+      }
+    }
     if (brandName) {
-      writeBrandTokens(brandName, { [key]: value });
+      writeBrandTokens(brandName, { [key]: persistValue });
     } else {
       const cfg = readConfig();
-      cfg[key] = value;
+      cfg[key] = persistValue;
       writeConfig(cfg);
     }
     if (win && !win.isDestroyed()) win.webContents.send('connections-changed');
@@ -5417,6 +5428,8 @@ function vaultAvailable() {
 // GUARD comment history.
 const {
   VAULT_SENSITIVE_KEYS,
+  CONFIG_FIELD_ALLOWLIST,
+  isSensitiveConfigKey,
   isVaultRedactionMarker,
   splitOAuthPersistFields: _splitOAuthPersistFields,
 } = require('./oauth-persist');

@@ -8,6 +8,13 @@ const VAULT_SENSITIVE_KEYS = [
   'tiktokRefreshToken',
   'googleAccessToken',
   'googleRefreshToken',
+  // Google Ads developer token — a Google-console-issued secret, not an
+  // OAuth token. Previously missing from this list: save-config-field
+  // (which accepted it via CONFIG_FIELD_ALLOWLIST) wrote it as plaintext
+  // to merlin-config.json / .merlin-config-<brand>.json. REGRESSION GUARD
+  // (2026-04-23, codex review): covered by the allowlist cross-check
+  // test below — do not remove without also removing it from the allowlist.
+  'googleAdsDeveloperToken',
   'shopifyAccessToken',
   'klaviyoAccessToken',
   'klaviyoRefreshToken',
@@ -38,10 +45,42 @@ const VAULT_SENSITIVE_KEYS = [
   'elevenLabsApiKey',
   'heygenApiKey',
   'arcadsApiKey',
+  // Foreplay ad-library API key. Same story as googleAdsDeveloperToken —
+  // in CONFIG_FIELD_ALLOWLIST but previously missing here, so every paste
+  // landed on disk in plaintext.
+  'foreplayApiKey',
   'googleApiKey',
   'slackBotToken',
   'slackWebhookUrl',
 ];
+
+// CONFIG_FIELD_ALLOWLIST — every key `save-config-field` will accept from the
+// renderer. Kept here (rather than main.js) so the allowlist cross-check
+// test below can run without booting Electron. Drift between this list and
+// VAULT_SENSITIVE_KEYS silently leaks plaintext on every API-key paste;
+// the regression test at the bottom of oauth-persist.test.js catches it.
+const CONFIG_FIELD_ALLOWLIST = new Set([
+  'metaAccessToken', 'metaAdAccountId', 'metaPageId', 'metaPixelId', 'metaConfigId',
+  'tiktokAccessToken', 'tiktokAdvertiserId', 'tiktokPixelId',
+  'shopifyStore', 'shopifyAccessToken',
+  'googleAccessToken', 'googleRefreshToken', 'googleAdsCustomerId', 'googleAdsDeveloperToken', 'googleApiKey',
+  'amazonAccessToken', 'amazonRefreshToken', 'amazonProfileId', 'amazonSellerId',
+  'klaviyoAccessToken', 'klaviyoApiKey',
+  'pinterestAccessToken', 'pinterestRefreshToken',
+  'falApiKey', 'elevenLabsApiKey', 'heygenApiKey', 'arcadsApiKey', 'foreplayApiKey',
+  'slackBotToken', 'slackWebhookUrl', 'slackChannel',
+  'discordGuildId', 'discordChannelId',
+  'productName', 'productUrl', 'productDescription', 'vertical', 'outputDir',
+  'maxDailyAdBudget', 'maxMonthlyAdSpend', 'autoPublishAds', 'blogPublishMode',
+  'qualityGate', 'falModel', 'imageModel', 'startAtLogin', 'dailyAdBudget',
+]);
+
+// isSensitiveConfigKey — single source of truth for "does this key need
+// the vault?" Shared between save-config-field and any future config-ingest
+// IPC so a new secret path can't skip the vault by accident.
+function isSensitiveConfigKey(key) {
+  return typeof key === 'string' && VAULT_SENSITIVE_KEYS.includes(key);
+}
 
 function isVaultRedactionMarker(value) {
   return typeof value === 'string' && value.trim().toLowerCase() === '[stored securely]';
@@ -86,4 +125,10 @@ function splitOAuthPersistFields(vaultBrand, result, vaultPut) {
   return { publicFields, placeholders };
 }
 
-module.exports = { VAULT_SENSITIVE_KEYS, isVaultRedactionMarker, splitOAuthPersistFields };
+module.exports = {
+  VAULT_SENSITIVE_KEYS,
+  CONFIG_FIELD_ALLOWLIST,
+  isSensitiveConfigKey,
+  isVaultRedactionMarker,
+  splitOAuthPersistFields,
+};
