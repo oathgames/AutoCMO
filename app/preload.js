@@ -337,6 +337,25 @@ contextBridge.exposeInMainWorld('merlin', {
     ipcRenderer.on('merlin-deep-link', h);
     return () => ipcRenderer.removeListener('merlin-deep-link', h);
   },
+  // §3.6: progress events emitted by long-running MCP tools (brand_scrape,
+  // image/video generation). Payload shape is the envelope documented in
+  // app/mcp-tools.js § "Progress event emission" — { channel, tool,
+  // scrapeId, stage, label, pct?, url?, ts, detail? }. Callers typically
+  // filter by `tool` or `scrapeId` to correlate multi-stage events.
+  onMcpProgress: (cb) => {
+    const h = (_, payload) => { try { cb(payload); } catch {} };
+    ipcRenderer.on('mcp-progress', h);
+    return () => ipcRenderer.removeListener('mcp-progress', h);
+  },
+  // §3.9: OAuth pending-flow chips. Main process polls `oauth-pending-list`
+  // every 30s and pushes the result here; renderer renders a chip row in
+  // the connections panel. Payload: { pending: [{provider, provider_name,
+  // started_unix, expires_unix, minutes_remaining, auth_url}], checkedAt }.
+  onOAuthPending: (cb) => {
+    const h = (_, payload) => { try { cb(payload); } catch {} };
+    ipcRenderer.on('oauth-pending', h);
+    return () => ipcRenderer.removeListener('oauth-pending', h);
+  },
   onTrialExpired: (cb) => {
     const h = () => cb(); ipcRenderer.on('trial-expired', h);
     return () => ipcRenderer.removeListener('trial-expired', h);

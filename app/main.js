@@ -2122,9 +2122,11 @@ async function handleToolApproval(toolName, input) {
 }
 
 // Personal email domains — if user's email is on one of these, we can't infer their brand
+// §3.4: keep this list exhaustive. A miss here means we infer a brand domain from a personal
+// mailbox (e.g. "joe@pm.me" → brand "pm.me") and onboarding derails into scraping ProtonMail.
 const PERSONAL_EMAIL_DOMAINS = new Set([
   'gmail.com','yahoo.com','hotmail.com','outlook.com','aol.com','icloud.com',
-  'mail.com','protonmail.com','proton.me','zoho.com','yandex.com','live.com',
+  'mail.com','protonmail.com','proton.me','pm.me','zoho.com','yandex.com','live.com',
   'msn.com','me.com','mac.com','hey.com','fastmail.com','tutanota.com',
 ]);
 
@@ -2305,6 +2307,17 @@ async function startSession(brandOverride) {
       awaitStartupChecks: () => (_startupChecksPromise || Promise.resolve()),
       isBinaryTooOld,
       minBinaryVersion: MIN_BINARY_VERSION,
+      // §3.6 — progress emitter for long-running MCP tools (brand_scrape,
+      // image/video gen, etc.). Forwarded to the renderer via the
+      // `mcp-progress` IPC channel; preload exposes onMcpProgress(cb) so
+      // the magic tab can animate a live pill. No-op when the window is
+      // gone (scheduled runs, post-quit stragglers).
+      emitProgress: (payload) => {
+        try {
+          if (!win || win.isDestroyed() || !win.webContents) return;
+          win.webContents.send('mcp-progress', payload);
+        } catch (_) { /* telemetry path — never let an emit crash a tool call */ }
+      },
     });
     mcpConfig = { merlin: merlinMcp };
   } catch (err) {
@@ -2876,15 +2889,20 @@ ipcMain.handle('trigger-claude-login', async () => {
         console.warn('[claude-login] fs.watch setup failed:', e.message);
       }
 
-      // 3-minute timeout — accounts for slow browsers, 2FA prompts, user
-      // typing codes, and corporate SSO redirect chains.
+      // §3.3 — 5-minute UX timeout. Previous 3-minute cap was too tight for
+      // corporate SSO chains that bounce through an IdP, a company portal,
+      // a VPN reauth, and back — users on those paths would hit the timeout
+      // during the 2FA step itself. 5 min is the empirical ceiling for the
+      // longest real-world flow (IdP → MFA → consent → CLI paste) and
+      // matches Claude's own web-signin timeout budget.
+      const CLAUDE_LOGIN_TIMEOUT_MS = 5 * 60 * 1000;
       const uxTimeout = setTimeout(() => {
-        console.error('[claude-login] timed out after 180s');
+        console.error(`[claude-login] timed out after ${CLAUDE_LOGIN_TIMEOUT_MS / 1000}s`);
         try { credWatcher?.close(); } catch {}
         try { child.kill(); } catch {}
         if (win && !win.isDestroyed()) win.webContents.send('auth-code-dismiss');
         finish({ success: false, timedOut: true, error: 'Login timed out. Try again or use an API key.' });
-      }, 180000);
+      }, CLAUDE_LOGIN_TIMEOUT_MS);
 
       // Cap the captured CLI output. We only need the tail for error messages
       // and the paste-prompt regex; the subprocess can run for up to the UX
@@ -5766,6 +5784,105 @@ function writeConfig(cfg) {
   } catch (err) { console.error('[config] write failed:', err.message); }
   finally { _configLock = false; }
 }
+
+// §3.10 — Onboarding checkpoint.
+//
+// Problem: onboarding is a multi-step chat-driven flow (goal → brand →
+// products → connections → ToS → autopilot) that can span multiple app
+// launches (user closes the lid during OAuth, restarts tomorrow). Without
+// a checkpoint the agent has to re-infer progress from memory.md / brand
+// files every launch, and misreads the state about 10 % of the time —
+// re-asking the same question, double-logging a ToS acceptance, or
+// skipping the autopilot offer because the last session ended right
+// after the user said "yes please" but before the toggle flipped.
+//
+// Solution: a small JSON checkpoint file under StateDir, written by the
+// onboarding tools after each step. Hook blocklist protects it as a
+// normal `.merlin-*` file.
+//
+// Schema: {
+//   goal: string,                      // "get sales" / "build brand" / …
+//   pending_products_for_autopilot: string[], // product slugs the user said yes to
+//   vertical_confirmed: bool,
+//   autopilot_asked: bool,
+//   setup_step: string,                // "goal" / "brand" / "products" / "connect" / "tos" / "autopilot" / "done"
+//   tos_accepted_at: string | null,    // ISO timestamp
+//   referral_captured: bool,
+//   _schema_version: 1,
+//   _updated_at: string,               // ISO timestamp, auto-stamped
+// }
+//
+// Unknown fields are preserved on write-through so a newer version of the
+// schema doesn't lose data when an older binary round-trips the file.
+const ONBOARDING_CHECKPOINT_FILE = '.merlin-onboarding.json';
+const ONBOARDING_SCHEMA_VERSION = 1;
+const ONBOARDING_ALLOWED_STEPS = new Set(['goal', 'brand', 'products', 'connect', 'tos', 'autopilot', 'done']);
+
+function onboardingCheckpointPath() {
+  // Lives under the StateDir resolved by Cluster-B's contract (RSI §1.3).
+  // FLAT layout — sits next to merlin-config.json in the FLAT StateDir OR
+  // inside `.claude/tools/` for legacy installs that haven't been migrated
+  // yet. resolveStateDir picks the right one so this just uses stateFile().
+  return stateFile(ONBOARDING_CHECKPOINT_FILE);
+}
+
+function readOnboardingCheckpoint() {
+  try {
+    const raw = fs.readFileSync(onboardingCheckpointPath(), 'utf8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
+    return parsed;
+  } catch {
+    return {};
+  }
+}
+
+function writeOnboardingCheckpoint(partial) {
+  const current = readOnboardingCheckpoint();
+  const merged = { ...current, ...(partial || {}) };
+  // Sanitize known-typed fields. Unknown fields pass through unchanged.
+  if (merged.setup_step != null && !ONBOARDING_ALLOWED_STEPS.has(merged.setup_step)) {
+    // Reject invalid step values rather than silently persisting garbage.
+    delete merged.setup_step;
+  }
+  if (merged.tos_accepted_at != null && typeof merged.tos_accepted_at !== 'string') {
+    delete merged.tos_accepted_at;
+  }
+  if (merged.pending_products_for_autopilot != null) {
+    if (!Array.isArray(merged.pending_products_for_autopilot)) {
+      delete merged.pending_products_for_autopilot;
+    } else {
+      merged.pending_products_for_autopilot = merged.pending_products_for_autopilot
+        .filter((v) => typeof v === 'string' && v.length > 0 && v.length < 200);
+    }
+  }
+  for (const boolField of ['vertical_confirmed', 'autopilot_asked', 'referral_captured']) {
+    if (merged[boolField] != null && typeof merged[boolField] !== 'boolean') {
+      merged[boolField] = !!merged[boolField];
+    }
+  }
+  merged._schema_version = ONBOARDING_SCHEMA_VERSION;
+  merged._updated_at = new Date().toISOString();
+  const full = onboardingCheckpointPath();
+  try {
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    const tmp = full + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(merged, null, 2), { mode: 0o600 });
+    fs.renameSync(tmp, full);
+  } catch (err) {
+    console.error('[onboarding-checkpoint] write failed:', err.message);
+  }
+  return merged;
+}
+
+// IPC bridge so onboarding MCP tools can read + bump the checkpoint.
+ipcMain.handle('onboarding-checkpoint-read', async () => readOnboardingCheckpoint());
+ipcMain.handle('onboarding-checkpoint-write', async (_event, partial) => {
+  if (!partial || typeof partial !== 'object' || Array.isArray(partial)) {
+    return { ok: false, error: 'partial must be a plain object' };
+  }
+  return { ok: true, checkpoint: writeOnboardingCheckpoint(partial) };
+});
 
 // ── Per-Brand Config ──────────────────────────────────────
 function readBrandConfig(brandName) {
@@ -9377,6 +9494,80 @@ app.whenReady().then(async () => {
 
   setTimeout(runTokenWatchdog, 60 * 1000);
   setInterval(runTokenWatchdog, 4 * 60 * 60 * 1000);
+
+  // §3.9 — OAuth pending-flow chip poller. Cluster-D landed the persistence
+  // + `oauth-pending-list` / `oauth-resume` actions (7f00e6e). Here we poll
+  // every 30s while the window is visible and push the result to the
+  // renderer on the `oauth-pending` IPC channel. Renderer renders a chip
+  // row in the connections panel; click invokes `oauth-resume` via the
+  // existing mcp tool surface.
+  //
+  // Poll semantics:
+  //   - Only poll when the window exists and is visible. No-ops otherwise
+  //     (hidden window, post-quit, first 3s after launch).
+  //   - Errors are swallowed — missing binary / first-launch / no config
+  //     all produce an empty pending list via the Go binary. A failure
+  //     means we just don't emit this tick.
+  //   - A single inflight poll is guarded via `_oauthPendingInflight` so a
+  //     slow 30s tick never overlaps the next.
+  let _oauthPendingInflight = false;
+  const runOAuthPendingPoll = async () => {
+    if (_oauthPendingInflight) return;
+    if (!win || win.isDestroyed() || !win.isVisible || !win.isVisible()) return;
+    const binaryPath = getBinaryPath();
+    try { fs.accessSync(binaryPath); } catch { return; }
+    // Match the watchdog's config path convention so the binary resolves the
+    // same projectRoot + StateDir. Cluster-D writes `.merlin-oauth-pending.json`
+    // next to this config so the readback lives under StateDir automatically.
+    const globalConfigPath = path.join(appRoot, '.claude', 'tools', 'merlin-config.json');
+    try { fs.accessSync(globalConfigPath); } catch {
+      // No config yet → no possible pending OAuth. Still push an empty
+      // result so the renderer can clear any stale chips.
+      try { win.webContents.send('oauth-pending', { pending: [], checkedAt: Date.now() }); } catch {}
+      return;
+    }
+    _oauthPendingInflight = true;
+    const { execFile } = require('child_process');
+    const cmdObj = { action: 'oauth-pending-list' };
+    try {
+      const stdout = await new Promise((resolve) => {
+        const child = execFile(
+          binaryPath,
+          ['--config', globalConfigPath, '--cmd', JSON.stringify(cmdObj)],
+          { timeout: 15000, cwd: appRoot, windowsHide: true, maxBuffer: 1 * 1024 * 1024 },
+          (err, out) => resolve(err ? '' : (out || '')),
+        );
+        activeChildProcesses.add(child);
+        child.on('exit', () => activeChildProcesses.delete(child));
+      });
+      let payload = { pending: [] };
+      if (stdout && stdout.trim()) {
+        try {
+          const parsed = JSON.parse(stdout.trim());
+          if (parsed && Array.isArray(parsed.pending)) payload = parsed;
+        } catch (_) { /* malformed stdout — treat as empty */ }
+      }
+      if (win && !win.isDestroyed() && win.webContents) {
+        try { win.webContents.send('oauth-pending', { ...payload, checkedAt: Date.now() }); } catch {}
+      }
+    } finally {
+      _oauthPendingInflight = false;
+    }
+  };
+  // First poll ~5s after launch (give the binary time to land), then
+  // every 30s thereafter. The chip UI is only rendered when connections
+  // panel is open so the data is free if the user never looks.
+  setTimeout(() => { runOAuthPendingPoll().catch(() => {}); }, 5000);
+  setInterval(() => { runOAuthPendingPoll().catch(() => {}); }, 30000);
+
+  // Expose a handle so the renderer can force an immediate poll after the
+  // user clicks "Resume sign-in" or dismisses a chip — the caller awaits
+  // the promise so the UI can reflect the fresh state without waiting for
+  // the next scheduled tick.
+  ipcMain.handle('oauth-pending-refresh', async () => {
+    await runOAuthPendingPoll();
+    return { ok: true };
+  });
 
   // Lightweight telemetry — one ping on launch, no PII
   setTimeout(() => {
