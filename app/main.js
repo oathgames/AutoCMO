@@ -3725,6 +3725,7 @@ ipcMain.handle('get-account-info', async () => {
 function resolveShopifyShopInput(brandName, extra) {
   if (extra && extra.store) return String(extra.store).trim();
   if (!brandName) return null;
+  try { assertBrandSafe(brandName); } catch { return null; }
   try {
     const brandMd = path.join(appRoot, 'assets', 'brands', brandName, 'brand.md');
     const content = fs.readFileSync(brandMd, 'utf8');
@@ -5396,6 +5397,7 @@ function maybeNotifyBriefing(briefingPath) {
 // today's live number), while the user-initiated "Run a check now" button
 // (Part F) can request a longer window matching the selected period.
 ipcMain.handle('refresh-perf', async (_, brandName, days) => {
+  try { assertBrandSafe(brandName); } catch { return { error: 'invalid brand name' }; }
   const requestedDays = Number.isInteger(days) && days > 0 && days <= 365 ? days : 1;
 
   // Wait for the startup ensure+version check to complete before we let
@@ -5510,6 +5512,7 @@ ipcMain.handle('refresh-perf', async (_, brandName, days) => {
 });
 
 ipcMain.handle('get-perf-updated', async (_, brandName) => {
+  try { assertBrandSafe(brandName); } catch { return null; }
   try {
     const resultsDir = brandName ? path.join(appRoot, 'results', brandName) : path.join(appRoot, 'results');
     const raw = await fs.promises.readFile(path.join(resultsDir, '.perf-updated'), 'utf8');
@@ -5689,6 +5692,7 @@ async function computePerfSummary(days, brandName) {
 }
 
 ipcMain.handle('get-perf-summary', async (_, requestedDays, brandName) => {
+  try { assertBrandSafe(brandName); } catch { return null; }
   const days = requestedDays || 7;
   const key = brandName || '_global';
 
@@ -5793,7 +5797,9 @@ ipcMain.handle('get-agency-report', async (_, requestedDays, brandNames) => {
 // is effectively "the current window" from the user's perspective.
 ipcMain.handle('get-activity-feed-full', (_, brandName) => {
   if (!brandName) return [];
-  if (!/^[a-z0-9_-]+$/i.test(brandName)) return [];
+  // assertBrandSafe is the single canonical regex (length-capped at 100).
+  // The older inline /^[a-z0-9_-]+$/i here accepted any length — tightened.
+  try { assertBrandSafe(brandName); } catch { return []; }
   const logPath = path.join(appRoot, 'assets', 'brands', brandName, 'activity.jsonl');
   try {
     if (!fs.existsSync(logPath)) return [];
@@ -5838,7 +5844,8 @@ ipcMain.handle('get-activity-feed', (_, brandName, limit = 30) => {
     } catch {}
   }
   if (!brandName) return [];
-  if (!/^[a-z0-9_-]+$/i.test(brandName)) return [];
+  // Length-capped canonical regex via assertBrandSafe.
+  try { assertBrandSafe(brandName); } catch { return []; }
 
   const logPath = path.join(appRoot, 'assets', 'brands', brandName, 'activity.jsonl');
   try {
@@ -5877,7 +5884,8 @@ ipcMain.handle('get-activity-feed', (_, brandName, limit = 30) => {
 // ── Archive: scan results for content grid ──────────────────
 // ── Competitor Swipes ──────────────────────────────────────
 ipcMain.handle('get-swipes', (_, brandName) => {
-  if (!brandName || !/^[a-z0-9_-]+$/i.test(brandName)) return [];
+  if (!brandName) return [];
+  try { assertBrandSafe(brandName); } catch { return []; }
   const swipesDir = path.join(appRoot, 'assets', 'brands', brandName, 'competitor-swipes');
   try {
     if (!fs.existsSync(swipesDir)) return [];
@@ -5909,9 +5917,8 @@ ipcMain.handle('get-swipes', (_, brandName) => {
 // assets/brands/<brand>/brand-guide.json — brand name is pattern-validated in
 // preload.js (BRAND_RE) and revalidated here defense-in-depth.
 ipcMain.handle('read-brand-guide', (_, brandName) => {
-  if (!brandName || typeof brandName !== 'string' || !/^[a-z0-9_-]{1,100}$/i.test(brandName)) {
-    return null;
-  }
+  if (!brandName) return null;
+  try { assertBrandSafe(brandName); } catch { return null; }
   const guidePath = path.join(appRoot, 'assets', 'brands', brandName, 'brand-guide.json');
   try {
     if (!fs.existsSync(guidePath)) return null;
@@ -7158,6 +7165,13 @@ ipcMain.handle('get-connected-platforms', (_, brandName) => {
 // providers (fal, elevenlabs, heygen) and workspace-global integrations
 // (slack, discord) live in the global merlin-config.json instead.
 ipcMain.handle('disconnect-platform', (_, platform, brandName) => {
+  // Defense-in-depth: brandName reaches path.join for .merlin-config-{brand}.json
+  // + .merlin-tokens-{brand} writes below. assertBrandSafe returns silently on
+  // empty (global-only platforms legitimately skip the per-brand branch), and
+  // throws on anything with ../ / null byte / over-long input. Kept inside
+  // the outer try/catch so an invalid brand returns a clear error envelope
+  // rather than crashing the handler.
+  try { assertBrandSafe(brandName); } catch { return { success: false, error: 'invalid brand name' }; }
   try {
     // Map platform to config keys that should be cleared
     const keyMap = {
@@ -7458,9 +7472,17 @@ ipcMain.handle('toggle-spell', (_, taskId, enabled) => {
 // Each entry is tagged with its brand so the renderer can show a badge and
 // filter client-side.
 ipcMain.handle('get-live-ads', (_, brandName) => {
+  // `brandName` is either specified (single-brand view) or empty (all-brands
+  // view). When specified, validate upfront so a bad value short-circuits
+  // before we enumerate directories.
+  if (brandName) {
+    try { assertBrandSafe(brandName); } catch { return []; }
+  }
   const brandsDir = path.join(appRoot, 'assets', 'brands');
   const readBrandAds = (brand) => {
-    if (!/^[a-z0-9_-]+$/i.test(brand)) return [];
+    // Length-capped canonical regex via assertBrandSafe.
+    try { assertBrandSafe(brand); } catch { return []; }
+    if (!brand) return [];
     const adsPath = path.join(brandsDir, brand, 'ads-live.json');
     try {
       const parsed = JSON.parse(fs.readFileSync(adsPath, 'utf8'));

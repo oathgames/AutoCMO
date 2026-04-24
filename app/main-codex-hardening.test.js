@@ -139,18 +139,30 @@ test('vaultSave writes v2 with the ensured salt', () => {
 });
 
 // ── 3. Brand-name defense-in-depth ──────────────────────────────────────
-test('assertBrandSafe is declared and used', () => {
+test('assertBrandSafe is declared and used at every brand path builder', () => {
   assert.match(
     MAIN_JS,
     /function\s+assertBrandSafe\s*\(/,
     'assertBrandSafe missing — path builders unprotected against ../ brand names',
   );
-  // Must be called somewhere. Count occurrences; >1 means the helper is
-  // wired, ==1 means only the declaration is present.
+  // Count total references (declaration + every call). Raised from >1 to
+  // ≥14 after the Gitar PR #112 follow-up added calls at every brand-
+  // interpolating path.join in main.js — results/, activity.jsonl,
+  // competitor-swipes, brand-guide.json, get-live-ads, get-perf-updated,
+  // get-perf-summary, refresh-perf, disconnect-platform,
+  // resolveShopifyShopInput, plus the four original per-brand config
+  // functions. Tightening this minimum makes it a tripwire: a future edit
+  // that accidentally drops a guard on an existing path builder fails CI
+  // loudly instead of silently regressing defense-in-depth. If you
+  // LEGITIMATELY remove a call site (e.g. consolidating handlers), lower
+  // MIN_REFS with a comment explaining which call was dropped — don't
+  // raise it without auditing whether the new caller actually needs the
+  // guard.
+  const MIN_REFS = 14;
   const calls = (MAIN_JS.match(/assertBrandSafe\s*\(/g) || []).length;
   assert.ok(
-    calls > 1,
-    `assertBrandSafe must be CALLED at path-builder sites, not just declared. Got ${calls} occurrence(s) (need >1).`,
+    calls >= MIN_REFS,
+    `assertBrandSafe call count regressed: got ${calls} reference(s), expected ≥${MIN_REFS}. Every brand-scoped path builder must call assertBrandSafe — if you removed one intentionally, update MIN_REFS + this comment in the same PR.`,
   );
 });
 
