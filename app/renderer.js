@@ -259,7 +259,22 @@ function showModal({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmL
     if (
       _modalLastDismissedSig === sig
       && (Date.now() - _modalLastDismissedAt) < _MODAL_DEDUPE_COOLDOWN_MS
-    ) return;
+    ) {
+      // REGRESSION GUARD (2026-04-26):
+      // The dedupe cooldown previously dropped duplicate modals SILENTLY.
+      // From the user's POV the click did nothing — easy to misread as a
+      // hang and start clicking faster, which fires more dropped modals.
+      // Surface a small toast so the user gets feedback that the action
+      // landed but the same alert was already shown. Toast is best-effort
+      // (showSpellToast may not be defined yet during very early init);
+      // wrap in try/catch so a missing helper never breaks the dedupe.
+      try {
+        if (typeof showSpellToast === 'function') {
+          showSpellToast(title || 'Already shown', 'Tap again in a moment if you need to see this.', 'info');
+        }
+      } catch { /* dedupe is best-effort feedback; never block on it */ }
+      return;
+    }
   }
   if (_modalActive) {
     _modalQueue.push({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmLabel, cancelLabel, onConfirm, onCancel, _sig: sig });
@@ -301,6 +316,22 @@ function showModal({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmL
 
   modal.classList.remove('hidden');
 
+  // REGRESSION GUARD (2026-04-26): focus trap.
+  // Save the element that had focus before the modal opened so we can
+  // restore it on close. Without this, a modal that opens from a tile
+  // click steals focus and never returns it — the user lands at <body>
+  // after dismissal, breaking keyboard-driven flow and screen-reader
+  // continuity (WCAG 2.1 SC 2.4.3 Focus Order, 2.4.7 Focus Visible).
+  //
+  // Duck-type instead of `instanceof HTMLElement` — the modal-dedupe
+  // test harness evals showModal in a sandboxed context that doesn't
+  // expose HTMLElement; an instanceof check would throw ReferenceError
+  // and break dedupe for every shipping user. Calling .focus() through
+  // the function check is the same safety bar with broader compatibility.
+  const _prevFocus = (document.activeElement && typeof document.activeElement.focus === 'function')
+    ? document.activeElement
+    : null;
+
   function cleanup() {
     modal.classList.add('hidden');
     confirmBtn.onclick = null;
@@ -308,6 +339,14 @@ function showModal({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmL
     closeBtn.onclick = null;
     inputEl.onkeydown = null;
     document.removeEventListener('keydown', escHandler);
+    document.removeEventListener('keydown', tabTrapHandler, true);
+    // Restore focus to whatever the user was on before the modal opened.
+    // Use a microtask so any focus events from `modal.classList.add('hidden')`
+    // settle first; without it, certain WebKit builds steal focus back to
+    // the modal's now-hidden close button.
+    if (_prevFocus && typeof _prevFocus.focus === 'function') {
+      try { setTimeout(() => _prevFocus.focus(), 0); } catch { /* element may be detached */ }
+    }
     // Record what we just dismissed so the dedupe cooldown (see REGRESSION
     // GUARD above) can suppress an identical modal that fires right after.
     if (_modalActiveSig !== null) {
@@ -323,6 +362,40 @@ function showModal({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmL
     if (e.key === 'Escape') { cleanup(); }
   }
   document.addEventListener('keydown', escHandler);
+
+  // Focus trap: cycle Tab / Shift+Tab through the modal's own focusable
+  // controls so keyboard users can't tab out to background elements.
+  // Listening in the capture phase so we can intercept before any inner
+  // handler swallows the event.
+  function _focusableInModal() {
+    return Array.from(modal.querySelectorAll(
+      'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+    )).filter(el => !el.classList.contains('hidden') && el.offsetParent !== null);
+  }
+  function tabTrapHandler(e) {
+    if (e.key !== 'Tab') return;
+    const focusable = _focusableInModal();
+    if (focusable.length === 0) { e.preventDefault(); return; }
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    const active = document.activeElement;
+    // Forward-tab off the last element → wrap to first.
+    // Backward-tab off the first element → wrap to last.
+    // If focus is somewhere outside the modal entirely (which shouldn't
+    // happen but can if the page has odd focus management), pull it back.
+    if (e.shiftKey) {
+      if (active === first || !modal.contains(active)) {
+        e.preventDefault();
+        last.focus();
+      }
+    } else {
+      if (active === last || !modal.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+  }
+  document.addEventListener('keydown', tabTrapHandler, true);
 
   confirmBtn.onclick = async () => {
     const value = inputPlaceholder !== undefined ? inputEl.value.trim() : true;
@@ -1416,8 +1489,26 @@ function friendlyError(raw, platformName) {
     return `Something went wrong with ${platformName || 'the service'}.\nTry: Wait a moment and try again.`;
   }
 
-  // Truncate anything still long
-  if (s.length > 150) return s.slice(0, 140) + '…';
+  // ── Final safe fallback ──
+  // REGRESSION GUARD (2026-04-26):
+  // Previously this returned `s.slice(0, 140) + '…'` for any unmatched raw
+  // error — a UX cliff-edge that surfaced cryptic strings (Go panic stack
+  // fragments, JSON-encoded internal structs, npm-style "ETIMEDOUT { … }")
+  // directly to the user. The 5th-grader bar requires that every exit from
+  // friendlyError() reads as a complete sentence written for a human, with
+  // an actionable next step. Truncating a 500-char stack trace to 140 chars
+  // produces unreadable garbage and helps no one.
+  //
+  // For ≤150-char errors we still pass the original through — short
+  // messages are usually a hand-written hint emitted by the Go binary
+  // (e.g. "amazonAccessToken required — run amazon-login first") and
+  // those ARE useful verbatim. Anything longer is treated as a stack
+  // trace / JSON dump / runaway exception chain and replaced with a
+  // generic recovery message that includes the [[chip:Update Merlin]]
+  // sentinel so the user has a one-click next step.
+  if (s.length > 150) {
+    return `Something went wrong with ${platformName || 'that'}.\nTry: Wait a moment and try again. If it keeps failing, [[chip:Update Merlin:update]] to make sure you have the latest version.`;
+  }
   return s;
 }
 
@@ -4201,6 +4292,23 @@ document.getElementById('stats-share').addEventListener('click', async () => {
 // Set must stay in sync. Kept as a Set for O(1) lookup in loadConnections.
 const MANUAL_KEY_PLATFORMS = new Set(['meta', 'shopify']);
 
+// REGRESSION GUARD (2026-04-26):
+// Single source of truth for "is this tile a stub / Coming Soon platform?"
+// Five distinct call sites previously ran `tile.dataset.stubbed === 'true'`
+// inline (paint, context menu, primary-click handler, credit decoration,
+// settings sheet opener); a sixth site that forgot the check would let
+// users click through to a non-functional OAuth flow on a `data-stubbed`
+// tile. Centralizing the check + always taking a tile element argument
+// keeps every entry point honest and makes future stub-state changes
+// (e.g. multi-state availability) a one-line edit.
+//
+// Returns true if the tile carries `data-stubbed="true"`. Defensive:
+// returns false on null / undefined so calling it on a missing element
+// never falsely silences a legitimate click.
+function isStubbedTile(tile) {
+  return !!(tile && tile.dataset && tile.dataset.stubbed === 'true');
+}
+
 function loadConnections() {
   const brand = getActiveBrandSelection();
   merlin.getConnectedPlatforms(brand).then((connected) => {
@@ -4213,7 +4321,7 @@ function loadConnections() {
     allTiles.forEach(t => {
       t.classList.remove('connected', 'expired', 'needs-brand');
       if (!t.dataset.baseTip && t.dataset.tip) t.dataset.baseTip = t.dataset.tip;
-      if (t.dataset.stubbed === 'true') {
+      if (isStubbedTile(t)) {
         t.classList.add('unavailable');
       } else {
         t.classList.remove('unavailable');
@@ -4242,7 +4350,7 @@ function loadConnections() {
     allTiles.forEach(tile => {
       const platform = tile.dataset.platform;
       if (!platform) return;
-      if (tile.dataset.stubbed === 'true') return; // unavailable wins
+      if (isStubbedTile(tile)) return; // unavailable wins
       if (tile.classList.contains('needs-brand')) return;
       const status = state.get(platform);
       if (!status) return;
@@ -4312,7 +4420,7 @@ document.getElementById('magic-btn').addEventListener('click', () => {
       // Skip stubbed (`unavailable`) tiles so their "Coming soon" tooltip
       // survives — stubbed platforms never have credits anyway.
       document.querySelectorAll('.magic-tile').forEach(tile => {
-        if (tile.dataset.stubbed === 'true') return;
+        if (isStubbedTile(tile)) return;
         const platform = tile.dataset.platform;
         const existing = tile.querySelector('.tile-credits');
         if (existing) existing.remove();
@@ -4454,7 +4562,7 @@ const _oauthInFlight = new Set();
 document.addEventListener('click', async (e) => {
   const tile = e.target.closest('.magic-tile');
   if (!tile) return;
-  if (tile.dataset.stubbed === 'true') return;
+  if (isStubbedTile(tile)) return;
   const platform = tile.dataset.platform;
   const activeBrand = getActiveBrandSelection();
   const displayName = platformDisplayName(platform);
@@ -4625,7 +4733,7 @@ function closeTileContextMenu() {
 document.addEventListener('contextmenu', (e) => {
   const tile = e.target.closest('.magic-tile');
   if (!tile) return;
-  if (tile.dataset.stubbed === 'true') return;
+  if (isStubbedTile(tile)) return;
   const platform = tile.dataset.platform;
   const handler = MANUAL_KEY_HANDLERS[platform];
   if (!handler) return;
