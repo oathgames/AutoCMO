@@ -191,6 +191,30 @@ contextBridge.exposeInMainWorld('merlin', {
     return ipcRenderer.invoke('delete-file', assertStr(target, 500));
   },
 
+  // Archive keep/reject flag sidecar (results/.flags.json). Read/write goes
+  // through main so atomic writes + path validation live in one place — the
+  // renderer never touches the file directly.
+  getArchiveFlags: () => ipcRenderer.invoke('archive-flags-get'),
+  setArchiveFlag: (key, flag) => {
+    if (typeof key !== 'string' || key.length === 0 || key.length > 500) throw new Error('invalid flag key');
+    if (flag !== null && flag !== 'keep' && flag !== 'reject') throw new Error('invalid flag value');
+    return ipcRenderer.invoke('archive-flags-set', { key, flag });
+  },
+  setArchiveFlagsBulk: (updates) => {
+    if (!Array.isArray(updates)) throw new Error('updates must be an array');
+    if (updates.length > 5000) throw new Error('bulk update too large');
+    return ipcRenderer.invoke('archive-flags-set-bulk', updates);
+  },
+  // Subscribe to filesystem-driven archive invalidations. The main process
+  // mounts an fs.watch on results/ and sends `archive-changed` whenever
+  // the tree changes (new run folder, external drop, bulk trash). Returns
+  // an unsubscribe function so the caller can detach on tab teardown.
+  onArchiveChanged: (cb) => {
+    const h = () => { try { cb(); } catch {} };
+    ipcRenderer.on('archive-changed', h);
+    return () => ipcRenderer.removeListener('archive-changed', h);
+  },
+
   // Wisdom
   getWisdom: (brandName, opts) => ipcRenderer.invoke('get-wisdom', assertBrand(brandName), opts ? { force: !!opts.force } : undefined),
   getSeasonal: () => ipcRenderer.invoke('get-seasonal'),
