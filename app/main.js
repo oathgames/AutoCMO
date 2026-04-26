@@ -4092,8 +4092,28 @@ async function runOAuthFlow(platform, brandName, extra) {
 }
 
 // IPC wrapper — UI tile clicks invoke the standalone function above.
+//
+// REGRESSION GUARD (2026-04-26):
+// Every ipcMain.handle that talks to the network MUST try/catch its body
+// and return a structured { ok:false, error } shape. A bare `async ... =>
+// runOAuthFlow(...)` lands in the renderer as
+//   "Error invoking remote method 'run-oauth': <raw err>"
+// which never passes through friendlyError(), surfacing stack traces and
+// possibly token fragments to paying users (Rule 6 violation). The
+// renderer's runOAuth wrapper already understands the { ok, error } shape;
+// any new IPC entry point that talks to OAuth providers must do the same.
 ipcMain.handle('run-oauth', async (_, platform, brandName, extra) => {
-  return runOAuthFlow(platform, brandName, extra);
+  try {
+    return await runOAuthFlow(platform, brandName, extra);
+  } catch (err) {
+    const raw = (err && (err.message || String(err))) || 'OAuth flow failed';
+    // Cap the forwarded message: a runaway nested error chain or full
+    // stack trace would otherwise blow the IPC payload size and still
+    // leak through to the renderer. friendlyError() takes it from here
+    // and emits the [[chip:Reconnect ...]] sentinel so the user gets
+    // a one-click recovery, not a cryptic string.
+    return { ok: false, error: String(raw).slice(0, 500), platform: platform || '' };
+  }
 });
 
 // Manual-override Meta connect: the OAuth path (run-oauth + meta-login) is

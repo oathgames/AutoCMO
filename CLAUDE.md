@@ -67,9 +67,7 @@ Every piece of content — email images, ad creatives, social posts, blog featur
 - `files:write` alone will upload but silently fail to share to channels.
 
 ### Meta Ads API
-- The Merlin app must be in **Live mode** (not Development) to create ad creatives. This is a hard Meta platform restriction.
-- Campaigns, ad sets, image uploads all work in dev mode — only ad creative creation is blocked.
-- Error subcode `1885183` = app in development mode. No workaround exists (page tokens, system user tokens all fail).
+- The Merlin Meta app passed App Review and runs in **Live mode**, so ad creative creation works for any user that completes Meta OAuth. (Pre-approval, error subcode `1885183` blocked creative creation; this is now resolved.)
 - `metaFindCampaign` uses URL-encoded filtering to avoid duplicate campaign creation.
 - `is_adset_budget_sharing_enabled` is required on ALL campaigns (Meta v22.0+).
 - CBO campaigns need `is_campaign_budget_optimization: true` + `daily_budget` at campaign level.
