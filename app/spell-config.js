@@ -26,11 +26,79 @@ const LEGACY_SUFFIX_RE =
 // the test-suite validator and was then rejected by the IPC validator —
 // silently, with just `{ success: false, error: 'invalid cron' }`.
 // Re-export so any future tightening happens in one place.
+//
+// REGRESSION GUARD (2026-04-27, spellbook-rsi):
+// The old validator only checked the field-character whitelist
+// (`\d*,/-`). It accepted `61 25 32 13 8` — every field out of range —
+// because `\d` doesn't pin a numeric range. The daemon then silently
+// refused to schedule the task and the user saw an active spell that
+// never fired. Range validation now happens AFTER the regex pass so
+// every valid cron passes both layers and every nonsense cron fails
+// loudly at the IPC boundary instead of silently at runtime. Tests in
+// spell-config.test.js cover hour=24, minute=60, day=0, month=13,
+// dow=8, step-size>field-max.
 const CRON_FIELD_CHARS = '\\d*,\\/-';
 const CRON_RE = new RegExp(`^[${CRON_FIELD_CHARS}]+(\\s+[${CRON_FIELD_CHARS}]+){4}$`);
 
+// Per-field [min, max] bounds. dow=7 is intentionally allowed as an alias
+// for Sunday (POSIX cron + most real implementations accept both 0 and 7).
+const FIELD_BOUNDS = [
+  { name: 'minute', min: 0, max: 59 },
+  { name: 'hour', min: 0, max: 23 },
+  { name: 'day-of-month', min: 1, max: 31 },
+  { name: 'month', min: 1, max: 12 },
+  { name: 'day-of-week', min: 0, max: 7 },
+];
+
+// Validate a single field-token within its [min, max] bound. Tokens look
+// like:  *   5   *  /5   1-5   1,3,5   1-30/2   */15
+function isValidCronField(token, bounds) {
+  if (typeof token !== 'string' || token.length === 0) return false;
+  // Lists: comma-separated atoms. Each atom validates against the same
+  // step / range / value rule below.
+  if (token.includes(',')) {
+    return token.split(',').every((part) => isValidCronField(part, bounds));
+  }
+  // Step: `<base>/<step>`. Step must be a positive integer ≤ field max.
+  if (token.includes('/')) {
+    const [base, stepStr] = token.split('/');
+    if (!base || !stepStr) return false;
+    if (!/^\d+$/.test(stepStr)) return false;
+    const step = parseInt(stepStr, 10);
+    if (step < 1 || step > bounds.max) return false;
+    return isValidCronField(base, bounds);
+  }
+  // Range: `<a>-<b>`. Both endpoints in bounds; a ≤ b.
+  if (token.includes('-')) {
+    const [a, b] = token.split('-');
+    if (!/^\d+$/.test(a) || !/^\d+$/.test(b)) return false;
+    const ai = parseInt(a, 10);
+    const bi = parseInt(b, 10);
+    if (ai < bounds.min || ai > bounds.max) return false;
+    if (bi < bounds.min || bi > bounds.max) return false;
+    if (ai > bi) return false;
+    return true;
+  }
+  // Wildcard
+  if (token === '*') return true;
+  // Plain integer
+  if (/^\d+$/.test(token)) {
+    const n = parseInt(token, 10);
+    return n >= bounds.min && n <= bounds.max;
+  }
+  return false;
+}
+
 function isValidCron(expr) {
-  return typeof expr === 'string' && CRON_RE.test(expr.trim());
+  if (typeof expr !== 'string') return false;
+  const trimmed = expr.trim();
+  if (!CRON_RE.test(trimmed)) return false;
+  const fields = trimmed.split(/\s+/);
+  if (fields.length !== FIELD_BOUNDS.length) return false;
+  for (let i = 0; i < FIELD_BOUNDS.length; i++) {
+    if (!isValidCronField(fields[i], FIELD_BOUNDS[i])) return false;
+  }
+  return true;
 }
 
 function legacyFallback(taskId) {
@@ -167,6 +235,8 @@ module.exports = {
   stripBrandPrefix,
   computeNextFailureCount,
   isValidCron,
+  isValidCronField,
   CRON_RE,
+  FIELD_BOUNDS,
   LEGACY_SUFFIX_RE,
 };

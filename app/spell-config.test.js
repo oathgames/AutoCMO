@@ -15,6 +15,10 @@ const {
   readSpellConfig,
   stripBrandPrefix,
   computeNextFailureCount,
+  isValidCron,
+  isValidCronField,
+  CRON_RE,
+  FIELD_BOUNDS,
 } = require('./spell-config');
 
 function tempRoot() {
@@ -189,8 +193,7 @@ test('computeNextFailureCount handles missing / malformed prev meta', () => {
 });
 
 // ─── isValidCron ──────────────────────────────────────────────────────
-
-const { isValidCron, CRON_RE } = require('./spell-config');
+// (isValidCron + CRON_RE + isValidCronField + FIELD_BOUNDS imported at top)
 
 test('isValidCron accepts the canonical 5-field expressions used by SPELLS', () => {
   assert.equal(isValidCron('0 9 * * 1-5'), true);
@@ -222,4 +225,79 @@ test('isValidCron rejects obviously malformed input', () => {
 
 test('CRON_RE is exported for direct source-grep parity checks', () => {
   assert.ok(CRON_RE instanceof RegExp);
+});
+
+// ─── Cron range validation (REGRESSION GUARD 2026-04-27) ─────────────────
+//
+// The 2026-04-27 RSI audit found that the field-character regex accepted
+// out-of-range values (hour=25, day=32, minute=60, dow=8). The daemon
+// then refused to schedule, but silently — no UI feedback, the spell
+// just never fired. Each test below is one nonsense cron that USED to
+// pass and now MUST fail loudly at the IPC boundary.
+
+test('isValidCron rejects hour out of range (24+)', () => {
+  assert.equal(isValidCron('0 24 * * *'), false);
+  assert.equal(isValidCron('0 25 * * *'), false);
+  assert.equal(isValidCron('0 99 * * *'), false);
+});
+
+test('isValidCron rejects minute out of range (60+)', () => {
+  assert.equal(isValidCron('60 9 * * *'), false);
+  assert.equal(isValidCron('99 9 * * *'), false);
+});
+
+test('isValidCron rejects day-of-month out of range (0 or 32+)', () => {
+  assert.equal(isValidCron('0 9 0 * *'), false);
+  assert.equal(isValidCron('0 9 32 * *'), false);
+});
+
+test('isValidCron rejects month out of range (0 or 13+)', () => {
+  assert.equal(isValidCron('0 9 1 0 *'), false);
+  assert.equal(isValidCron('0 9 1 13 *'), false);
+});
+
+test('isValidCron rejects day-of-week > 7 (only 0..7 are valid POSIX values)', () => {
+  assert.equal(isValidCron('0 9 * * 8'), false);
+  assert.equal(isValidCron('0 9 * * 99'), false);
+});
+
+test('isValidCron accepts day-of-week 7 as a Sunday alias', () => {
+  // POSIX cron + most real schedulers accept both 0 and 7 for Sunday.
+  assert.equal(isValidCron('0 9 * * 7'), true);
+  assert.equal(isValidCron('0 9 * * 0'), true);
+});
+
+test('isValidCron rejects step sizes larger than the field range', () => {
+  assert.equal(isValidCron('*/60 * * * *'), false); // step > minute max
+  assert.equal(isValidCron('* */24 * * *'), false); // step > hour max
+  assert.equal(isValidCron('*/15 * * * *'), true);  // valid 15-min step
+});
+
+test('isValidCron rejects ranges with reversed endpoints (hi < lo)', () => {
+  assert.equal(isValidCron('0 9 * * 5-1'), false);
+  assert.equal(isValidCron('0 9 5-1 * *'), false);
+});
+
+test('isValidCron accepts well-formed lists, ranges, and steps', () => {
+  assert.equal(isValidCron('0 9 * * 1-5'), true);
+  assert.equal(isValidCron('0,30 9 * * 1-5'), true);
+  assert.equal(isValidCron('0 9 1,15 * *'), true);
+  assert.equal(isValidCron('*/15 9-17 * * 1-5'), true);
+});
+
+test('isValidCronField is exposed and pins per-field bounds', () => {
+  // Bounds list MUST follow the canonical [min, hour, dom, month, dow]
+  // order Posix cron uses, so a future field reorder breaks loudly.
+  assert.equal(FIELD_BOUNDS.length, 5);
+  assert.equal(FIELD_BOUNDS[0].name, 'minute');
+  assert.equal(FIELD_BOUNDS[1].name, 'hour');
+  assert.equal(FIELD_BOUNDS[4].name, 'day-of-week');
+  // Spot-check a value-aware token.
+  assert.equal(isValidCronField('59', FIELD_BOUNDS[0]), true);
+  assert.equal(isValidCronField('60', FIELD_BOUNDS[0]), false);
+});
+
+test('isValidCron rejects negative numbers and signs', () => {
+  assert.equal(isValidCron('-1 9 * * *'), false);
+  assert.equal(isValidCron('+0 9 * * *'), false);
 });
