@@ -5331,10 +5331,50 @@ function buildSpellRow(spell, isActive) {
   const toggle = document.createElement('button');
   toggle.className = `spell-toggle ${spell.enabled ? 'spell-on' : ''}`;
   toggle.textContent = spell.enabled ? 'On' : 'Off';
-  toggle.onclick = (e) => {
+  // REGRESSION GUARD (2026-04-27, spellbook-rsi):
+  // Toggle path is in-flight-aware: the button disables itself the
+  // instant the user clicks, shows a lozenge while the daemon write is
+  // in-flight, and reverts to the OLD state with a friendly toast if
+  // the daemon write fails. This kills the "double-click inverts state"
+  // failure mode AND surfaces drift loudly instead of silently.
+  toggle.onclick = async (e) => {
     e.stopPropagation();
-    merlin.toggleSpell(spell.id, !spell.enabled);
-    setTimeout(loadSpells, 500);
+    if (toggle.disabled) return; // double-click guard
+    const prevText = toggle.textContent;
+    const prevClass = toggle.className;
+    const requested = !spell.enabled;
+    // Optimistic: flip immediately so the user sees feedback < 100ms.
+    toggle.disabled = true;
+    toggle.textContent = '…';
+    toggle.className = `spell-toggle spell-pending ${requested ? 'spell-on' : ''}`;
+    let result;
+    try {
+      result = await merlin.toggleSpell(spell.id, requested);
+    } catch (err) {
+      result = { success: false, error: 'Couldn\'t reach the app — try again.' };
+    }
+    if (result && result.success) {
+      // Daemon confirmed. Refresh from source of truth so any other
+      // changes (e.g. lastRunAt updates) land too.
+      setTimeout(loadSpells, 250);
+    } else {
+      // Drift: revert to prior visual state and surface the friendly
+      // error inline. The next loadSpells will re-pull authoritative
+      // state if the user taps again.
+      toggle.disabled = false;
+      toggle.textContent = prevText;
+      toggle.className = prevClass;
+      // Prefer result.error (always plain English from friendlyReason()
+      // at the IPC boundary). Never leak result.reason — those are
+      // stable technical codes ('not-found', 'lock-timeout', ...) that
+      // belong in logs, not in toasts. REGRESSION GUARD (2026-04-27):
+      // the old `result.error || result.reason` fallback would have
+      // leaked the raw code if a future IPC return omitted `error`.
+      const msg = (result && typeof result.error === 'string' && result.error)
+        ? result.error
+        : 'Couldn\'t change the spell. Please try again.';
+      showSpellToast(msg);
+    }
   };
 
   // Show retry button for failed spells
@@ -5463,16 +5503,35 @@ async function activateSpell(template, row) {
     const staggeredCron = offsetCronMinutes(template.cron, brandHashMinuteOffset(brand));
     try {
       const r = await merlin.createSpell(`merlin-${template.spell}`, staggeredCron, template.name, template.prompt, brand);
-      results.push({ brand, ok: r?.success === true, error: r?.error });
+      // Two layers of "ok": the SKILL.md write (r.success) AND the
+      // daemon registration (r.daemon.ok). The renderer separates these
+      // so the user gets a precise hint when only the daemon side
+      // failed (e.g. Claude Code Desktop not installed yet) — they can
+      // install it later and the spell will pick up.
+      results.push({
+        brand,
+        ok: r && r.success === true,
+        daemonOk: r && r.daemon && r.daemon.ok === true,
+        daemonError: r && r.daemonError,
+        error: r && r.error,
+      });
     } catch (err) {
-      results.push({ brand, ok: false, error: err?.message || 'unknown' });
+      // REGRESSION GUARD (2026-04-27, spellbook-rsi):
+      // Never surface raw err.message to the user — that path leaks
+      // Electron internals + stack traces into the failure-display row
+      // and violates the friendlyError rule. Map every catch into a
+      // generic "couldn't reach the app" toast and log the raw detail
+      // to the console for support.
+      console.warn('[activateSpell] IPC error for brand', brand, err);
+      results.push({ brand, ok: false, daemonOk: false, error: 'Couldn\'t save the spell — try again.' });
     }
   }
 
   const okCount = results.filter(r => r.ok).length;
   const failed = results.filter(r => !r.ok);
+  const daemonMissCount = results.filter(r => r.ok && !r.daemonOk).length;
 
-  if (okCount === targetBrands.length) {
+  if (okCount === targetBrands.length && daemonMissCount === 0) {
     row.querySelector('.spell-dot').className = 'spell-dot dot-active';
     row.querySelector('.spell-meta').textContent = okCount === 1 ? 'Active ✓' : `Active for ${okCount} brands ✓`;
     setTimeout(() => loadSpells(), 2000);
@@ -5481,6 +5540,17 @@ async function activateSpell(template, row) {
     // "primary" one to run immediately. Other brands will fire on schedule.
     const primaryBrand = document.getElementById('brand-select')?.value || targetBrands[0];
     showFirstRunPrompt(template, primaryBrand);
+  } else if (okCount === targetBrands.length && daemonMissCount > 0) {
+    // SKILL.md wrote everywhere but daemon registration is missing on at
+    // least one brand. Most common cause: Claude Code Desktop not
+    // installed yet. Show a friendly hint instead of a red dot — the
+    // spell IS saved and will activate as soon as CCD is installed.
+    row.querySelector('.spell-dot').className = 'spell-dot dot-warning';
+    row.querySelector('.spell-meta').textContent = 'Saved — open Claude Code Desktop to start running';
+    row.style.pointerEvents = '';
+    const firstHint = (results.find(r => r.daemonError) || {}).daemonError;
+    if (firstHint) showSpellToast('Spell saved', firstHint, 'info');
+    setTimeout(() => loadSpells(), 2000);
   } else if (okCount > 0) {
     // Partial success — show both counts so the user knows some worked
     row.querySelector('.spell-dot').className = 'spell-dot dot-warning';

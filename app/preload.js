@@ -275,6 +275,11 @@ contextBridge.exposeInMainWorld('merlin', {
   sendSilent: (text) => ipcRenderer.invoke('send-message', assertStr(text, MAX_TEXT), { silent: true }),
   createSpell: (taskId, cron, desc, prompt, brand) => ipcRenderer.invoke('create-spell', assertStr(taskId, 100), assertCron(cron), assertStr(desc, 500), assertStr(prompt, MAX_STR), assertBrand(brand)),
   listSpells: (brand) => ipcRenderer.invoke('list-spells', assertBrand(brand)),
+  // Spellbook → Scheduled-tasks daemon (deterministic file IO, no LLM hop)
+  // See REGRESSION GUARD (2026-04-27, spellbook-rsi) at toggle-spell handler.
+  deleteSpell: (taskId) => ipcRenderer.invoke('delete-spell', assertStr(taskId, 200)),
+  scheduledTasksAvailability: () => ipcRenderer.invoke('scheduled-tasks-availability'),
+  scheduledTasksSnapshot: () => ipcRenderer.invoke('scheduled-tasks-snapshot'),
 
   // Approvals
   approveTool: (id) => ipcRenderer.invoke('approve-tool', assertStr(id, 200)),

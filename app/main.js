@@ -10,6 +10,7 @@ const { createInitBarrier } = require('./async-barrier');
 const { verifyChecksumsSignature } = require('./update-verifier');
 const { cleanWhisperTranscript } = require('./whisper-transcript-clean');
 const spellConfig = require('./spell-config');
+const scheduledTasksDaemon = require('./scheduled-tasks-daemon');
 const { runFastOpenOAuth, ACTIVE_PLATFORMS: FAST_OPEN_PLATFORMS } = require('./oauth-fast-open');
 
 // Register merlin:// as a privileged scheme BEFORE app ready. Without this,
@@ -5108,8 +5109,14 @@ ipcMain.handle('open-merlin-folder', () => { shell.openPath(appRoot); });
 //
 // The marker string "<!-- merlin-skill-v2 -->" is written as the first line
 // of the body so migrateLegacySkills() can distinguish freshly-written
-// skills from legacy/hand-edited ones without parsing prose.
-const SKILL_BODY_MARKER = '<!-- merlin-skill-v2 -->';
+// skills from legacy/hand-edited ones without parsing prose. Both the
+// marker constant and the YAML/markdown escapers live in spell-skill-md.js
+// so the SKILL.md construction is testable without Electron — see
+// spell-skill-md.test.js for the YAML-injection regression suite.
+const {
+  buildSkillBody,
+  SKILL_BODY_MARKER,
+} = require('./spell-skill-md');
 
 // Move orphaned dashboard artifacts from the legacy tools/results/ location
 // into the workspace's main results/_legacy/ folder. Runs once per install,
@@ -5370,40 +5377,42 @@ function migrateLegacySkills() {
   return { scanned, migrated, skipped, errors };
 }
 
-function buildSkillBody({ fullTaskId, description, cron, prompt, brandName }) {
-  const frontmatter = `---\nname: ${fullTaskId}\ndescription: ${description}\ncronExpression: "${cron}"\n---\n`;
-  let brandLock = '';
-  if (brandName) {
-    brandLock = `
-## Brand Lock — ${brandName}
+// SKILL.md construction (frontmatter + brand-lock + first-run block) lives
+// in spell-skill-md.js — see that module's REGRESSION GUARD comment for
+// the YAML-injection rules pinned by spell-skill-md.test.js.
 
-This scheduled task operates EXCLUSIVELY on brand \`${brandName}\`. Every brand-scoped MCP tool call in this session MUST include \`brand: "${brandName}"\` as an argument. Do not omit it. Do not substitute another brand. The Merlin MCP server will REFUSE brand-scoped actions that are missing the brand argument and return a loud error — don't let that happen by forgetting.
-
-Examples of correctly-scoped calls for this task:
-
-- \`mcp__merlin__dashboard({ action: "dashboard", brand: "${brandName}", batchCount: 7 })\`
-- \`mcp__merlin__meta_ads({ action: "insights", brand: "${brandName}" })\`
-- \`mcp__merlin__tiktok_ads({ action: "insights", brand: "${brandName}" })\`
-- \`mcp__merlin__google_ads({ action: "insights", brand: "${brandName}" })\`
-- \`mcp__merlin__shopify({ action: "analytics", brand: "${brandName}" })\`
-- \`mcp__merlin__klaviyo({ action: "performance", brand: "${brandName}" })\`
-- \`mcp__merlin__email({ action: "audit", brand: "${brandName}" })\`
-- \`mcp__merlin__seo({ action: "audit", brand: "${brandName}" })\`
-- \`mcp__merlin__content({ action: "image", brand: "${brandName}" })\`
-- \`mcp__merlin__video({ action: "generate", brand: "${brandName}" })\`
-
-Brand assets live at \`assets/brands/${brandName}/\`. Read \`brand.md\` for voice and positioning, and \`memory.md\` for prior decisions before acting. Save any new learnings back to \`memory.md\` so the next run compounds.
-`;
-  }
-  const firstRunBlock = `\nFirst-run check: If this is the first time running (no prior results exist for this task), use the best quality settings, narrate each step, show results visually, and end with a summary of what you did and when the next scheduled run is.\n`;
-  return `${frontmatter}${SKILL_BODY_MARKER}\n${brandLock}${firstRunBlock}\n${prompt}\n`;
-}
-
-// ── Spell creation: write SKILL.md directly (no Claude, no MCP) ──
-ipcMain.handle('create-spell', (_, taskId, cron, description, prompt, brandName) => {
+// ── Spell creation: write SKILL.md + register with daemon (no Claude, no MCP) ──
+//
+// Two-step deterministic flow:
+//   1. Write SKILL.md to ~/.claude/scheduled-tasks/<id>/SKILL.md
+//   2. Register the task with Claude Code Desktop's daemon via direct
+//      file IO into its scheduled-tasks.json
+//
+// Until step 2 was added (2026-04-27 RSI), Merlin spells lived on disk as
+// SKILL.md folders that the daemon never knew about — so they NEVER fired
+// unless the user manually ran `mcp__scheduled-tasks__create_scheduled_task`
+// from a separate Claude Code CLI session. The Spellbook UX showed them as
+// active and the morning briefings simply never arrived.
+//
+// Daemon registration is best-effort: when Claude Code Desktop is not
+// installed, step 1 still succeeds and the renderer surfaces a friendly
+// "install Claude Code Desktop to schedule spells" hint instead of a
+// silent failure. Step 2's outcome is returned to the caller as
+// `daemon` { ok, action, reason? } so the renderer can decide how loudly
+// to surface drift.
+ipcMain.handle('create-spell', async (_, taskId, cron, description, prompt, brandName) => {
   try {
-    // Validate inputs
-    if (typeof taskId !== 'string' || taskId.length > 100) return { success: false, error: 'invalid taskId' };
+    // Validate inputs.
+    // Strict task ID shape — alphanumeric + hyphen + underscore only,
+    // matches the filesystem slug grammar AND the daemon module's
+    // TASK_ID_RE. Rejects path traversal, shell-meta chars, and YAML
+    // delimiters before we compose any frontmatter or path.
+    if (typeof taskId !== 'string' || taskId.length === 0 || taskId.length > 100) {
+      return { success: false, error: 'invalid taskId' };
+    }
+    if (!/^[a-z0-9_-]+$/i.test(taskId.replace(/^merlin-/, ''))) {
+      return { success: false, error: 'invalid taskId' };
+    }
     // Delegate to the shared validator in spell-config.js so a cron that
     // passes the test-suite validator also passes at the IPC boundary.
     // See REGRESSION GUARD in spell-config.js at CRON_RE.
@@ -5414,14 +5423,28 @@ ipcMain.handle('create-spell', (_, taskId, cron, description, prompt, brandName)
 
     // Prefix task ID with brand name for per-brand isolation
     const fullTaskId = brandName ? `merlin-${brandName}-${taskId.replace('merlin-', '')}` : taskId;
+    // Final task ID must satisfy the daemon module's strict ID rule —
+    // double-check after the prefix concat to catch any drift.
+    if (!/^merlin-[a-z0-9_-]+$/i.test(fullTaskId) || fullTaskId.length > 200) {
+      return { success: false, error: 'invalid taskId' };
+    }
     const tasksDir = path.join(os.homedir(), '.claude', 'scheduled-tasks', fullTaskId);
+    const skillPath = path.join(tasksDir, 'SKILL.md');
     fs.mkdirSync(tasksDir, { recursive: true });
 
     // Build brand lock + first-run showcase + prompt into the SKILL.md body.
     // See buildSkillBody for why brand gets a dedicated lock section with
     // literal MCP call examples rather than inline prose.
     const skillContent = buildSkillBody({ fullTaskId, description, cron, prompt, brandName });
-    fs.writeFileSync(path.join(tasksDir, 'SKILL.md'), skillContent);
+    // Atomic write — if writeFileSync throws (disk full, EACCES) the
+    // tmp file is cleaned up and we don't leave a half-SKILL.md behind.
+    const skillTmp = skillPath + '.tmp';
+    fs.writeFileSync(skillTmp, skillContent, { mode: 0o600 });
+    try { fs.renameSync(skillTmp, skillPath); }
+    catch (err) {
+      try { fs.unlinkSync(skillTmp); } catch { /* best-effort */ }
+      throw err;
+    }
 
     // Store spell metadata per-brand
     const cfg = readConfig();
@@ -5435,7 +5458,28 @@ ipcMain.handle('create-spell', (_, taskId, cron, description, prompt, brandName)
     }
     writeConfig(cfg);
 
-    return { success: true };
+    // Register the task with the Claude Code Desktop daemon. Without this
+    // step the SKILL.md sits on disk forever and never fires. We do this
+    // AFTER the SKILL.md write because the daemon needs filePath to point
+    // at an existing file — registering first would let the daemon try to
+    // read a non-existent file on its next poll.
+    const daemonResult = await scheduledTasksDaemon.registerOrUpdateTask({
+      id: fullTaskId,
+      cron,
+      filePath: skillPath,
+      cwd: appRoot,
+      enabled: true,
+    });
+
+    return {
+      success: true,
+      daemon: daemonResult,
+      // Friendly drift surface for the renderer when daemon is missing.
+      // Surface only on the unhappy path so the happy path stays terse.
+      ...(daemonResult && !daemonResult.ok
+        ? { daemonError: scheduledTasksDaemon.friendlyReason(daemonResult.reason) }
+        : {}),
+    };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -7927,58 +7971,174 @@ ipcMain.handle('update-spell-meta', (_, taskId, meta) => {
   return { success: true };
 });
 
-ipcMain.handle('toggle-spell', (_, taskId, enabled) => {
+// REGRESSION GUARD (2026-04-27, spellbook-rsi):
+// Toggle path is DETERMINISTIC FILE IO via scheduled-tasks-daemon.js. Do
+// NOT reintroduce the old "ask Claude via SDK to call update_scheduled_task"
+// path — that path produced the user-visible refusal:
+//   "I can't do that. There's no update_scheduled_task tool, and I won't
+//    take silent action on scheduled tasks."
+// when (a) the model treated "Silently" as a coercion attempt, (b) the
+// unprefixed tool name didn't resolve, and (c) the SDK session was missing
+// the scheduled-tasks MCP server entirely. The local merlin-config.json
+// `enabled` flag has zero effect on the daemon — only the entry in
+// %APPDATA%/Claude/claude-code-sessions/<UUID>/<UUID>/scheduled-tasks.json
+// controls whether the task fires. See scheduled-tasks-daemon.js for
+// path-discovery and atomic-write semantics.
+//
+// scheduled-tasks-daemon.test.js:'main.js toggle/create paths do not echo
+// update_scheduled_task in any LLM prompt' enforces this rule by source-
+// scanning main.js for the string `update_scheduled_task` outside comments.
+ipcMain.handle('toggle-spell', async (_, taskId, enabled) => {
   if (!taskId || typeof taskId !== 'string') return { success: false, error: 'invalid taskId' };
   // Strict task ID shape — must match the filesystem slug grammar. Rejects
-  // path traversal and shell-meta chars before we echo the value into a
-  // Claude prompt.
+  // path traversal and shell-meta chars before any IO.
+  if (!/^merlin-[a-z0-9_-]+$/i.test(taskId) || taskId.length > 200) {
+    return { success: false, error: 'invalid taskId' };
+  }
+  if (typeof enabled !== 'boolean') return { success: false, error: 'invalid enabled' };
+
+  // Capture the prior local-config value BEFORE mutating it, so a daemon
+  // write failure can roll the local config back to match daemon state.
+  // Without this, a force-quit between local-config write and daemon ack
+  // would persist a UI-only "Off" while the daemon kept firing.
+  // REGRESSION GUARD (2026-04-27, spellbook-rsi):
+  // Source-scan tests (main-spellbook-rollback.test.js) pin the
+  // capture-prev → write-local → daemon-sync → roll-back-on-failure
+  // ordering. Skipping the rollback re-introduces the disk-vs-daemon
+  // drift the audit fixed.
+  const prevMeta = spellConfig.readSpellConfig(readConfig(), taskId, appRoot);
+  const prevEnabled = prevMeta && typeof prevMeta.enabled === 'boolean'
+    ? prevMeta.enabled
+    : true; // default-on matches list-spells' inferred default
+
+  // Update local meta first (writes to correct brand store). This is the
+  // UI's source of truth for visible state — the daemon write below is
+  // what makes the change actually take effect.
+  updateSpellConfig(taskId, { enabled });
+
+  // Direct, deterministic daemon sync. Returns:
+  //   { ok: true,  action: 'enabled'|'disabled'|'unchanged' } — done
+  //   { ok: false, reason: 'no-install'|'not-found'|'lock-timeout'|… } — drift
+  // The renderer maps `reason` through friendlyReason() to plain English
+  // and offers a Retry button on transient failures.
+  let daemonResult;
+  try {
+    daemonResult = await scheduledTasksDaemon.setEnabled(taskId, enabled);
+  } catch (e) {
+    console.warn('[toggle-spell] daemon write threw:', e && e.message);
+    // Roll back local config so a future loadSpells doesn't show the
+    // user a misleading "On" / "Off" derived from the stale write.
+    try { updateSpellConfig(taskId, { enabled: prevEnabled }); } catch (rb) {
+      console.warn('[toggle-spell] rollback failed:', rb && rb.message);
+    }
+    return {
+      success: false,
+      synced: false,
+      error: scheduledTasksDaemon.friendlyReason('unreadable'),
+    };
+  }
+
+  if (daemonResult && daemonResult.ok) {
+    return { success: true, synced: true, action: daemonResult.action };
+  }
+
+  // Drift: local config was changed, daemon write didn't land. Roll the
+  // local config back so the persisted state matches the (unchanged)
+  // daemon state — the user's optimistic flip is reverted on disk too,
+  // not just in the UI. Without this, force-quit-after-failure leaves
+  // merlin-config.json out of sync with the daemon forever.
+  try { updateSpellConfig(taskId, { enabled: prevEnabled }); } catch (rb) {
+    console.warn('[toggle-spell] rollback failed:', rb && rb.message);
+  }
+  // Surface a friendly reason so the renderer can show a Retry button
+  // next to the toggle. The 'not-found' case (SKILL.md exists on disk
+  // but the daemon never knew about it) is special-cased so the renderer
+  // can offer a "Re-register and enable" button via a follow-up create-
+  // spell call.
+  return {
+    success: false,
+    synced: false,
+    reason: daemonResult ? daemonResult.reason : 'unreadable',
+    error: scheduledTasksDaemon.friendlyReason(
+      daemonResult ? daemonResult.reason : 'unreadable',
+    ),
+  };
+});
+
+// IPC: full daemon-availability snapshot for the renderer. Used by the
+// Spellbook panel to render an install-Claude-Code-Desktop hint when the
+// scheduled-tasks.json file isn't found.
+ipcMain.handle('scheduled-tasks-availability', () => {
+  return scheduledTasksDaemon.daemonAvailability();
+});
+
+// IPC: snapshot of the daemon's view, keyed by task id. Used by the
+// renderer to overlay daemon state on top of the disk SKILL.md folders so
+// the UI can flag "registered but absent" or "absent but registered" drift.
+ipcMain.handle('scheduled-tasks-snapshot', () => {
+  return scheduledTasksDaemon.snapshot();
+});
+
+// IPC: delete a spell — removes the daemon registration AND the SKILL.md
+// folder + config entry. Idempotent on missing pieces. The Spellbook
+// panel's right-click "Delete spell" menu wires here.
+ipcMain.handle('delete-spell', async (_, taskId) => {
+  if (!taskId || typeof taskId !== 'string') return { success: false, error: 'invalid taskId' };
   if (!/^merlin-[a-z0-9_-]+$/i.test(taskId) || taskId.length > 200) {
     return { success: false, error: 'invalid taskId' };
   }
 
-  // Update local meta first (writes to correct brand store)
-  updateSpellConfig(taskId, { enabled });
+  // 1. De-register from the daemon first so the cron stops firing before
+  //    we yank the SKILL.md out from under it.
+  let daemonResult;
+  try { daemonResult = await scheduledTasksDaemon.removeTask(taskId); }
+  catch (e) {
+    console.warn('[delete-spell] daemon remove threw:', e && e.message);
+    daemonResult = { ok: false, reason: 'unreadable' };
+  }
 
-  // Build the silent MCP sync message that actually flips the task in the
-  // scheduled-tasks daemon. Wrapped in suppress-next-response so the user
-  // never sees the "done" acknowledgement in chat.
-  const syncMsg = {
-    type: 'user',
-    message: { role: 'user', content:
-      `Silently ${enabled ? 'enable' : 'disable'} the scheduled task "${taskId}" using update_scheduled_task. Reply with only "done".`
+  // 2. Remove the SKILL.md folder. Use rmSync recursive — best-effort, and
+  //    don't fail the IPC if the folder is already gone.
+  const tasksDir = path.join(os.homedir(), '.claude', 'scheduled-tasks', taskId);
+  try {
+    if (fs.existsSync(tasksDir)) {
+      fs.rmSync(tasksDir, { recursive: true, force: true });
     }
+  } catch (e) {
+    console.warn('[delete-spell] rmSync failed:', e && e.message);
+  }
+
+  // 3. Remove the config metadata.
+  try {
+    const cfg = readConfig();
+    let mutated = false;
+    if (cfg.spells && cfg.spells[taskId]) { delete cfg.spells[taskId]; mutated = true; }
+    if (cfg.brandSpells) {
+      for (const brand of Object.keys(cfg.brandSpells)) {
+        if (cfg.brandSpells[brand] && cfg.brandSpells[brand][taskId]) {
+          delete cfg.brandSpells[brand][taskId];
+          mutated = true;
+        }
+      }
+    }
+    if (mutated) writeConfig(cfg);
+  } catch (e) {
+    console.warn('[delete-spell] config update failed:', e && e.message);
+  }
+
+  if (daemonResult && daemonResult.ok) {
+    return { success: true, daemon: daemonResult };
+  }
+  // The daemon de-register failed but the SKILL.md + config are gone.
+  // Tell the user the spell is removed locally but Claude Code Desktop
+  // may need a restart to forget it.
+  return {
+    success: true,
+    daemon: daemonResult,
+    warning: scheduledTasksDaemon.friendlyReason(
+      (daemonResult && daemonResult.reason) || 'unreadable',
+    ),
   };
-
-  // Fast path: an SDK turn is awaiting the next user message. Hand it off
-  // directly — no queue, no session restart.
-  if (resolveNextMessage) {
-    _suppressNextResponse = true;
-    setTimeout(() => { _suppressNextResponse = false; }, 120000);
-    resolveNextMessage(syncMsg);
-    return { success: true, synced: true };
-  }
-
-  // REGRESSION GUARD (2026-04-24, spellbook-audit-fixes):
-  // No active SDK turn → queue the sync and kick off a session so the
-  // toggle actually lands. Previous behaviour returned { synced: false }
-  // silently, leaving the scheduled-tasks daemon on the old state: the
-  // user's toggle UI flipped to Off but the task kept firing on its
-  // existing schedule next cycle. This path mirrors the mobile-input
-  // queue in the ws-server handler (search for `pendingMessageQueue`).
-  if (pendingMessageQueue.length < 50) {
-    _suppressNextResponse = true;
-    setTimeout(() => { _suppressNextResponse = false; }, 120000);
-    pendingMessageQueue.push(syncMsg);
-    if (!activeQuery) {
-      try { startSession(); } catch (e) { console.warn('[toggle-spell] startSession failed:', e.message); }
-    }
-    return { success: true, synced: 'queued' };
-  }
-
-  // Queue is saturated (should never happen in practice — 50-msg cap).
-  // Local state still updated; surface the drop to the renderer so it
-  // knows the sync never went out.
-  return { success: true, synced: false };
 });
 
 // Returns the user's live ads from every connected platform. When a brand is
