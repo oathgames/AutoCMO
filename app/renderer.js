@@ -4915,7 +4915,12 @@ function _getAttachmentsForSend() {
 // raw paths and the SDK has no multimodal slot in our send-message IPC.
 function formatAttachmentsForMessage(text, attachments) {
   if (!attachments || attachments.length === 0) return text;
-  const lines = attachments.map((a) => `- ${a.path}`);
+  // REGRESSION GUARD (2026-04-29, Gitar PR #143 finding 3): null-guard the
+  // path lookup so a malformed entry that bypasses addAttachment's check
+  // can't surface as `- undefined` in the outgoing message. Mirrors the
+  // defensive shape in the paste-drop.js test target — keep both copies
+  // (renderer vs pure helper) in lockstep so the test surface stays valid.
+  const lines = attachments.map((a) => `- ${a && a.path ? a.path : ''}`);
   const header = attachments.length === 1 ? 'Attached file:' : 'Attached files:';
   const body = `${header}\n${lines.join('\n')}`;
   if (!text || !text.trim()) return body;
@@ -5010,8 +5015,22 @@ window.addEventListener('paste', async (e) => {
 
   // Path 2: image items in clipboardData.items (screenshot / "copy image").
   // No `.path`; we materialize via IPC into the brand's inbox/.
-  const imageItems = items.filter((it) => it && it.type && it.type.startsWith('image/'));
-  if (imageItems.length === 0) return; // text-only paste — let textarea handle it
+  //
+  // REGRESSION GUARD (2026-04-29, Gitar PR #143 finding 1): the DataTransfer
+  // spec says items become unavailable after the event dispatch completes —
+  // and `await materializePastedBlob(...)` yields the microtask queue past
+  // that boundary. If we extract files INSIDE the async loop via
+  // `it.getAsFile()` after the first await, only the first image is
+  // reliably materialized; subsequent calls return null and silently skip.
+  // Fix: drain every File object synchronously BEFORE any await. Today's
+  // clipboards rarely produce multi-image pastes (so the bug was latent),
+  // but multi-region screenshot tools and Shottr-style "copy all crops" do
+  // surface this; the cost of the fix is one filter() pass.
+  const imageFiles = items
+    .filter((it) => it && it.type && it.type.startsWith('image/'))
+    .map((it) => (typeof it.getAsFile === 'function' ? it.getAsFile() : null))
+    .filter(Boolean);
+  if (imageFiles.length === 0) return; // text-only paste — let textarea handle it
   e.preventDefault();
   const brand = getActiveBrandSelection();
   if (!brand) {
@@ -5023,9 +5042,7 @@ window.addEventListener('paste', async (e) => {
     });
     return;
   }
-  for (const it of imageItems) {
-    const file = it.getAsFile && it.getAsFile();
-    if (!file) continue;
+  for (const file of imageFiles) {
     const att = await materializePastedBlob(file, brand);
     if (att) addAttachment(att);
   }
