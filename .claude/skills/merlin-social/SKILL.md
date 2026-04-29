@@ -228,7 +228,7 @@ When the user says any of: *"upload my email templates"*, *"import these HTMLs t
 
 The response is a structured envelope `{total, succeeded, failed, perFile: [{filename, name, templateId | error}]}`. Report exact counts to the user — *"uploaded 49 of 51, failed: welcome-3.html (422), abandoned-7.html (422)"* — never paraphrase. Do NOT confabulate template IDs that the binary did not return.
 
-**Klaviyo Flows ARE programmatic** (corrected in v1.20.7 — the prior v1.20.1 release notes + this skill incorrectly claimed Flows were UI-only). After bulk-upload of templates, you can wire the full flow topology via the Flows API.
+**Klaviyo Flows ARE programmatic** (corrected in v1.20.7 — the prior v1.20.1 release notes + this skill incorrectly claimed Flows were UI-only). After bulk-upload of templates, you can wire the full flow topology via the Flows API. v1.20.8 fixed a body-shape bug introduced in v1.20.7: the create payload was inferred from prose in Klaviyo's docs and got the trigger enum, action structure, and field names wrong; the corrected version conforms to the OpenAPI spec at revision `2026-04-15`.
 
 The bulk-import path is `klaviyo({action: "flows-bulk-import", brand, manifestPath, forceReimport?})`. Manifest lives at `assets/brands/<brand>/email/flows.json` and references uploaded templates by their `template_id` from a prior `templates-bulk-upload` pass. Manifest shape:
 
@@ -247,12 +247,42 @@ The bulk-import path is `klaviyo({action: "flows-bulk-import", brand, manifestPa
         {"type": "delay", "duration_seconds": 86400},
         {"type": "send_email", "subject": "Day 1: how it works", "from_name": "POG", "from_email": "hi@trypog.co", "template_id": "T_WELCOME_2"}
       ]
+    },
+    {
+      "name": "POG / Cart Recovery",
+      "trigger": {"type": "ecommerce_started_checkout", "metric_id": "01H8...PLACED_ORDER"},
+      "steps": [...]
     }
   ]
 }
 ```
 
 Step types: `delay {duration_seconds}`, `send_email {subject, preheader, from_name, from_email, template_id, body?}`, `wait_until {time_of_day, timezone}`, `branch {condition}`. Single-flow create is `klaviyo({action: "flow-create", flowBody: {...}})`; status flip is `klaviyo({action: "flow-update-status", flowId, status: "draft"|"manual"|"live"})`.
+
+### Trigger types — manifest enum vs Klaviyo enum
+
+The manifest exposes friendly names; the binary translates to Klaviyo's actual API enum (`list` / `segment` / `metric` / `date`) before POSTing. **Metric-backed triggers REQUIRE a `metric_id`** (Klaviyo identifies metrics by ULID, not name).
+
+| Manifest `trigger.type` | Klaviyo enum | Required field | Notes |
+|---|---|---|---|
+| `list_added` / `added_to_list` | `list` | `list_id` | Subscriber added to the named list |
+| `segment_added` | `segment` | `list_id` (segment ULID) | Field name is `list_id` for both list and segment triggers |
+| `ecommerce_placed_order` | `metric` | `metric_id` | Klaviyo's "Placed Order" metric — fetch the ID via `klaviyo({action: "performance"})` |
+| `ecommerce_started_checkout` | `metric` | `metric_id` | "Started Checkout" metric ID |
+| `viewed_product` | `metric` | `metric_id` | "Viewed Product" metric ID |
+| `custom_event` | `metric` | `metric_id` | Any custom-tracked event — find the ID in Klaviyo Metrics |
+| `back_in_stock` | `metric` | `metric_id` | Routes via the back-in-stock metric event (the dedicated `low-inventory` trigger has different required fields and isn't what most users mean) |
+| `profile_subscribed_marketing` | `metric` | `metric_id` | "Subscribed to List" / "Marketing Consent Updated" metric |
+| `birthday` | `date` | (none — defaults supplied) | Uses `ProfilePropertyDateTrigger` with `date_profile_property: "Birthday"` and 9:00 trigger time |
+
+Workflow for any metric-triggered flow (cart abandonment, post-purchase, browse abandonment, etc.):
+
+1. Run `klaviyo({action: "performance", brand})` to get the metric list with IDs.
+2. Find the relevant metric (e.g. `Placed Order` → `01HABC...`).
+3. Put the ID in the manifest's `trigger.metric_id` field for that flow.
+4. Run `flows-bulk-import`.
+
+If you skip step 3 the binary refuses the build with a clear error: *"klaviyo: metric-backed trigger 'ecommerce_placed_order' requires metric_id (Klaviyo identifies metrics by ULID, not name…)"* — don't try to invent a metric ID; always pull it from `performance`.
 
 **CAN-SPAM gate** (the email equivalent of Postscript's TCPA gate): every flow must have an unsubscribe token in inline bodies (`{{ unsubscribe }}` or `{% unsubscribe %}`), a physical mailing address (inline OR resolvable from `brand.md` `Address:`), and `trigger.type` on the documented-consent allowlist (`list_added`, `segment_added`, `profile_subscribed_marketing`, `ecommerce_placed_order`, `ecommerce_started_checkout`, `viewed_product`, `custom_event`). Failures are surfaced verbatim — never auto-fix; refuse the import and tell the user which rule fired on which step.
 
