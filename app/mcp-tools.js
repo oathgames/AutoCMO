@@ -1494,6 +1494,11 @@ function buildTools(tool, z, ctx) {
       // paths here; derive the rest via fs.statSync. Files that don't exist
       // or aren't regular files get reported back as `rejected` by the
       // pipeline's per-file validator (validateInputFile in bulk-upload.js).
+      // REGRESSION GUARD (2026-04-29, Gitar PR #143 finding 2): use the
+      // promise-based fs API so 200 stat calls don't block the Electron
+      // main-process event loop (~100-200ms stall on slow disks would
+      // freeze IPC + UI). The handler is already async — there's no
+      // reason to use the sync variant.
       const fileObjs = [];
       const preRejected = [];
       for (const p of files) {
@@ -1502,7 +1507,7 @@ function buildTools(tool, z, ctx) {
           continue;
         }
         let st;
-        try { st = fs.statSync(p); }
+        try { st = await fs.promises.stat(p); }
         catch { preRejected.push({ file: path.basename(p), reason: 'not-found' }); continue; }
         if (!st.isFile()) {
           preRejected.push({ file: path.basename(p), reason: 'not-a-file' });
