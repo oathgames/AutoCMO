@@ -726,9 +726,28 @@ function buildTools(tool, z, ctx) {
   //                              assets/brands/<brand>/), dir, optional
   //                              nameTemplate ("POG / 01-welcome / {basename}"),
   //                              optional applyTokens (default true)
+  //
+  // Flow API surface (added 2026-04-29, v1.20.7 — closes the gap that the
+  // prior klaviyo_templates.go HISTORY block + merlin-social SKILL incorrectly
+  // documented as "UI-only"):
+  //   flows-list               — no extra args (returns id/name/status/trigger_type/created/updated)
+  //   flow-get                 — flowId, optional includeDefinition (default true)
+  //   flow-create              — flowBody {name, trigger:{type,...}, steps:[{type,...}]}
+  //                              CAN-SPAM gate runs BEFORE HTTP — refused if violated.
+  //   flow-update-status       — flowId, status (draft|manual|live)
+  //   flow-delete              — flowId
+  //   flows-bulk-import        — manifestPath (must live under
+  //                              assets/brands/<brand>/email/), brand (REQUIRED),
+  //                              optional forceReimport. Reads
+  //                              {manifest_version, brand, flows:[...]}.
+  //                              Per-flow CAN-SPAM gate refuses violators
+  //                              with verbatim rule reasons; sequential POST
+  //                              with 6s spacing (shares the templates-bulk-
+  //                              upload pacing because Klaviyo's per-minute
+  //                              cap is plan-tier-global, not per-endpoint).
   tools.push(defineTool({
     name: 'klaviyo',
-    description: 'Klaviyo email marketing — performance, lists, campaigns + email template CRUD (list/get/create/update/delete) + bulk template upload from a folder of HTML files (with optional generic-placeholder → Klaviyo Django tag translation). Note: Klaviyo Flows themselves are UI-only — the public API does not expose flow construction.',
+    description: 'Klaviyo email marketing — performance, lists, campaigns + email template CRUD (list/get/create/update/delete) + bulk template upload from a folder of HTML files + full programmatic Flows API (list/get/create/update-status/delete + bulk-import a manifest of email automations with CAN-SPAM gate). Token swap translates {{UNSUB_URL}} / {{ FIRST_NAME }} / {{COMPANY_ADDRESS}} placeholders into Klaviyo Django tags.',
     // REGRESSION GUARD (2026-04-29, Gitar PR #151 finding): klaviyo
     // tool's expanded action surface includes template-create / -update /
     // -delete and bulk-template-upload (51+ writes per call). Every other
@@ -754,9 +773,14 @@ function buildTools(tool, z, ctx) {
     concurrency: { platform: 'klaviyo' },
     input: {
       action: z.enum([
+        // Read-only reporting
         'performance', 'lists', 'campaigns',
+        // Email template CRUD + bulk
         'templates-list', 'template-get', 'template-create',
         'template-update', 'template-delete', 'templates-bulk-upload',
+        // Flow CRUD + bulk
+        'flows-list', 'flow-get', 'flow-create',
+        'flow-update-status', 'flow-delete', 'flows-bulk-import',
       ]).describe('Operation'),
       brand: brandSchema.optional(),
       batchCount: z.number().optional().describe('Days of data (performance/campaigns)'),
@@ -767,6 +791,13 @@ function buildTools(tool, z, ctx) {
       dir: z.string().optional().describe('Directory of .html files for bulk-upload (must be inside assets/brands/<brand>/)'),
       nameTemplate: z.string().optional().describe('Format string for bulk-upload, e.g. "POG / 01-welcome / {basename}". {basename} = filename without extension.'),
       applyTokens: z.boolean().optional().describe('Translate generic placeholders ({{UNSUB_URL}}, {{ FIRST_NAME }}, {{COMPANY_NAME}}, …) into Klaviyo Django tags. Default true for bulk-upload, false for single template-create/update.'),
+      // Flow fields (used by flow-* + flows-bulk-import actions)
+      flowId: z.string().optional().describe('Klaviyo flow ID (get/update-status/delete)'),
+      flowBody: z.any().optional().describe('Full flow body for flow-create. Shape: {name, trigger:{type, list_id?, metric?}, steps:[{type, ...}]}. Step types: "delay" {duration_seconds}, "send_email" {subject, preheader, from_email, from_name, template_id?, body?}, "wait_until" {time_of_day, timezone}, "branch" {condition}. The binary runs CheckFlowCANSPAM before any HTTP — trigger.type must be on the documented-consent allowlist (list_added, segment_added, profile_subscribed_marketing, ecommerce_placed_order, ecommerce_started_checkout, viewed_product, custom_event), every send_email step must have an unsubscribe token + physical address + subject + from_name. Failures REFUSE the create (no auto-fix).'),
+      status: z.string().optional().describe('Target flow status for flow-update-status. One of: draft, manual, live.'),
+      includeDefinition: z.boolean().optional().describe('When true on flow-get, request the heavy `definition` blob (full flow topology) via additional-fields[flow]=definition. Default true. Set false to skip and get only the summary attributes.'),
+      manifestPath: z.string().optional().describe('Filesystem path to a flow manifest JSON for flows-bulk-import. MUST live under assets/brands/<brand>/email/ — the binary refuses arbitrary paths to block traversal. Manifest shape: {manifest_version, brand, flows:[{name, status?, trigger, steps}, ...]}. References uploaded templates by template_id (run templates-bulk-upload first to get the IDs).'),
+      forceReimport: z.boolean().optional().describe('When true, flows-bulk-import bypasses the live-state dedup that refuses duplicate-by-name imports. Use this only when intentionally creating a second copy.'),
     },
     handler: async (args) => toEnvelope(await runBinary(ctx, 'klaviyo-' + args.action, args)),
   }, tool, z, ctx));

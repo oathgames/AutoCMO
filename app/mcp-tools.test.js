@@ -743,10 +743,11 @@ test('klaviyo tool registers all template + reporting actions', () => {
     assert.ok(desc.includes(keyword),
       `klaviyo description must reference keyword: ${keyword}`);
   }
-  // Description must explicitly call out the Flow-construction caveat so
-  // the LLM never confabulates "I created your flows."
+  // Description must reference Flows API surface so the LLM routes
+  // flow-construction requests to klaviyo. Historical (v1.20.1) the
+  // description called Flows "UI-only"; that was corrected in v1.20.7
+  // when full Flows API coverage shipped — see klaviyo_flows.go HISTORY.
   assert.match(entry.description, /flow/i);
-  assert.match(entry.description, /UI-only/i);
 });
 
 test('klaviyo tool input schema accepts every template field', () => {
@@ -827,4 +828,81 @@ test('klaviyo template-create handler returns a structured envelope', async () =
   assert.ok(out, 'handler must return a result');
   // Envelope-or-text contract.
   assert.ok(Array.isArray(out.content) || typeof out.text === 'string');
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// Klaviyo Flows API surface — added v1.20.7 (klaviyo-flows-api session,
+// 2026-04-29) to close the gap that the v1.20.1 release notes + the
+// merlin-social SKILL incorrectly documented as "UI-only." The Flows
+// public API exposes full programmatic flow construction. These four
+// tests pin the new action surface so a future refactor can't silently
+// drop a flow action and re-create the confabulation incident.
+// ─────────────────────────────────────────────────────────────────────
+
+test('klaviyo description references the Flows API surface (v1.20.7 correction)', () => {
+  const { tool, registry } = makeFakeTool();
+  buildTools(tool, makeFakeZ(), makeCtx());
+  const entry = registry.find(t => t.name === 'klaviyo');
+  const desc = entry.description.toLowerCase();
+  // Must mention each new family.
+  for (const keyword of ['flow', 'bulk-import', 'can-spam']) {
+    assert.ok(desc.includes(keyword),
+      `klaviyo description must reference flow keyword: ${keyword}`);
+  }
+  // Must NOT claim flows are UI-only any more (regression guard for the
+  // v1.20.1 documentation bug).
+  assert.ok(!/ui[- ]only/i.test(entry.description),
+    `klaviyo description must NOT claim flows are UI-only — corrected in v1.20.7`);
+});
+
+test('klaviyo flows-list handler dispatches without crashing on engine-missing', async () => {
+  const { tool, registry } = makeFakeTool();
+  const ctx = makeCtx({ getBinaryPath: () => null });
+  buildTools(tool, makeFakeZ(), ctx);
+  const entry = registry.find(t => t.name === 'klaviyo');
+  const out = await entry.handler({ action: 'flows-list' });
+  assert.ok(out, 'handler must return a result');
+  assert.ok(Array.isArray(out.content) || typeof out.text === 'string',
+    'result must be an MCP content envelope or text');
+});
+
+test('klaviyo flow-create handler dispatches with full flow body', async () => {
+  // flow-create is a write action; pin that the handler path accepts the
+  // structured flowBody field without crashing on the new shape.
+  const { tool, registry } = makeFakeTool();
+  const ctx = makeCtx({ getBinaryPath: () => null });
+  buildTools(tool, makeFakeZ(), ctx);
+  const entry = registry.find(t => t.name === 'klaviyo');
+  const out = await entry.handler({
+    action: 'flow-create',
+    flowBody: {
+      name: 'Test Welcome',
+      trigger: { type: 'list_added', list_id: 'L_1' },
+      steps: [
+        { type: 'send_email', subject: 'Hi', from_name: 'Brand', template_id: 'T_1' },
+      ],
+    },
+  });
+  assert.ok(out, 'handler must return a result');
+  assert.ok(Array.isArray(out.content) || typeof out.text === 'string');
+});
+
+test('klaviyo flows-bulk-import handler dispatches with brand + manifestPath', async () => {
+  // flows-bulk-import is brand-required (manifest must live under
+  // assets/brands/<brand>/email/ — the binary refuses arbitrary paths).
+  // With a brand passed but no engine, we expect to reach the
+  // engine-not-found branch, NOT the brand-guard refusal.
+  const { tool, registry } = makeFakeTool();
+  const ctx = makeCtx({ getBinaryPath: () => null });
+  buildTools(tool, makeFakeZ(), ctx);
+  const entry = registry.find(t => t.name === 'klaviyo');
+  const out = await entry.handler({
+    action: 'flows-bulk-import',
+    brand: 'demo',
+    manifestPath: 'assets/brands/demo/email/flows.json',
+  });
+  assert.ok(out, 'handler must return a result');
+  const text = (out.content && out.content[0] && out.content[0].text) || out.text || '';
+  assert.ok(!text.includes('no brand specified'),
+    'brand=demo must reach the engine layer, not the brand-guard refusal');
 });
