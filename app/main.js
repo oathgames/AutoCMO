@@ -10915,9 +10915,43 @@ async function downloadAndApplyUpdate() {
     const data = JSON.parse(raw.toString());
     if (!data || !data.tag_name) throw new Error('Invalid release data');
     const latestVersion = data.tag_name.replace(/^v/, '');
-    if (!latestVersion || !isNewerVersion(latestVersion, currentVersion)) return;
+    // REGRESSION GUARD (2026-05-01, silent-update-drift self-heal):
+    // The original short-circuit returned early when latestVersion ===
+    // currentVersion, assuming "same version → up to date." That was
+    // unsafe in combination with the Phase 1 silent-skip bug below: a
+    // partial Phase 1 in a previous run could leave the install with
+    // version.json bumped but most files missing, and every subsequent
+    // /update would then short-circuit here forever. Now, when the
+    // remote release matches our recorded version, we sample-check the
+    // updatable manifest on disk; if any listed file is missing, we
+    // re-run the full update against the current tag as a self-heal
+    // (refetches the gap, no version bump since version is already
+    // correct). The Phase 1 hard-fail below ensures self-heal can't
+    // itself partial-succeed.
+    let needsSelfHeal = false;
+    if (latestVersion && !isNewerVersion(latestVersion, currentVersion)) {
+      try {
+        const localManifestRaw = fs.readFileSync(path.join(appRoot, 'version.json'), 'utf8');
+        const localManifest = JSON.parse(localManifestRaw);
+        const updatables = Array.isArray(localManifest.updatable) ? localManifest.updatable : [];
+        const missing = [];
+        for (const rel of updatables) {
+          if (typeof rel !== 'string' || rel.length === 0) continue;
+          if (path.isAbsolute(rel) || /(^|[/\\])\.\.([/\\]|$)/.test(rel)) continue;
+          if (!fs.existsSync(path.join(appRoot, rel))) missing.push(rel);
+        }
+        if (missing.length > 0) {
+          console.warn(`[update] integrity gap: ${missing.length} of ${updatables.length} updatable files missing on disk — self-healing against ${data.tag_name}`);
+          if (win && !win.isDestroyed()) win.webContents.send('update-progress', `Repairing ${missing.length} missing files...`);
+          needsSelfHeal = true;
+        }
+      } catch (e) {
+        console.warn('[update] integrity check skipped:', e.message);
+      }
+    }
+    if (!latestVersion || (!isNewerVersion(latestVersion, currentVersion) && !needsSelfHeal)) return;
 
-    if (win && !win.isDestroyed()) win.webContents.send('update-progress', 'Downloading...');
+    if (win && !win.isDestroyed() && !needsSelfHeal) win.webContents.send('update-progress', 'Downloading...');
 
     const versionJson = JSON.parse((await httpsGet(`https://raw.githubusercontent.com/oathgames/Merlin/${data.tag_name}/version.json`)).toString());
 
@@ -10996,6 +11030,7 @@ async function downloadAndApplyUpdate() {
     };
 
     const stagedUpdatables = [];
+    const fetchFailures = [];
     for (const filePath of (versionJson.updatable || [])) {
       if (!isSafeUpdatablePath(filePath)) {
         console.warn('[update] refusing unsafe manifest entry:', filePath);
@@ -11015,9 +11050,34 @@ async function downloadAndApplyUpdate() {
         stagedUpdatables.push({ filePath, content });
       } catch (e) {
         if (e.message && e.message.includes('Checksum mismatch')) throw e;
-        // Network failures on individual files are non-fatal — skip.
+        // REGRESSION GUARD (2026-05-01, silent-update-drift fix):
+        // Pre-2026-05-01 this catch console.warn'd and continued, so a
+        // partial Phase 1 (AV quarantining mcp-*.js, raw.githubusercontent
+        // rate-limiting on a hot release, transient network blip) would
+        // ship the surviving subset to disk in Phase 2 + bump version.json,
+        // leaving the install at a fake "latest" version forever (every
+        // subsequent /update saw same version, short-circuited at the top
+        // of downloadAndApplyUpdate, never retried). Live incident:
+        // Ryan's own install at v1.21.0 was missing 57 of 70 updatable
+        // files including every MCP module — Claude Code reported zero
+        // mcp__merlin__* tools because main.js's `require('./mcp-server.js')`
+        // threw silently at boot. Fix: collect every fetch failure and
+        // abort the entire update before any disk write; the user sees
+        // a friendly error, version.json stays accurate, and the next
+        // /update retries cleanly. The companion self-heal block at the
+        // top of downloadAndApplyUpdate unsticks installs already in the
+        // bad state.
+        fetchFailures.push({ filePath, message: e.message || String(e) });
         console.warn('[update] updatable fetch failed:', filePath, e.message);
       }
+    }
+    if (fetchFailures.length > 0) {
+      const sample = fetchFailures.slice(0, 5).map(f => `  - ${f.filePath}: ${f.message}`).join('\n');
+      const more = fetchFailures.length > 5 ? `\n  ... and ${fetchFailures.length - 5} more` : '';
+      throw new Error(
+        `Update aborted: ${fetchFailures.length} of ${(versionJson.updatable || []).length} files failed to download. ` +
+        `Your install is unchanged — try /update again when your network/antivirus is clear.\n${sample}${more}`
+      );
     }
     // Phase 2: write each verified file. Each write is preceded by a
     // one-file backup so we can roll back the entire update on failure.
