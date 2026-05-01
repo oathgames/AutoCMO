@@ -1,7 +1,8 @@
 ---
 name: merlin-analytics
-description: Use when the user asks about performance, how their ads/store/business are doing, ROAS, MER, CAC, LTV, contribution margin, payback period, CPA, ROI, spend, aggregate revenue, dashboard, weekly numbers, wisdom insights, landing page audits, incrementality/holdout testing, or conversion optimization. Covers the cross-platform dashboard (MER + contribution margin + LTV:CAC as the real north stars, platform ROAS reported directionally with attribution window), incrementality framework (geo holdouts, channel-level lift expectations), the wisdom engine (anonymized collective insights), the marketing calendar (launch cadence + seasonal gaps), and the 9-dimension landing page Conversion Rubric with current Core Web Vitals (LCP/INP/CLS). Pulls exact numbers from `mcp__merlin__dashboard` — never estimates or derives metrics.
+description: Use when the user asks about performance, how their ads/store/business are doing, ROAS, MER, CAC, LTV, contribution margin, payback period, CPA, ROI, spend, aggregate revenue, dashboard, weekly numbers, wisdom insights, landing page audits, incrementality/holdout testing, or conversion optimization. Covers the cross-platform dashboard (MER + contribution margin + LTV:CAC as the real north stars, platform ROAS reported directionally with attribution window), incrementality framework (geo holdouts, channel-level lift expectations), the wisdom engine (anonymized collective insights), the marketing calendar (launch cadence + seasonal gaps), the 9-dimension landing page Conversion Rubric with current Core Web Vitals (LCP/INP/CLS), and the GA4 read + write surface (programmatic measurement-plan setup — key events, custom dimensions/metrics, audiences, property settings, idempotent shopify-events attach). Pulls exact numbers from `mcp__merlin__dashboard` — never estimates or derives metrics.
 owner: ryan
+bytes_justification: GA4 read+write (2026-05-01) added 13-action surface + write-side approval-card flows alongside the existing dashboard / wisdom / calendar / Conversion Rubric / incrementality blocks. Splitting GA4 into its own SKILL would fragment the analytics-vs-attribution narrative the dashboard relies on.
 ---
 
 # Analytics & Performance
@@ -150,6 +151,22 @@ GA4 is the source of truth for site behavior, organic traffic acquisition, and m
 | `landing-pages` | Per-URL sessions/engagement; auto-merges into seo-signals.json so SEO clusters can score against real engagement. |
 | `audit-property` | Health audit — key events configured, data streams live, enhanced measurement on, industry category set. |
 
+### Write — measurement plan setup
+
+GA4 has no programmable API for funnel explorations — those live in the Explorations workspace UI. What IS programmable, and what makes funnels POSSIBLE, is the underlying measurement plan: key events (conversions), custom dimensions, custom metrics, audiences, property settings. Setting these up via API lets brands skip the manual click-through-30-screens setup that GA4 otherwise requires.
+
+| Action | Use case |
+|---|---|
+| `create-key-event` | Mark an event as a conversion. Required `analyticsEventName`. Counting method defaults to ONCE_PER_EVENT. |
+| `archive-key-event` | Un-mark an event as a conversion. Required `analyticsKeyEventName`. |
+| `create-custom-dimension` | Add a custom dimension scoped to event/user/item — e.g. "checkout_method", "loyalty_tier". |
+| `create-custom-metric` | Add a custom metric (numeric) — e.g. "items_in_cart". GA4 custom metrics are EVENT-only. |
+| `create-audience` | Define an audience cohort for funnel/comparison analysis — pass full Audience body via `analyticsAudience`. |
+| `update-property-settings` | Set `industryCategory` / `timeZone` / `currencyCode` / `displayName` via `patchBody`. |
+| `attach-shopify-events` | One-click measurement plan: marks the standard ecommerce events (purchase, add_to_cart, begin_checkout, view_item, view_item_list, search, sign_up, generate_lead) as key events, idempotent. **Run this once per brand right after `discover`.** |
+
+Every write action requires an approval card (`cmd.Approved` must be true); the renderer surfaces a confirmation before any mutation. Manual override in tests only.
+
 When BOTH Shopify and GA4 report revenue: Shopify wins per Hard-Won Security Rule 10 (`pickRevenueSource`). GA4 attribution is shown as a diagnostic side panel, never as the topline number.
 
 ## Routing hints
@@ -166,6 +183,11 @@ When BOTH Shopify and GA4 report revenue: Shopify wins per Hard-Won Security Rul
 - "what landing pages convert" / "per-url engagement" → `google_analytics({action: "landing-pages"})`
 - "is my ga4 set up" / "audit my ga4 property" / "ga4 health" → `google_analytics({action: "audit-property"})`
 - "find my ga4 property" / "discover analytics" → `google_analytics({action: "discover"})`
+- "set up my GA4 conversions" / "wire up GA4 for shopify" / "set up the standard ecommerce events" → `google_analytics({action: "attach-shopify-events"})` after `discover`
+- "mark X as a conversion" / "set up purchase tracking in ga4" → `google_analytics({action: "create-key-event", analyticsEventName: "purchase"})`
+- "add a custom dimension" → `google_analytics({action: "create-custom-dimension", analyticsParameterName: "...", analyticsDisplayName: "..."})`
+- "create a ga4 audience" / "cohort for funnel analysis" → `google_analytics({action: "create-audience", analyticsAudience: {...}})`
+- "fix my ga4 timezone" / "set ga4 currency" → `google_analytics({action: "update-property-settings", patchBody: {...}})`
 
 ## Cross-references
 
