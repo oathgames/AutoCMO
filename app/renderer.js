@@ -1690,6 +1690,18 @@ function humanizeUpdateError(raw) {
   if (!s) return 'Update couldn\'t install. Try again in a moment.';
   if (/EPERM|EBUSY|EACCES/i.test(s)) return 'Merlin needs to close before updating. Save your work and try again.';
   if (/ENOSPC/i.test(s)) return 'Not enough disk space for the update. Free up some space and try again.';
+  // REGRESSION GUARD (2026-05-01, silent-update-drift fix companion):
+  // Phase 1 now hard-fails on any file fetch failure — surface the count
+  // and reassure the install is unchanged so the user knows it's safe to
+  // retry. Strip file paths from the raw error to avoid leaking install
+  // layout into the toast. Match this branch BEFORE the generic /network/
+  // branch since "failed to download" can otherwise route there and lose
+  // the count.
+  if (/Update aborted|files failed to download/i.test(s)) {
+    const m = s.match(/(\d+) of (\d+) files failed/);
+    const detail = m ? `${m[1]} of ${m[2]} files` : 'some files';
+    return `Update couldn\'t finish — ${detail} failed to download. Your install is unchanged. Run /update again when your network and antivirus are clear.`;
+  }
   if (/ENOTFOUND|ETIMEDOUT|ECONNREFUSED|ENETUNREACH|network/i.test(s)) return 'Can\'t reach the update server. Check your internet and try again.';
   if (/checksum|hash|integrity/i.test(s)) return 'The update file looks corrupted. Try again in a moment — we\'ll re-download it.';
   if (/signature|signed/i.test(s)) return 'The update couldn\'t be verified. Try again, and if it keeps failing, reinstall from merlingotme.com.';
