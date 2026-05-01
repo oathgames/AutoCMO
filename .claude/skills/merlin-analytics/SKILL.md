@@ -137,6 +137,21 @@ On `dashboard`, check email + SMS contribution to revenue.
 - **SMS specifically should contribute 10–20%** for DTC brands with SMS live (Postscript / Attentive / Klaviyo SMS data). Zero SMS = significant gap; recommend enabling.
 - **Over 40%** → owned is doing too much work because paid is underperforming. Look at paid acquisition health, not as a compliment to email.
 
+## Google Analytics 4 (`mcp__merlin__google_analytics`) — read-only inspection
+
+GA4 is the source of truth for site behavior, organic traffic acquisition, and multi-touch attribution. Shopify is the source of truth for revenue; GA4 attribution is *additive context* (e.g. "this purchase originally came from Organic Search 28 days before the last-click attribution").
+
+| Action | Use case |
+|---|---|
+| `discover` | First connect — finds GA4 properties, picks the brand-match, saves property + measurement ids to vault. |
+| `traffic` | Sessions / users / engagement / page views by date or channel group (`level: "channel"`). |
+| `conversions` | Every key event with eventCount + revenue. |
+| `attribution` | First-touch vs last-touch by channel group — diagnose why Shopify revenue and Meta-attributed revenue diverge. |
+| `landing-pages` | Per-URL sessions/engagement; auto-merges into seo-signals.json so SEO clusters can score against real engagement. |
+| `audit-property` | Health audit — key events configured, data streams live, enhanced measurement on, industry category set. |
+
+When BOTH Shopify and GA4 report revenue: Shopify wins per Hard-Won Security Rule 10 (`pickRevenueSource`). GA4 attribution is shown as a diagnostic side panel, never as the topline number.
+
 ## Routing hints
 
 - "numbers" / "how we doing" / "performance" / "dashboard" → `dashboard({action: "dashboard"})`
@@ -145,6 +160,12 @@ On `dashboard`, check email + SMS contribution to revenue.
 - "marketing calendar" / "launch schedule" / "content gaps" → `dashboard({action: "calendar"})`
 - "set a goal" / "target $50k this month" / "what's my goal" → `{"action": "goal-set"}` / `{"action": "goal-get"}`
 - "am I on track" / "pacing" / "will I hit my target" → `dashboard` (goal block is included automatically)
+- "how is organic traffic" / "ga4 sessions" / "search traffic" → `google_analytics({action: "traffic"})`
+- "what's converting" / "key events" / "ga4 conversions" → `google_analytics({action: "conversions"})`
+- "first-touch vs last-touch" / "channel attribution" / "where does revenue actually come from" → `google_analytics({action: "attribution"})`
+- "what landing pages convert" / "per-url engagement" → `google_analytics({action: "landing-pages"})`
+- "is my ga4 set up" / "audit my ga4 property" / "ga4 health" → `google_analytics({action: "audit-property"})`
+- "find my ga4 property" / "discover analytics" → `google_analytics({action: "discover"})`
 
 ## Cross-references
 

@@ -59,6 +59,7 @@ function makeFakeZ() {
     enum: () => chain(),
     array: () => chain(),
     object: () => chain(),
+    record: () => chain(),
   };
 }
 
@@ -92,7 +93,8 @@ test('buildTools registers every advertised tool', () => {
   buildTools(tool, z, ctx);
   const names = registry.map(t => t.name);
   const expected = [
-    'connection_status', 'meta_ads', 'meta_audit', 'tiktok_ads', 'google_ads',
+    'connection_status', 'meta_ads', 'meta_audit', 'google_analytics',
+    'tiktok_ads', 'google_ads',
     'amazon_ads', 'shopify', 'klaviyo', 'email', 'seo', 'content',
     'video', 'voice', 'dashboard', 'discord', 'threads', 'reddit_ads',
     'linkedin_ads', 'etsy', 'config', 'competitor_spy', 'platform_login',
@@ -128,6 +130,14 @@ test('buildTools flags destructive ad tools with annotations', () => {
   // destroy the "ask freely about your account" UX.
   assert.ok(!destructiveNames.includes('meta_audit'),
     'meta_audit must not be flagged destructive — it only issues GETs');
+  // google_analytics IS destructive (2026-05-01 brief expansion): it ships
+  // both reads and writes (create-key-event, create-custom-dimension/-metric,
+  // create-audience, update-property-settings, attach-shopify-events,
+  // archive-key-event). The seven write actions are gated PER-ACTION via
+  // blastRadius — read calls skip the approval card. See Hard-Won Security
+  // Rule 18 + analytics.go's REGRESSION GUARD (2026-05-01) block.
+  assert.ok(destructiveNames.includes('google_analytics'),
+    'google_analytics MUST be flagged destructive — it ships GA4 Admin API write actions (key events, custom dimensions/metrics, audiences, property settings) gated by per-action blastRadius. See Hard-Won Security Rule 18.');
 });
 
 // ─────────────────────────────────────────────────────────────────────
