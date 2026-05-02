@@ -237,6 +237,22 @@ const PROTECTED_PATH_PATTERNS = [
   // Grep directory check — block searching the entire tools directory
   // Matches both absolute (C:\...\tools) and relative (.claude/tools) paths
   /\.claude[/\\]tools\/?$/i,
+  // REGRESSION GUARD (2026-05-02, RSI Loop 5 G5-4): scheduled-task spell
+  // bodies live at ~/.claude/scheduled-tasks/<id>/SKILL.md and were NOT
+  // covered by the existing `.claude/skills/` Rule 10 protection. The
+  // adversarial audit found this is exactly the surface a prompt-
+  // injection from a scraped landing page or competitor ad copy can
+  // hijack: rewrite Monday's spend logic during a session, the next 9am
+  // fire executes the rewritten body. Same defense-in-depth pattern as
+  // the shipped skills. The legitimate write path is the
+  // `mcp__scheduled-tasks__create_scheduled_task` MCP tool which the user
+  // explicitly invokes from the Spellbook UI — that path goes through a
+  // different IPC channel and isn't subject to the file-write hook.
+  // Hard-Won Rule 7: terminal `(\.|$)` (not bare `$`) so .bak / .tmp
+  // atomic-write siblings are also protected. A direct write to
+  // SKILL.md.bak or config.json.bak would otherwise sail past the hook.
+  /[/\\]\.claude[/\\]scheduled-tasks[/\\][^/\\]+[/\\]SKILL\.md(\.|$)/i,
+  /[/\\]\.claude[/\\]scheduled-tasks[/\\][^/\\]+[/\\]config\.json(\.|$)/i,
 ];
 const PROTECTED_COMMAND_PATTERNS = [
   /merlin-config\.json\b/i,
