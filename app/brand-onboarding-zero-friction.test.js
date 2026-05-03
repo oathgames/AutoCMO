@@ -247,7 +247,13 @@ test('handleToolApproval auto-approves in-cap MCP push without firing the approv
   // detector hard-deny (so the floor wins on anomalies) and BEFORE the
   // approval-card emission (so the card path is bypassed on the happy
   // path). Three anchors — order matters.
-  const anchorMcp = SRC_MAIN.indexOf("const SPEND = new Set(['push', 'duplicate', 'setup', 'setup-retargeting'])");
+  // Anchor on the SPEND-branch entry condition. Pre-2026-05-02 this was an
+// inline `const SPEND = new Set([...])` literal in main.js; the spend-
+// approval-bypass refactor moved the action set to mcp-approval-policy.js
+// and rewrote the gate to reference it via approvalPolicy.SPEND_ACTIONS.
+// Anchoring on the gate condition keeps the source-scan stable across
+// future refactors of the policy module.
+const anchorMcp = SRC_MAIN.indexOf('approvalPolicy.SPEND_ACTIONS.has(action)');
   assert.ok(anchorMcp > 0, "MCP SPEND set not found");
   // Slice ends at the next `if (toolName ===` (next handler block) so we
   // capture the entire SPEND branch including the approval-card emission.
@@ -273,7 +279,13 @@ test('MCP in-cap auto-approve gates on action === push only (duplicate cards)', 
   // headroom exists" — which let a duplicate of a $500/day source ad
   // pass with $1 of remaining cap. Removing duplicate from the auto-
   // approve set is the only safe fix; the card stays.
-  const anchorMcp = SRC_MAIN.indexOf("const SPEND = new Set(['push', 'duplicate', 'setup', 'setup-retargeting'])");
+  // Anchor on the SPEND-branch entry condition. Pre-2026-05-02 this was an
+// inline `const SPEND = new Set([...])` literal in main.js; the spend-
+// approval-bypass refactor moved the action set to mcp-approval-policy.js
+// and rewrote the gate to reference it via approvalPolicy.SPEND_ACTIONS.
+// Anchoring on the gate condition keeps the source-scan stable across
+// future refactors of the policy module.
+const anchorMcp = SRC_MAIN.indexOf('approvalPolicy.SPEND_ACTIONS.has(action)');
   const branchEnd = SRC_MAIN.indexOf("if (toolName === 'AskUserQuestion'", anchorMcp);
   const sliceMcp = SRC_MAIN.slice(anchorMcp, branchEnd);
   // The auto-approve gate must filter on push only.
@@ -286,7 +298,13 @@ test('MCP in-cap auto-approve fails closed on config read errors', () => {
   // Gitar #122 finding 1: bare `catch {}` defaulted requireSpendApproval
   // to false, opening every spend on transient I/O / parse errors. The
   // fail-closed default is `true`; the catch logs a warning.
-  const anchorMcp = SRC_MAIN.indexOf("const SPEND = new Set(['push', 'duplicate', 'setup', 'setup-retargeting'])");
+  // Anchor on the SPEND-branch entry condition. Pre-2026-05-02 this was an
+// inline `const SPEND = new Set([...])` literal in main.js; the spend-
+// approval-bypass refactor moved the action set to mcp-approval-policy.js
+// and rewrote the gate to reference it via approvalPolicy.SPEND_ACTIONS.
+// Anchoring on the gate condition keeps the source-scan stable across
+// future refactors of the policy module.
+const anchorMcp = SRC_MAIN.indexOf('approvalPolicy.SPEND_ACTIONS.has(action)');
   const branchEnd = SRC_MAIN.indexOf("if (toolName === 'AskUserQuestion'", anchorMcp);
   const sliceMcp = SRC_MAIN.slice(anchorMcp, branchEnd);
   assert.match(sliceMcp, /let requireSpendApproval = true/);
@@ -299,7 +317,13 @@ test('MCP in-cap auto-approve cards when budget data is unknown (headroom not fi
   // headroom to capForComparison and silently allowed. The fix uses
   // null as the unknown sentinel and refuses to auto-approve unless
   // headroom is finite.
-  const anchorMcp = SRC_MAIN.indexOf("const SPEND = new Set(['push', 'duplicate', 'setup', 'setup-retargeting'])");
+  // Anchor on the SPEND-branch entry condition. Pre-2026-05-02 this was an
+// inline `const SPEND = new Set([...])` literal in main.js; the spend-
+// approval-bypass refactor moved the action set to mcp-approval-policy.js
+// and rewrote the gate to reference it via approvalPolicy.SPEND_ACTIONS.
+// Anchoring on the gate condition keeps the source-scan stable across
+// future refactors of the policy module.
+const anchorMcp = SRC_MAIN.indexOf('approvalPolicy.SPEND_ACTIONS.has(action)');
   const branchEnd = SRC_MAIN.indexOf("if (toolName === 'AskUserQuestion'", anchorMcp);
   const sliceMcp = SRC_MAIN.slice(anchorMcp, branchEnd);
   assert.match(sliceMcp, /Number\.isFinite\(budgetCtx\.remaining\)\s*\?\s*budgetCtx\.remaining\s*:\s*null/);
