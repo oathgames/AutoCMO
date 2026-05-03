@@ -38,6 +38,7 @@
     "app/gallery-viewer.js",
     "app/marked.min.js",
     "app/mcp-concurrency.js",
+    "app/mcp-approval-policy.js",
     "app/mcp-define-tool.js",
     "app/mcp-envelope.js",
     "app/mcp-errors.js",

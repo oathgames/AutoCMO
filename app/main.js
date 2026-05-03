@@ -2231,18 +2231,20 @@ async function handleToolApproval(toolName, input) {
 
   // ── MCP Merlin tools — auto-approve read-only, gate spend actions ──
   if (toolName.startsWith('mcp__merlin__')) {
-    const action = (input && input.action) || '';
+    // Resolve the effective action. Legacy multiplexer tools (meta_ads,
+    // tiktok_ads, …) carry `input.action`; intent-style tools
+    // (mcp-meta-intent.js — one tool per operation) carry no `action` field
+    // and are mapped to their equivalent action by mcp-approval-policy.js.
+    // Without this resolution, every spend-firing intent tool fell through
+    // to the unconditional auto-approve below — letting `meta_launch_test_ad`
+    // and friends fire real ad spend without the user-facing card.
+    // See REGRESSION GUARD comment at the top of mcp-approval-policy.js.
+    const approvalPolicy = require('./mcp-approval-policy');
+    const { effectiveAction: action, label: intentToolLabel } =
+      approvalPolicy.resolveMerlinAction(toolName, input);
 
     // Read-only actions: always auto-approve (no user approval needed)
-    const READ_ONLY = new Set([
-      'insights', 'products', 'orders', 'analytics', 'cohorts', 'dashboard',
-      'calendar', 'wisdom', 'report', 'audit', 'revenue', 'keywords',
-      'rankings', 'track', 'gaps', 'status', 'performance', 'lists',
-      'campaigns', 'list', 'list-avatars', 'discover', 'adlib',
-      'competitor-scan', 'landing-audit', 'dry-run', 'version',
-      'blog-list', 'update-rank',
-    ]);
-    if (READ_ONLY.has(action) || toolName === 'mcp__merlin__connection_status') {
+    if (approvalPolicy.READ_ONLY_ACTIONS.has(action) || toolName === 'mcp__merlin__connection_status') {
       return { behavior: 'allow', updatedInput: input };
     }
 
@@ -2252,8 +2254,7 @@ async function handleToolApproval(toolName, input) {
     }
 
     // Spend actions: show approval card with budget enforcement
-    const SPEND = new Set(['push', 'duplicate', 'setup', 'setup-retargeting']);
-    if (SPEND.has(action)) {
+    if (approvalPolicy.SPEND_ACTIONS.has(action)) {
       const budgetCtx = getBudgetContext();
       const adBudget = input.dailyBudget || 5;
 
@@ -2332,6 +2333,11 @@ async function handleToolApproval(toolName, input) {
         'setup-retargeting': { label: 'Set up retargeting audiences', cost: 'Free' },
       };
       const translated = translations[action] || { label: `Run ${action}`, cost: null };
+      // Intent-tool labels override the generic action-based label so the
+      // card matches what's about to happen (e.g. "Launch this Meta ad batch"
+      // vs the legacy "Scale this winning ad"). See mcp-approval-policy.js
+      // for the per-tool label registry.
+      if (intentToolLabel) translated.label = intentToolLabel;
       let budgetDetail = null;
       if (budgetCtx && budgetCtx.dailyCap > 0 && (action === 'push' || action === 'duplicate')) {
         const overBudget = budgetCtx.remaining < adBudget;
