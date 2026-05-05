@@ -158,3 +158,73 @@ test('REGRESSION GUARD comment anchors the 2026-05-04 incident in main.js', () =
   assert.match(mainSrc, /stuck-chat-no-result-event/,
     'main.js must carry the stuck-chat-no-result-event REGRESSION GUARD anchor');
 });
+
+// ── Tool-aware watchdog (2026-05-04 v2 false-positive incident) ────
+//
+// Live incident: v1 watchdog fired at flat 90s and force-recovered the UI
+// mid-turn while a legitimate competitor scan / brand scrape was still
+// running. Brand scrape ships with a 90s overall timeout (Hard-Won Rule
+// 13) — exactly at the watchdog threshold. The fix: tool-aware rolling
+// extensions. When at least one tool_use is in flight, the watchdog
+// uses TOOL_STALL_MS (10 min) instead of TEXT_STALL_MS (90s). A hard
+// ceiling at 15 min still catches forever-hung tools.
+
+test('renderer.js declares the three-tier watchdog timeouts (TEXT/TOOL/HARD_MAX)', () => {
+  assert.match(rendererSrc, /const\s+TEXT_STALL_MS\s*=/,
+    'TEXT_STALL_MS must exist (90s no-tool stall)');
+  assert.match(rendererSrc, /const\s+TOOL_STALL_MS\s*=\s*600000/,
+    'TOOL_STALL_MS must equal 600000 (10 min — rolling extension while tool is in flight)');
+  assert.match(rendererSrc, /const\s+HARD_MAX_STALL_MS\s*=\s*900000/,
+    'HARD_MAX_STALL_MS must equal 900000 (15 min absolute ceiling)');
+});
+
+test('renderer.js exports noteToolUseStarted that increments _pendingToolCount', () => {
+  // The tool-use content_block_start handler must call this so the
+  // watchdog knows a tool is in flight. Source-scan only (the renderer
+  // module has no public API; we lock the wiring contract via the
+  // textual presence of the function definition + its single call site
+  // inside the tool_use content_block_start branch).
+  assert.match(rendererSrc, /function\s+noteToolUseStarted\s*\(/,
+    'noteToolUseStarted helper must be defined');
+  assert.match(rendererSrc, /_pendingToolCount\s*\+=\s*1/,
+    'noteToolUseStarted must increment _pendingToolCount');
+  // Wiring: must be called inside the content_block_start tool_use branch.
+  // Anchor on the surrounding "type === 'tool_use'" check + the noteToolUseStarted
+  // call within that block.
+  const toolUseBranchIdx = rendererSrc.indexOf("event.content_block.type === 'tool_use'");
+  assert.ok(toolUseBranchIdx > 0, "tool_use content_block_start branch must exist");
+  const region = rendererSrc.slice(toolUseBranchIdx, toolUseBranchIdx + 1500);
+  assert.match(region, /noteToolUseStarted\(\)/,
+    'noteToolUseStarted() MUST be called inside the tool_use content_block_start branch (otherwise the watchdog uses the short timeout for legitimate long tools and false-positives)');
+});
+
+test('renderer.js watchdog uses tool-aware timeout selection', () => {
+  // The fire path must check _pendingToolCount and either re-arm with
+  // TOOL_STALL_MS (rolling extension) or fire recovery (when no tool
+  // is in flight OR the hard ceiling is crossed).
+  assert.match(rendererSrc, /_pendingToolCount\s*>\s*0/,
+    'watchdog fire path must branch on _pendingToolCount > 0');
+  assert.match(rendererSrc, /sinceTurnStart\s*<\s*HARD_MAX_STALL_MS/,
+    'watchdog fire path must check sinceTurnStart < HARD_MAX_STALL_MS for the hard ceiling');
+  // The bumpStreamWatchdog timeout selection must use the tool-aware
+  // helper (returns TOOL_STALL_MS or TEXT_STALL_MS based on count).
+  assert.match(rendererSrc, /function\s+_watchdogTimeoutMs\s*\(/,
+    '_watchdogTimeoutMs helper must exist for tool-aware timeout selection');
+});
+
+test('renderer.js stopStreamWatchdog resets _pendingToolCount', () => {
+  // Without the reset, a turn that starts a tool, ends, and then a new
+  // turn starts would inherit the stale tool-in-flight count and use
+  // the long timeout for the new turn's text-streaming phase. Defense
+  // against per-turn state bleed.
+  const startIdx = rendererSrc.indexOf('function stopStreamWatchdog(');
+  assert.ok(startIdx > 0, 'stopStreamWatchdog must exist');
+  const region = rendererSrc.slice(startIdx, startIdx + 500);
+  assert.match(region, /_pendingToolCount\s*=\s*0/,
+    'stopStreamWatchdog MUST reset _pendingToolCount = 0 so the next turn starts on the short text-stall timeout');
+});
+
+test('REGRESSION GUARD comment anchors the watchdog-false-positive-on-long-tool incident', () => {
+  assert.match(rendererSrc, /watchdog-false-positive-on-long-tool/,
+    'renderer.js must carry the watchdog-false-positive-on-long-tool REGRESSION GUARD anchor');
+});
