@@ -1479,6 +1479,57 @@ body.platform-mac .titlebar-drag{
 }
 .magic-close:hover{background:var(--surface-hover);color:var(--text)}
 
+/* ── Pin sidebar (REGRESSION GUARD 2026-05-04, pin-sidebar feature) ──
+   When the user clicks the pin button on Magic / Archive headers, the
+   sidebar stays open AND the chat reflows to make room (no overlay).
+   State lives on `body.has-pinned-sidebar` (any sidebar pinned) plus
+   per-sidebar `body.has-pinned-magic-sidebar` / `.has-pinned-archive-
+   sidebar` (which one). Persisted in localStorage; restored on launch
+   via the boot script in <head> so the layout doesn't flicker between
+   unpinned + pinned on first paint.
+   The pin BUTTON itself has two visual states — aria-pressed="false"
+   (default, dim) and aria-pressed="true" (active, accent-colored). */
+.magic-pin{font-size:13px;line-height:1}
+.magic-pin[aria-pressed="true"]{
+  background:rgba(124,92,255,.18);
+  color:var(--accent, #a78bfa);
+  border:1px solid rgba(124,92,255,.32);
+}
+.magic-pin[aria-pressed="true"]:hover{background:rgba(124,92,255,.28)}
+/* When a sidebar is pinned, shrink the chat by the sidebar's width
+   (340px — matches .magic-panel + .archive-panel width). The chat is
+   a flex-column child of #app so margin-right reduces its rendered
+   width AND the input bar / status pill stay aligned.
+   Two sets of selectors:
+     1. [data-pinned-sidebar="..."] on <html> — applied by the boot
+        script in <head> BEFORE body paints, so the first frame already
+        has the correct margin (no FOUC flicker).
+     2. body.has-pinned-<id>-sidebar — applied by renderer.js once the
+        DOM is up. The body class is the source of truth at runtime;
+        the html data-attr is just for first paint.
+   Both selectors set the SAME value so they stack non-destructively. */
+html[data-pinned-sidebar="archive"] #chat,
+html[data-pinned-sidebar="archive"] #input-bar,
+html[data-pinned-sidebar="archive"] #chat-status,
+body.has-pinned-archive-sidebar #chat,
+body.has-pinned-archive-sidebar #input-bar,
+body.has-pinned-archive-sidebar #chat-status{margin-right:340px}
+html[data-pinned-sidebar="magic"] #chat,
+html[data-pinned-sidebar="magic"] #input-bar,
+html[data-pinned-sidebar="magic"] #chat-status,
+body.has-pinned-magic-sidebar #chat,
+body.has-pinned-magic-sidebar #input-bar,
+body.has-pinned-magic-sidebar #chat-status{margin-right:340px}
+/* When BOTH sidebars are pinned, total margin is the wider of the two
+   (340px) — they can't both occupy the right rail simultaneously, so
+   the renderer enforces "only one sidebar pinned at a time" (clicking
+   pin on the other unpins the first). The CSS specificity above means
+   neither selector accidentally double-margins; both write the same
+   value. */
+/* Keep the chat-shrink animation smooth — matches the sidebar's own
+   transform transition. */
+#chat,#input-bar,#chat-status{transition:margin-right .25s cubic-bezier(.2,.8,.2,1)}
+
 .magic-section{padding:16px 20px;border-bottom:1px solid var(--border)}
 .magic-section:last-child{border-bottom:none}
 .magic-section-label{
