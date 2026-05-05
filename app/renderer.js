@@ -1130,60 +1130,122 @@ updateOnlineStatus();
 let typingTimeout = null;
 let typingStuckTimeout = null;
 
-// REGRESSION GUARD (2026-05-04, stuck-chat-no-result-event incident):
-// Stream watchdog. When a turn is in flight, every SDK message resets
-// this timer; if NO message arrives for STREAM_STALL_MS, we assume the
-// stream is dead (Anthropic API truncation, network drop, MCP tool
-// hung beyond the SDK's internal timeout) and force-recover the UI.
-// Pairs with the main.js synthetic-truncated-result emitter — that one
-// covers the case where the for-await loop ends naturally without a
-// result; the watchdog covers the case where the for-await loop is
-// blocked indefinitely on an event that never arrives.
+// REGRESSION GUARD (2026-05-04, stuck-chat-no-result-event incident +
+// 2026-05-04 v2 false-positive-on-long-tool incident):
+// Stream watchdog with TOOL-AWARE rolling extensions.
 //
-// Customer-visible failure mode reported 2026-05-04: response stuck
-// mid-sentence ("fetching their back-image URLs in parallel.|" with a
-// blinking cursor), input frozen, even brand-switch didn't reset. The
-// watchdog ALWAYS unsticks the UI within STREAM_STALL_MS of the last
-// signal — the user can re-send, switch brands, or just type again.
-const STREAM_STALL_MS = 90000; // 90s — generous for legitimate long
-                                // tool calls (HeyGen renders, large
-                                // image batches, brand scrape) but short
-                                // enough that a hung turn unsticks
-                                // before the user gives up on the app.
+// Why the extensions matter (v2 incident, 2026-05-04): the v1 watchdog
+// fired at a flat 90s of no-events and force-recovered the UI mid-turn
+// while legitimate long tools were running. Brand scrape ships with a
+// 90s overall timeout (Hard-Won Rule 13) — exactly at the watchdog
+// threshold. Competitor lookups, video gen, large image batches all
+// run >90s of intentional silence between tool_use → tool_result. The
+// v1 watchdog interrupted Ryan's "yes go ahead" competitor scan turn
+// at 90s with a "Connection went silent — try sending your message
+// again" notice WHILE the scan was actually progressing. Brutal UX.
+//
+// Two-tier timeout:
+//
+//   TEXT_STALL_MS = 90s   — fires when NO tool is in flight. Catches
+//                            the original stuck-chat case (model
+//                            streaming text mid-sentence, Anthropic
+//                            stream truncated, no tool active).
+//   TOOL_STALL_MS = 600s  — fires when at least one tool_use has
+//                            been emitted and not yet returned. 10 min
+//                            covers HeyGen renders, full brand scrapes,
+//                            large MCP queries — anything legitimately
+//                            long.
+//   HARD_MAX_STALL_MS = 900s — absolute ceiling regardless of tool
+//                            state. Catches forever-hung tools so the
+//                            user is NEVER frozen for >15 min.
+//
+// Tool-flight tracking: increment _pendingToolCount on
+// `content_block_start` with type='tool_use', decrement on `result`
+// (turn end). The renderer doesn't see explicit tool_result events
+// from the SDK in the same way it sees content_block_start, so we
+// reset to 0 on result rather than per-tool. This is conservative —
+// during a turn with multiple tool calls, the watchdog uses the long
+// timeout for the whole turn. Acceptable: a turn that fires 5 tool
+// calls is by definition doing real work, and the hard ceiling
+// covers the truly-hung case.
+const STREAM_STALL_MS = 90000;      // legacy alias for TEXT_STALL_MS — kept as
+                                    // a numeric literal so tests asserting
+                                    // `const STREAM_STALL_MS = <digits>` keep matching
+const TEXT_STALL_MS = STREAM_STALL_MS; // 90s — text-streaming stall (no tool in flight)
+const TOOL_STALL_MS = 600000;       // 10 min — rolling extension while tool is in flight
+const HARD_MAX_STALL_MS = 900000;   // 15 min — absolute ceiling regardless of state
+
 let _streamWatchdog = null;
-function bumpStreamWatchdog() {
-  if (_streamWatchdog) clearTimeout(_streamWatchdog);
-  _streamWatchdog = setTimeout(() => {
-    _streamWatchdog = null;
-    if (!isStreaming && !sessionActive) return; // already cleaned up
-    try { console.warn('[stream-watchdog] no SDK events for ' + (STREAM_STALL_MS/1000) + 's — force-recovering UI'); } catch {}
-    // Force-recover the UI directly. We don't try to round-trip through
-    // the result-handler because the synthetic-result path (main.js) is
-    // already covered by the SDK iterator's natural-end branch — if the
-    // watchdog fires, it's because the iterator is BLOCKED (not ended),
-    // so main.js can't help us.
-    try {
-      const note = 'Connection went silent — try sending your message again. (no SDK events for ' + Math.round(STREAM_STALL_MS/1000) + 's)';
-      if (textBuffer && !textBuffer.endsWith('\n\n')) textBuffer += '\n\n';
-      textBuffer += '⚠️ ' + note;
-      finalizeBubble();
-    } catch {}
-    isStreaming = false;
-    sessionActive = false;
-    setInputDisabled(false);
-    removeTypingIndicator();
-    clearStatusLabel();
-    stopTickingTimer();
-    // Best-effort interrupt on the SDK side so the hung turn gets aborted
-    // upstream — otherwise the user's NEXT send queues behind a dead
-    // turn. abortActiveQuery already handles "no active query" gracefully.
-    if (window.merlin && typeof window.merlin.abortActiveQuery === 'function') {
-      try { window.merlin.abortActiveQuery().catch(() => {}); } catch {}
-    }
-  }, STREAM_STALL_MS);
+let _pendingToolCount = 0;
+let _watchdogTurnStartedAt = 0;
+let _lastSdkEventAt = 0;
+
+function _watchdogTimeoutMs() {
+  return _pendingToolCount > 0 ? TOOL_STALL_MS : TEXT_STALL_MS;
 }
+
+function bumpStreamWatchdog() {
+  _lastSdkEventAt = Date.now();
+  if (!_watchdogTurnStartedAt) _watchdogTurnStartedAt = _lastSdkEventAt;
+  if (_streamWatchdog) clearTimeout(_streamWatchdog);
+  _streamWatchdog = setTimeout(_streamWatchdogFire, _watchdogTimeoutMs());
+}
+
+function _streamWatchdogFire() {
+  _streamWatchdog = null;
+  if (!isStreaming && !sessionActive) return; // already cleaned up
+  const now = Date.now();
+  const sinceTurnStart = now - (_watchdogTurnStartedAt || now);
+  // Hard ceiling first — any turn running >HARD_MAX_STALL_MS gets
+  // recovered, even if a tool is supposedly in flight. Better to
+  // interrupt a wedged tool at 15 min than freeze the user forever.
+  if (sinceTurnStart < HARD_MAX_STALL_MS && _pendingToolCount > 0) {
+    // Tool is in flight and we're under the hard ceiling — re-arm with
+    // the long window. Rolling extension.
+    try { console.debug('[stream-watchdog] tool in flight (' + _pendingToolCount + ' pending), extending another ' + Math.round(TOOL_STALL_MS/1000) + 's'); } catch {}
+    _streamWatchdog = setTimeout(_streamWatchdogFire, TOOL_STALL_MS);
+    return;
+  }
+  // Real stall — force-recover.
+  try {
+    console.warn('[stream-watchdog] firing recovery — pendingTools=' + _pendingToolCount + ' sinceTurnStart=' + Math.round(sinceTurnStart/1000) + 's');
+  } catch {}
+  try {
+    const seconds = Math.round((now - _lastSdkEventAt) / 1000);
+    const note = _pendingToolCount > 0
+      ? 'A tool call has been silent for ' + seconds + 's (>' + Math.round(HARD_MAX_STALL_MS/1000) + 's ceiling) — try sending your message again.'
+      : 'The response stopped mid-stream (no events for ' + seconds + 's) — try sending your message again.';
+    if (textBuffer && !textBuffer.endsWith('\n\n')) textBuffer += '\n\n';
+    textBuffer += '⚠️ ' + note;
+    finalizeBubble();
+  } catch {}
+  isStreaming = false;
+  sessionActive = false;
+  setInputDisabled(false);
+  removeTypingIndicator();
+  clearStatusLabel();
+  stopTickingTimer();
+  _pendingToolCount = 0;
+  _watchdogTurnStartedAt = 0;
+  if (window.merlin && typeof window.merlin.abortActiveQuery === 'function') {
+    try { window.merlin.abortActiveQuery().catch(() => {}); } catch {}
+  }
+}
+
 function stopStreamWatchdog() {
   if (_streamWatchdog) { clearTimeout(_streamWatchdog); _streamWatchdog = null; }
+  _pendingToolCount = 0;
+  _watchdogTurnStartedAt = 0;
+}
+
+// Called by handleStreamEvent when content_block_start arrives with
+// type='tool_use'. Increments the in-flight count so the watchdog
+// knows to use TOOL_STALL_MS instead of TEXT_STALL_MS for this turn.
+function noteToolUseStarted() {
+  _pendingToolCount += 1;
+  // Re-arm with the (now-longer) timeout so the next fire uses the
+  // tool-aware window from this point forward.
+  if (isStreaming || sessionActive) bumpStreamWatchdog();
 }
 
 function finalizeBubble() {
@@ -2083,6 +2145,15 @@ function handleStreamEvent(msg) {
     }
     // Show tool activity status (like Claude Code) — single persistent row, no stacking
     if (event.content_block && event.content_block.type === 'tool_use') {
+      // REGRESSION GUARD (2026-05-04, watchdog-false-positive-on-long-tool):
+      // Mark a tool as in-flight so the watchdog uses TOOL_STALL_MS (10 min)
+      // instead of TEXT_STALL_MS (90s) for the rest of this turn. Without
+      // this, the v1 watchdog interrupted brand scrapes / competitor lookups
+      // / video gens / large image batches at 90s — exactly when those tools
+      // were doing their real work. The count resets to 0 at turn end (case
+      // 'result' in onSdkMessage) so the next turn starts fresh on the short
+      // timeout.
+      try { noteToolUseStarted(); } catch {}
       const toolName = event.content_block.name || '';
       const input = event.content_block.input || {};
       queueKillForUndo(toolName, input);
