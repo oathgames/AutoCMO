@@ -23,6 +23,30 @@
       if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
     } catch (_) { /* localStorage disabled — keep dark default */ }
   })();
+  // Restore pinned-sidebar state BEFORE body paints — without this,
+  // first-frame layout would render unpinned (full-width chat) and
+  // then snap to pinned (340px-shrunk chat) once renderer.js runs,
+  // visible flicker on every cold start. Mirror of the theme-restore
+  // pattern above. Mutual exclusivity: only one sidebar pinned at a
+  // time (renderer.js's setSidebarPinned enforces; here we honor the
+  // first non-empty stored flag and ignore the other).
+  (function(){
+    try {
+      for (var _i = 0, _ids = ['magic', 'archive']; _i < _ids.length; _i++) {
+        var id = _ids[_i];
+        if (localStorage.getItem('merlin.sidebar-pin.' + id) === 'true') {
+          document.documentElement.setAttribute('data-pinned-sidebar', id);
+          // Body element doesn't exist yet — defer the body class to
+          // a single immediate-after-DOMContentLoaded callback so it
+          // lands BEFORE the first chat-bubble renders. The data attr
+          // on documentElement is set NOW so the CSS via [data-pinned-
+          // sidebar="..."] selector works for the initial paint while
+          // the body class catches up for the rest of the runtime.
+          break; // only one sidebar pinned at a time
+        }
+      }
+    } catch (_) { /* localStorage disabled — start unpinned */ }
+  })();
 </script>
 </head>
 <body>
@@ -96,6 +120,7 @@
     <span class="magic-title">✦ Magic</span>
     <div class="magic-header-right">
       <button id="subscribe-btn" class="subscribe-header-btn"><span id="trial-text">7D Left</span><span class="subscribe-cta">Get Pro</span></button>
+      <button id="magic-pin" class="magic-close magic-pin" aria-label="Pin sidebar open" aria-pressed="false" data-tip="Pin sidebar" data-tip-pos="bottom" data-sidebar="magic">⊟</button>
       <button id="magic-close" class="magic-close" aria-label="Close Magic panel">&times;</button>
     </div>
   </div>
@@ -220,6 +245,7 @@
     <div class="magic-header-right">
       <button id="archive-expand" class="magic-close" aria-label="Expand" data-tip="Expand" data-tip-pos="bottom">←</button>
       <button id="activity-btn" class="subscribe-header-btn"><span class="subscribe-cta">Activity</span></button>
+      <button id="archive-pin" class="magic-close magic-pin" aria-label="Pin sidebar open" aria-pressed="false" data-tip="Pin sidebar" data-tip-pos="bottom" data-sidebar="archive">⊟</button>
       <button id="archive-close" class="magic-close" aria-label="Close Archive panel">&times;</button>
     </div>
   </div>

@@ -4757,7 +4757,98 @@ document.getElementById('magic-btn').addEventListener('click', () => {
 });
 document.getElementById('magic-close').addEventListener('click', () => {
   document.getElementById('magic-panel').classList.add('hidden');
+  // Closing a sidebar implicitly unpins it — without this, the body
+  // class stays set and the chat reflow reserves 340px for an empty
+  // void. Mirror in archive-close below.
+  setSidebarPinned('magic', false);
 });
+
+// REGRESSION GUARD (2026-05-04, pin-sidebar feature):
+//
+// Per-sidebar pin state. When pinned, the sidebar stays open AND the
+// chat reflows to make room (no overlay) — `body.has-pinned-<id>-
+// sidebar` triggers the CSS `margin-right: 340px` rule on #chat,
+// #input-bar, and #chat-status.
+//
+// State lives in localStorage so it survives app restarts:
+//   merlin.sidebar-pin.magic   — "true" | "false" | absent
+//   merlin.sidebar-pin.archive — "true" | "false" | absent
+//
+// The boot script in index.html's <head> reads localStorage BEFORE
+// first paint and sets the body class so the layout doesn't flicker
+// between unpinned and pinned on first paint. setSidebarPinned()
+// keeps localStorage + body class + button aria-pressed in sync.
+//
+// Mutual exclusivity: only ONE sidebar can be pinned at a time. The
+// CSS margin-right rule resolves to the same value either way (340px),
+// but allowing both pinned simultaneously would visually stack them
+// on top of each other (both `position:fixed; right:0`). Pinning A
+// auto-unpins B for clarity.
+const SIDEBAR_PIN_KEY_PREFIX = 'merlin.sidebar-pin.';
+const SIDEBAR_BODY_CLASS_PREFIX = 'has-pinned-';
+const SIDEBAR_BODY_CLASS_SUFFIX = '-sidebar';
+
+function _sidebarPinReadStored(id) {
+  try { return localStorage.getItem(SIDEBAR_PIN_KEY_PREFIX + id) === 'true'; }
+  catch { return false; }
+}
+function _sidebarPinWriteStored(id, pinned) {
+  try {
+    if (pinned) localStorage.setItem(SIDEBAR_PIN_KEY_PREFIX + id, 'true');
+    else localStorage.removeItem(SIDEBAR_PIN_KEY_PREFIX + id);
+  } catch { /* localStorage disabled — runtime state still works */ }
+}
+
+function setSidebarPinned(id, pinned) {
+  if (id !== 'magic' && id !== 'archive') return; // unknown sidebar — no-op
+  const cls = SIDEBAR_BODY_CLASS_PREFIX + id + SIDEBAR_BODY_CLASS_SUFFIX;
+  if (pinned) {
+    // Mutual exclusivity — unpin the OTHER sidebar first.
+    for (const other of ['magic', 'archive']) {
+      if (other === id) continue;
+      const otherCls = SIDEBAR_BODY_CLASS_PREFIX + other + SIDEBAR_BODY_CLASS_SUFFIX;
+      if (document.body.classList.contains(otherCls)) {
+        document.body.classList.remove(otherCls);
+        _sidebarPinWriteStored(other, false);
+        const otherBtn = document.getElementById(other + '-pin');
+        if (otherBtn) otherBtn.setAttribute('aria-pressed', 'false');
+      }
+    }
+    document.body.classList.add(cls);
+  } else {
+    document.body.classList.remove(cls);
+  }
+  _sidebarPinWriteStored(id, pinned);
+  const btn = document.getElementById(id + '-pin');
+  if (btn) btn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
+}
+
+// Restore pin state on launch — runs once at module load.
+for (const id of ['magic', 'archive']) {
+  const stored = _sidebarPinReadStored(id);
+  if (stored) {
+    // Open the panel + apply the pinned state. `setSidebarPinned` handles
+    // mutual exclusivity, body class, and button state.
+    const panel = document.getElementById(id + '-panel');
+    if (panel) panel.classList.remove('hidden');
+    setSidebarPinned(id, true);
+  } else {
+    // Ensure the button reflects unpinned even if it was never restored.
+    const btn = document.getElementById(id + '-pin');
+    if (btn) btn.setAttribute('aria-pressed', 'false');
+  }
+}
+
+// Click handlers — toggle pin on each button.
+for (const id of ['magic', 'archive']) {
+  const btn = document.getElementById(id + '-pin');
+  if (!btn) continue;
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const isPinned = btn.getAttribute('aria-pressed') === 'true';
+    setSidebarPinned(id, !isPinned);
+  });
+}
 
 // Escape closes the Magic panel when open and nothing more urgent (modal,
 // streaming response, recording) is in-flight. Escape is already bound for
@@ -9245,6 +9336,10 @@ document.getElementById('archive-close').addEventListener('click', () => {
   panel.classList.remove('expanded');
   document.getElementById('archive-expand').textContent = '←';
   panel.classList.add('hidden');
+  // Closing the panel implicitly unpins it — without this, the body
+  // class stays set and the chat reflow reserves 340px for an empty
+  // void. Mirrors the magic-close handler at the top of this file.
+  setSidebarPinned('archive', false);
 });
 
 // Expand/collapse archive to full width
