@@ -1496,39 +1496,57 @@ body.platform-mac .titlebar-drag{
   border:1px solid rgba(124,92,255,.32);
 }
 .magic-pin[aria-pressed="true"]:hover{background:rgba(124,92,255,.28)}
-/* When a sidebar is pinned, shrink the chat by the sidebar's width
-   (340px — matches .magic-panel + .archive-panel width). The chat is
-   a flex-column child of #app so margin-right reduces its rendered
-   width AND the input bar / status pill stay aligned.
-   Two sets of selectors:
-     1. [data-pinned-sidebar="..."] on <html> — applied by the boot
-        script in <head> BEFORE body paints, so the first frame already
-        has the correct margin (no FOUC flicker).
-     2. body.has-pinned-<id>-sidebar — applied by renderer.js once the
-        DOM is up. The body class is the source of truth at runtime;
-        the html data-attr is just for first paint.
-   Both selectors set the SAME value so they stack non-destructively. */
-html[data-pinned-sidebar="archive"] #chat,
-html[data-pinned-sidebar="archive"] #input-bar,
-html[data-pinned-sidebar="archive"] #chat-status,
-body.has-pinned-archive-sidebar #chat,
-body.has-pinned-archive-sidebar #input-bar,
-body.has-pinned-archive-sidebar #chat-status{margin-right:340px}
-html[data-pinned-sidebar="magic"] #chat,
-html[data-pinned-sidebar="magic"] #input-bar,
-html[data-pinned-sidebar="magic"] #chat-status,
-body.has-pinned-magic-sidebar #chat,
-body.has-pinned-magic-sidebar #input-bar,
-body.has-pinned-magic-sidebar #chat-status{margin-right:340px}
-/* When BOTH sidebars are pinned, total margin is the wider of the two
-   (340px) — they can't both occupy the right rail simultaneously, so
-   the renderer enforces "only one sidebar pinned at a time" (clicking
-   pin on the other unpins the first). The CSS specificity above means
-   neither selector accidentally double-margins; both write the same
-   value. */
+/* REGRESSION GUARD (2026-05-05, pin-sidebar bugfix):
+   When a sidebar is pinned, reserve 340px on the right of the body
+   content area via padding-right (NOT margin-right on individual
+   elements). This is the only approach that lets `#input-bar` and
+   `#chat-status` — which carry their own `max-width:752px; margin:0
+   auto` for centered single-column layout — re-center within the new
+   (viewport - 340px) chat area. The previous approach of slapping
+   `margin-right:340px` on those elements left `margin-left:auto`
+   intact, which fights with the explicit margin-right and right-aligns
+   the input bar against the sidebar instead of centering it within the
+   visible chat area. Specifically:
+     parent_width = 1920, max-width = 752, margin-right = 340
+     margin-left:auto = 1920 - 752 - 340 = 828   ← right-aligned, not centered
+   With `padding-right:340px` on body, the children's own
+   `margin: 0 auto` correctly centers within the reduced (parent - 340)
+   content width. The titlebar is the one exception that needs to stay
+   full-width (its window controls live at the absolute right) — we
+   negate the body padding for it via `margin-right:-340px`. The
+   `position:fixed` panels are unaffected because fixed positioning
+   escapes flow padding entirely.
+
+   Two selector sets so the layout is correct on the very first paint
+   (boot-pin.js sets `data-pinned-sidebar` on <html> in <head>) AND
+   stays correct at runtime (renderer.js toggles `body.has-pinned-*`).
+   Both selectors set the SAME values so they stack non-destructively.
+
+   Mutual exclusivity: only ONE sidebar can be pinned at a time
+   (enforced by setSidebarPinned in renderer.js). If both class names
+   somehow get applied simultaneously, the padding stays 340px (no
+   double-padding) because both rules write the same value.
+
+   Test: with sidebar pinned, the input bar's left+right gutters MUST
+   be visually equal within the visible chat area (0..viewport-340). */
+html[data-pinned-sidebar="archive"] body,
+html[data-pinned-sidebar="magic"] body,
+body.has-pinned-archive-sidebar,
+body.has-pinned-magic-sidebar{padding-right:340px}
+/* Restore titlebar full-width — its buttons (theme/wisdom/archive/magic
+   /min/max/close) live at the absolute right edge of the window and
+   would shift left under the body padding otherwise. Sidebars start
+   at top:40px (below the 40px titlebar) so there's no visual conflict. */
+html[data-pinned-sidebar="archive"] #titlebar,
+html[data-pinned-sidebar="magic"] #titlebar,
+body.has-pinned-archive-sidebar #titlebar,
+body.has-pinned-magic-sidebar #titlebar{margin-right:-340px}
 /* Keep the chat-shrink animation smooth — matches the sidebar's own
-   transform transition. */
-#chat,#input-bar,#chat-status{transition:margin-right .25s cubic-bezier(.2,.8,.2,1)}
+   transform transition. Animate body padding (the new layout driver)
+   plus titlebar margin (the titlebar's offset to stay full-width) so
+   both sides of the equation glide together. */
+body{transition:padding-right .25s cubic-bezier(.2,.8,.2,1)}
+#titlebar{transition:margin-right .25s cubic-bezier(.2,.8,.2,1)}
 
 .magic-section{padding:16px 20px;border-bottom:1px solid var(--border)}
 .magic-section:last-child{border-bottom:none}

@@ -88,36 +88,89 @@ test('boot-pin.js enforces mutual exclusivity (only one sidebar pinned at a time
 
 // ── CSS — chat reflow when a sidebar is pinned ─────────────────
 
-test('style.css shrinks chat by 340px when a sidebar is pinned', () => {
+test('style.css reserves 340px on body when a sidebar is pinned', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — input-bar-centering):
+  //
+  // The fix changes the layout strategy from "margin-right:340px on
+  // every centered child" to "padding-right:340px on body". The
+  // previous approach left `margin-left:auto` intact on `#input-bar`
+  // (which has `max-width:752px; margin:0 auto;` for centered single-
+  // column layout), so adding `margin-right:340px` right-aligned the
+  // bar against the sidebar instead of centering it within the visible
+  // chat area.
+  //
+  // padding-right on body shrinks the content area for ALL flex-column
+  // children — chat, input-bar, chat-status all get the same reduced
+  // parent width, and their own `margin: 0 auto` correctly recenters.
+  // The titlebar is exempted via `margin-right:-340px` so its window
+  // controls stay at the absolute window-right edge.
+  //
   // Both selector forms (html[data-pinned-sidebar=...] for first paint,
-  // body.has-pinned-...-sidebar for runtime) must shrink #chat,
-  // #input-bar, AND #chat-status. Any selector missed = layout
-  // misaligned (e.g. input bar overflows the pinned sidebar).
+  // body.has-pinned-...-sidebar for runtime) must apply.
   for (const required of [
-    /html\[data-pinned-sidebar="archive"\]\s+#chat/,
-    /html\[data-pinned-sidebar="archive"\]\s+#input-bar/,
-    /html\[data-pinned-sidebar="archive"\]\s+#chat-status/,
-    /body\.has-pinned-archive-sidebar\s+#chat/,
-    /body\.has-pinned-archive-sidebar\s+#input-bar/,
-    /body\.has-pinned-archive-sidebar\s+#chat-status/,
-    /html\[data-pinned-sidebar="magic"\]\s+#chat/,
-    /body\.has-pinned-magic-sidebar\s+#chat/,
+    /html\[data-pinned-sidebar="archive"\]\s+body/,
+    /html\[data-pinned-sidebar="magic"\]\s+body/,
+    /body\.has-pinned-archive-sidebar/,
+    /body\.has-pinned-magic-sidebar/,
   ]) {
     assert.match(styleCss, required,
-      `style.css must include selector matching ${required}`);
+      `style.css must include selector matching ${required} for the pinned-sidebar body padding rule`);
   }
-  // The shrink amount must be 340px — matches .magic-panel +
-  // .archive-panel width. Any other value misaligns the chat.
-  assert.match(styleCss, /margin-right:340px/,
-    'pinned-sidebar selectors must use margin-right:340px (matches sidebar width)');
+  assert.match(styleCss, /padding-right:340px/,
+    'pinned-sidebar selectors must use padding-right:340px on body (matches sidebar width)');
 });
 
-test('style.css declares smooth transition on the chat margin', () => {
-  // Without the transition, pinning/unpinning snaps the chat width
+test('style.css restores titlebar to full width when sidebar is pinned', () => {
+  // The window controls (theme/wisdom/archive/magic/min/max/close) live
+  // in #titlebar and must stay at the absolute right edge of the window
+  // — even when the body has padding-right:340px reserving space below
+  // for the pinned sidebar. Negative margin-right cancels the body's
+  // padding for the titlebar specifically. Sidebars start at top:40px
+  // (below the 40px titlebar) so there's no visual conflict.
+  for (const required of [
+    /html\[data-pinned-sidebar="archive"\]\s+#titlebar/,
+    /html\[data-pinned-sidebar="magic"\]\s+#titlebar/,
+    /body\.has-pinned-archive-sidebar\s+#titlebar/,
+    /body\.has-pinned-magic-sidebar\s+#titlebar/,
+  ]) {
+    assert.match(styleCss, required,
+      `style.css must include selector matching ${required} so the titlebar stays full-width when pinned`);
+  }
+  assert.match(styleCss, /#titlebar\{margin-right:-340px\}/,
+    'titlebar pinned-state rule must use margin-right:-340px to negate the body padding');
+});
+
+test('style.css declares smooth transition on body padding + titlebar margin', () => {
+  // Without the transition, pinning/unpinning snaps the layout
   // instantly while the sidebar slides — visual jank. The transition
   // matches the sidebar's own transform timing (.25s cubic-bezier).
-  assert.match(styleCss, /#chat,#input-bar,#chat-status\{transition:margin-right/,
-    'chat + input + status must transition margin-right so the reflow animates with the sidebar slide');
+  assert.match(styleCss, /body\{transition:padding-right/,
+    'body must transition padding-right so the chat reflow animates with the sidebar slide');
+  assert.match(styleCss, /#titlebar\{transition:margin-right/,
+    '#titlebar must transition margin-right so its width-restore glides in step with the body padding');
+});
+
+test('style.css does NOT use the legacy per-element margin-right approach', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — input-bar-centering):
+  // The legacy approach assigned `margin-right:340px` to #chat,
+  // #input-bar, and #chat-status individually. For #input-bar and
+  // #chat-status — which use `margin: 0 auto` for centering — this
+  // right-aligned them against the sidebar instead of centering within
+  // the visible chat area. We now drive the layout from body padding.
+  //
+  // If a future refactor re-introduces `body.has-pinned-* #input-bar
+  // {margin-right:340px}`, this test fails — pointing the author back
+  // to the padding-on-body approach.
+  const legacyPatterns = [
+    /body\.has-pinned-(?:magic|archive)-sidebar\s+#input-bar\s*\{[^}]*margin-right:\s*340px/,
+    /body\.has-pinned-(?:magic|archive)-sidebar\s+#chat-status\s*\{[^}]*margin-right:\s*340px/,
+    /html\[data-pinned-sidebar="(?:magic|archive)"\]\s+#input-bar\s*\{[^}]*margin-right:\s*340px/,
+    /html\[data-pinned-sidebar="(?:magic|archive)"\]\s+#chat-status\s*\{[^}]*margin-right:\s*340px/,
+  ];
+  for (const pattern of legacyPatterns) {
+    assert.doesNotMatch(styleCss, pattern,
+      `style.css must NOT use the legacy "margin-right:340px on centered children" approach — it fights with margin:0 auto and right-aligns the input bar. Use padding-right on body instead. Pattern: ${pattern}`);
+  }
 });
 
 // ── JS — runtime helpers + persistence + restore ───────────────
@@ -192,4 +245,152 @@ test('setSidebarPinned(false) clears the html data-pinned-sidebar attr', () => {
   // unpin runs alongside the other's pin) would clobber the new pin.
   assert.match(fnBody, /getAttribute\(\s*['"]data-pinned-sidebar['"]\s*\)\s*===\s*id/,
     'setSidebarPinned MUST identity-check the attr before clearing — without this, mid-mutual-exclusivity unpin could clobber the new pin');
+});
+
+// ── 2026-05-05 bugfix: click-outside + cross-panel hides respect pin ───
+
+test('magic-panel click-outside handler bails when sidebar is pinned', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — click-outside-leak):
+  //
+  // Pre-fix, every click on the chat transcript or any UI outside the
+  // magic panel hid it instantly — even when the user had explicitly
+  // pinned it. The pin button became cosmetic. Worse, hiding the panel
+  // without clearing the body class left the chat reflowed around an
+  // invisible 340px void.
+  //
+  // Find the click-outside handler region: the "Close panel on any
+  // outside click" comment is the single grep anchor. The handler MUST
+  // bail (return early) when `body.has-pinned-magic-sidebar` is set.
+  const anchorIdx = rendererSrc.indexOf('Close panel on any outside click');
+  assert.ok(anchorIdx > 0, 'magic-panel click-outside anchor comment must exist');
+  // Take a generous slice — the handler is ~25 lines after the anchor.
+  const region = rendererSrc.slice(anchorIdx, anchorIdx + 1800);
+  assert.match(region, /classList\.contains\(['"]has-pinned-magic-sidebar['"]\)/,
+    'magic-panel click-outside handler MUST check body.classList.contains("has-pinned-magic-sidebar") and bail before hiding');
+  // The bail must be a return (early exit) BEFORE the panel.add('hidden')
+  // call. Source-scan: the pinned-check must appear before the final
+  // panel.classList.add('hidden') in the handler body.
+  const pinnedCheckIdx = region.search(/classList\.contains\(['"]has-pinned-magic-sidebar['"]\)/);
+  const hideCallIdx = region.search(/panel\.classList\.add\(['"]hidden['"]\)/);
+  assert.ok(pinnedCheckIdx > 0 && hideCallIdx > 0,
+    'click-outside handler must contain both the pinned-check and the hide call');
+  assert.ok(pinnedCheckIdx < hideCallIdx,
+    'pinned-check MUST run BEFORE the hide call — otherwise the panel hides regardless of pin state');
+});
+
+test('magic-panel Escape handler bails when sidebar is pinned', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — escape-dismisses-pin):
+  //
+  // Symmetric with the click-outside handler. Escape is a frequent
+  // accidental press (often after closing a modal) and would silently
+  // undo the user's pin commitment. Pinned panels stay open — the pin
+  // button is the only way to dismiss.
+  const anchorIdx = rendererSrc.indexOf('Escape closes the Magic panel');
+  assert.ok(anchorIdx > 0, 'Escape handler anchor comment must exist');
+  const region = rendererSrc.slice(anchorIdx, anchorIdx + 1500);
+  assert.match(region, /classList\.contains\(['"]has-pinned-magic-sidebar['"]\)/,
+    'magic-panel Escape handler MUST check body.classList.contains("has-pinned-magic-sidebar") and bail before hiding');
+});
+
+test('archive-panel click-outside handler bails when sidebar is pinned', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — archive-click-outside):
+  // Mirrors the magic-panel handler. Archive's click-outside is more
+  // narrow (it only fires on chat-transcript clicks), but the same
+  // dismissal-leak applied — the pin button was cosmetic.
+  const anchorIdx = rendererSrc.indexOf('Close archive when clicking into the chat transcript');
+  assert.ok(anchorIdx > 0, 'archive-panel click-outside anchor comment must exist');
+  const region = rendererSrc.slice(anchorIdx, anchorIdx + 1800);
+  assert.match(region, /classList\.contains\(['"]has-pinned-archive-sidebar['"]\)/,
+    'archive-panel click-outside handler MUST check body.classList.contains("has-pinned-archive-sidebar") and bail before hiding');
+  const pinnedCheckIdx = region.search(/classList\.contains\(['"]has-pinned-archive-sidebar['"]\)/);
+  const hideCallIdx = region.search(/panel\.classList\.add\(['"]hidden['"]\)/);
+  assert.ok(pinnedCheckIdx > 0 && hideCallIdx > 0,
+    'archive click-outside handler must contain both the pinned-check and the hide call');
+  assert.ok(pinnedCheckIdx < hideCallIdx,
+    'pinned-check MUST run BEFORE the hide call');
+});
+
+test('hideSidebarPanel helper exists + clears pin state in lockstep', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — pin-state-leak):
+  //
+  // The helper is the ONLY safe way to hide a sidebar panel from
+  // miscellaneous code paths (custom-spell click, sendChatFromPanel,
+  // showFirstRunPrompt, agency-overlay open, ad context-menu pause/
+  // resume, archive merge-to-chat). Direct calls to
+  // `panel.classList.add('hidden')` are review blockers because they
+  // leave the `body.has-pinned-*-sidebar` class set, reflowing the
+  // chat around an invisible 340px reservation.
+  assert.match(rendererSrc, /function\s+hideSidebarPanel\s*\(\s*id\s*\)/,
+    'hideSidebarPanel(id) helper must exist as the safe path for ad-hoc panel hides');
+  // The helper body must call setSidebarPinned(id, false) in addition
+  // to hiding the panel — that's the whole point.
+  const fnIdx = rendererSrc.indexOf('function hideSidebarPanel');
+  assert.ok(fnIdx > 0);
+  const fnBody = rendererSrc.slice(fnIdx, fnIdx + 600);
+  assert.match(fnBody, /classList\.add\(\s*['"]hidden['"]\s*\)/,
+    'hideSidebarPanel must hide the panel');
+  assert.match(fnBody, /setSidebarPinned\(\s*id\s*,\s*false\s*\)/,
+    'hideSidebarPanel MUST call setSidebarPinned(id, false) so the body class clears in lockstep with the panel hiding');
+});
+
+test('every inline magic/archive panel hide is paired with setSidebarPinned(false)', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — pin-state-leak):
+  //
+  // Source-scan: every line that hides a sidebar panel directly
+  // (without going through hideSidebarPanel) MUST be followed within
+  // a small window by a setSidebarPinned(id, false) call. This catches
+  // a future refactor that adds a new sidebar-hide path and forgets
+  // to clear pin state.
+  //
+  // Bypass exception: setSidebarPinned itself doesn't hide the panel
+  // (it only manages pin state) — the regex below targets ONLY the
+  // `getElementById('<id>-panel').classList.add('hidden')` shape.
+  const lines = rendererSrc.split('\n');
+  const offendingHides = [];
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    const match = line.match(/getElementById\(['"](magic|archive)-panel['"]\)\.classList\.add\(['"]hidden['"]\)/);
+    if (!match) continue;
+    const id = match[1];
+    // Look ahead 6 lines for the paired setSidebarPinned(id, false).
+    // Six lines is the empirical max distance across the current
+    // codebase; tighter than 10 to keep the pairing visually obvious.
+    const window = lines.slice(i, i + 6).join('\n');
+    const pairRegex = new RegExp(`setSidebarPinned\\(\\s*['"]${id}['"]\\s*,\\s*false\\s*\\)`);
+    if (!pairRegex.test(window)) {
+      offendingHides.push(`line ${i + 1}: ${line.trim()}`);
+    }
+  }
+  assert.deepStrictEqual(offendingHides, [],
+    'every inline `getElementById("<id>-panel").classList.add("hidden")` must be paired with setSidebarPinned("<id>", false) within 6 lines, OR be replaced with hideSidebarPanel(id). Offenders:\n  ' + offendingHides.join('\n  '));
+});
+
+test('cross-panel buttons clear the OTHER sidebar pin when force-hiding it', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix — cross-panel-hide):
+  //
+  // magic-btn forcibly hides the archive panel (and vice versa) so the
+  // active panel surface is clean. Pre-fix this left the archive's pin
+  // body class set even though the panel was hidden — chat stayed
+  // reflowed for an invisible sidebar. magic-btn click → assert
+  // archive's setSidebarPinned(false) call lives in the same handler
+  // (and vice versa for archive-btn).
+  const magicBtnIdx = rendererSrc.indexOf("getElementById('magic-btn').addEventListener");
+  assert.ok(magicBtnIdx > 0, 'magic-btn click handler must exist');
+  const magicBtnRegion = rendererSrc.slice(magicBtnIdx, magicBtnIdx + 2500);
+  assert.match(magicBtnRegion, /setSidebarPinned\(\s*['"]archive['"]\s*,\s*false\s*\)/,
+    'magic-btn handler MUST call setSidebarPinned("archive", false) when force-hiding the archive panel');
+
+  const archiveBtnIdx = rendererSrc.indexOf("getElementById('archive-btn').addEventListener");
+  assert.ok(archiveBtnIdx > 0, 'archive-btn click handler must exist');
+  const archiveBtnRegion = rendererSrc.slice(archiveBtnIdx, archiveBtnIdx + 2500);
+  assert.match(archiveBtnRegion, /setSidebarPinned\(\s*['"]magic['"]\s*,\s*false\s*\)/,
+    'archive-btn handler MUST call setSidebarPinned("magic", false) when force-hiding the magic panel');
+
+  const wisdomBtnIdx = rendererSrc.indexOf("getElementById('wisdom-header-btn').addEventListener");
+  assert.ok(wisdomBtnIdx > 0, 'wisdom-header-btn click handler must exist');
+  const wisdomBtnRegion = rendererSrc.slice(wisdomBtnIdx, wisdomBtnIdx + 2500);
+  assert.match(wisdomBtnRegion, /setSidebarPinned\(\s*['"]magic['"]\s*,\s*false\s*\)/,
+    'wisdom-header-btn handler MUST clear magic pin when force-hiding the magic panel');
+  assert.match(wisdomBtnRegion, /setSidebarPinned\(\s*['"]archive['"]\s*,\s*false\s*\)/,
+    'wisdom-header-btn handler MUST clear archive pin when force-hiding the archive panel');
 });

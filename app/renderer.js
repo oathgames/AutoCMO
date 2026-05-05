@@ -4359,8 +4359,17 @@ async function renderWisdom(w) {
 }
 
 document.getElementById('wisdom-header-btn').addEventListener('click', async () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix): force-closing
+  // both sidebar panels for the wisdom overlay must ALSO clear their
+  // pin state — otherwise the body class stays set and the chat
+  // reflows around a phantom 340px reservation behind the wisdom
+  // overlay. Same invariant as magic-btn / archive-btn handlers:
+  // every sidebar `classList.add('hidden')` is paired with
+  // setSidebarPinned(id, false).
   document.getElementById('magic-panel').classList.add('hidden');
+  setSidebarPinned('magic', false);
   document.getElementById('archive-panel').classList.add('hidden');
+  setSidebarPinned('archive', false);
   closeAgencyOverlay();
   const overlay = document.getElementById('wisdom-overlay');
 
@@ -4727,11 +4736,26 @@ merlin.onConnectionsChanged(() => {
 });
 
 document.getElementById('magic-btn').addEventListener('click', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix): forcibly hiding
+  // the OTHER panel here used to leave its pinned-state body class set
+  // (`has-pinned-archive-sidebar`), so the chat stayed reflowed for a
+  // 340px void after the archive panel slid out of view. Pair every
+  // cross-panel hide with `setSidebarPinned(other, false)` so layout
+  // and pin state stay in lockstep. Mutual exclusivity (only one
+  // sidebar pinned at a time) is enforced inside setSidebarPinned —
+  // we explicitly clear archive here so opening magic doesn't inherit
+  // a stranded pin.
   document.getElementById('archive-panel').classList.add('hidden');
+  setSidebarPinned('archive', false);
   document.getElementById('wisdom-overlay').classList.add('hidden');
   closeAgencyOverlay();
   const panel = document.getElementById('magic-panel');
   panel.classList.toggle('hidden');
+  // If we're hiding magic via toggle, also clear its pinned state so
+  // the body class doesn't outlive the visible panel.
+  if (panel.classList.contains('hidden')) {
+    setSidebarPinned('magic', false);
+  }
   // Load brands first (sets vertical filter), then connections (hides connected from available)
   if (!panel.classList.contains('hidden')) {
     loadBrands().then(() => loadConnections());
@@ -4845,6 +4869,26 @@ function setSidebarPinned(id, pinned) {
   if (btn) btn.setAttribute('aria-pressed', pinned ? 'true' : 'false');
 }
 
+// REGRESSION GUARD (2026-05-05, pin-sidebar bugfix):
+// Single helper to hide a sidebar panel AND clear its pin state in
+// lockstep. Every code path that wants the panel gone for good (user
+// transitioning to chat, modal opening, agency overlay, etc.) MUST
+// call this instead of the inline `panel.classList.add('hidden')` pair
+// — otherwise the body class outlives the visible panel and the chat
+// reflows around a phantom 340px reservation.
+//
+// Three legitimate non-helper exceptions:
+//   1. setSidebarPinned itself (it OWNS the body class and pin state).
+//   2. The boot-time restoration loop (sets pinned=true; doesn't hide).
+//   3. The magic-close / archive-close handlers, which already call
+//      setSidebarPinned(id, false) inline directly after the hide.
+function hideSidebarPanel(id) {
+  if (id !== 'magic' && id !== 'archive') return;
+  const panel = document.getElementById(id + '-panel');
+  if (panel) panel.classList.add('hidden');
+  setSidebarPinned(id, false);
+}
+
 // Restore pin state on launch — runs once at module load.
 for (const id of ['magic', 'archive']) {
   const stored = _sidebarPinReadStored(id);
@@ -4876,6 +4920,13 @@ for (const id of ['magic', 'archive']) {
 // streaming response, recording) is in-flight. Escape is already bound for
 // stop-generation on the input; we only claim it here when the panel is the
 // top-most dismissable surface.
+//
+// REGRESSION GUARD (2026-05-05, pin-sidebar bugfix): if the panel is
+// pinned, Escape MUST NOT dismiss it. Pinning is an explicit user
+// commitment to keep the panel open — a stray Escape (often pressed
+// after closing a modal or cancelling a stream) would silently undo it
+// and leave a dangling `body.has-pinned-magic-sidebar` class shrinking
+// the chat into 340px of nothing. The pin button is the ONLY way out.
 document.addEventListener('keydown', (e) => {
   if (e.key !== 'Escape') return;
   const panel = document.getElementById('magic-panel');
@@ -4886,12 +4937,23 @@ document.addEventListener('keydown', (e) => {
   if (typeof isStreaming !== 'undefined' && isStreaming) return;
   if (typeof sessionActive !== 'undefined' && sessionActive) return;
   if (typeof isRecording !== 'undefined' && isRecording) return;
+  // Pinned panels stay open — see REGRESSION GUARD above.
+  if (document.body.classList.contains('has-pinned-magic-sidebar')) return;
   panel.classList.add('hidden');
 });
 
 // Close panel on any outside click (except on the Magic button itself,
 // which toggles it, and except on the tile context menu which lives outside
 // the panel DOM but is part of the panel UX).
+//
+// REGRESSION GUARD (2026-05-05, pin-sidebar bugfix): when the panel is
+// pinned (`body.has-pinned-magic-sidebar`), outside clicks MUST NOT
+// dismiss it. The whole point of pinning is "this stays open while I
+// work in the chat." Pre-fix, every click in the chat transcript or
+// titlebar instantly hid the panel and left the chat reflowed to a
+// 340px-narrower-than-it-needed-to-be void (because the body class
+// stayed set). Test: pin → click anywhere outside → panel must stay
+// visible AND `body.has-pinned-magic-sidebar` must stay set.
 document.addEventListener('click', (e) => {
   const panel = document.getElementById('magic-panel');
   const btn = document.getElementById('magic-btn');
@@ -4902,6 +4964,8 @@ document.addEventListener('click', (e) => {
   // the user is interacting with a child of the panel UX.
   if (e.target.closest('#merlin-modal')) return;
   if (e.target.closest('.tile-context-menu')) return;
+  // Pinned panels stay open — see REGRESSION GUARD above.
+  if (document.body.classList.contains('has-pinned-magic-sidebar')) return;
   panel.classList.add('hidden');
 });
 
@@ -5915,7 +5979,7 @@ function formatTimeAgo(timestamp) {
 }
 
 function sendChatFromPanel(msg) {
-  document.getElementById('magic-panel').classList.add('hidden');
+  hideSidebarPanel('magic');
   addUserBubble(msg);
   showTypingIndicator();
   turnStartTime = Date.now();
@@ -6035,7 +6099,7 @@ async function loadSpells() {
     </div>
   `;
   customRow.addEventListener('click', () => {
-    document.getElementById('magic-panel').classList.add('hidden');
+    hideSidebarPanel('magic');
     addUserBubble('I want to create a custom scheduled task');
     showTypingIndicator();
     turnStartTime = Date.now();
@@ -6391,7 +6455,7 @@ async function activateSpell(template, row) {
 // First-run: prompt user to run the spell immediately after activation
 function showFirstRunPrompt(template, brand) {
   // Close the sidebar so the chat is visible
-  document.getElementById('magic-panel').classList.add('hidden');
+  hideSidebarPanel('magic');
 
   // Build a confirmation card in chat
   const card = document.createElement('div');
@@ -8668,8 +8732,8 @@ document.getElementById('agency-report-btn').addEventListener('click', async (e)
   // Escape/Tab document listeners are torn down cleanly.
   if (document.getElementById('agency-overlay')) { closeAgencyOverlay(); return; }
   // Close sibling surfaces so they don't render behind the modal.
-  document.getElementById('magic-panel').classList.add('hidden');
-  document.getElementById('archive-panel').classList.add('hidden');
+  hideSidebarPanel('magic');
+  hideSidebarPanel('archive');
   document.getElementById('wisdom-overlay').classList.add('hidden');
   document.getElementById('stats-overlay')?.classList.add('hidden');
 
@@ -9358,12 +9422,20 @@ function renderActivityItem(item) {
 
 // ── Archive Panel ──────────────────────────────────────────
 document.getElementById('archive-btn').addEventListener('click', () => {
+  // REGRESSION GUARD (2026-05-05, pin-sidebar bugfix): mirrors the
+  // magic-btn handler above — forcibly hiding the OTHER panel must
+  // also clear its pinned state, otherwise the chat stays reflowed
+  // around an invisible 340px sidebar reservation. Symmetric pairing
+  // is the invariant: every `panel.classList.add('hidden')` for a
+  // sidebar gets a matching `setSidebarPinned(id, false)`.
   document.getElementById('magic-panel').classList.add('hidden');
+  setSidebarPinned('magic', false);
   document.getElementById('wisdom-overlay').classList.add('hidden');
   closeAgencyOverlay();
   const panel = document.getElementById('archive-panel');
   panel.classList.toggle('hidden');
   if (!panel.classList.contains('hidden')) { showArchiveView(); }
+  else { setSidebarPinned('archive', false); }
 });
 document.getElementById('archive-close').addEventListener('click', () => {
   const panel = document.getElementById('archive-panel');
@@ -9900,7 +9972,7 @@ async function loadArchive() {
           pauseItem.addEventListener('click', () => {
             menu.remove();
             document.querySelectorAll('.context-submenu').forEach(s => s.remove());
-            document.getElementById('archive-panel').classList.add('hidden');
+            hideSidebarPanel('archive');
             // Vertical-aware fallback: when the ad has no resolvable "product"
             // (typical for SaaS/games/creator/services) use the vertical's
             // offeringNoun (plan/title/course/service) so the user bubble
@@ -9927,7 +9999,7 @@ async function loadArchive() {
           resumeItem.addEventListener('click', () => {
             menu.remove();
             document.querySelectorAll('.context-submenu').forEach(s => s.remove());
-            document.getElementById('archive-panel').classList.add('hidden');
+            hideSidebarPanel('archive');
             const label = ad.product || currentVerticalProfile.offeringNoun || 'ad';
             addUserBubble(`Resume ${label} on ${ad.platform}`);
             showTypingIndicator();
@@ -10789,7 +10861,7 @@ function mergeCreatives() {
   updateMergeButton();
 
   // Close archive and send to chat
-  document.getElementById('archive-panel').classList.add('hidden');
+  hideSidebarPanel('archive');
 
   const competitorDesc = competitor.hook ? `${competitor.brand} (${competitor.hook} hook, ${competitor.platform})` : (competitor.brand || 'competitor ad');
   const ownDesc = own.product || own.title || 'my creative';
@@ -10975,12 +11047,23 @@ function openArchivePreview(item) {
 // intentionally excluded — users frequently reference a visible archive
 // card while typing in chat, and clicking the textarea used to dismiss the
 // panel before they could finish their thought.
+//
+// REGRESSION GUARD (2026-05-05, pin-sidebar bugfix): when the archive
+// is pinned (`body.has-pinned-archive-sidebar`), clicking into the
+// chat MUST NOT dismiss it. The pin commits the user to a side-by-side
+// layout — without this gate, a single click on a chat message hid
+// the archive and left the chat reflowed to a 340px-narrower void
+// (because the body class stayed set). Symmetric with the magic-panel
+// click-outside guard above. Test: pin archive → click a chat message
+// → panel stays visible AND `body.has-pinned-archive-sidebar` stays set.
 document.addEventListener('click', (e) => {
   const panel = document.getElementById('archive-panel');
   const btn = document.getElementById('archive-btn');
   if (panel && !panel.classList.contains('hidden') && !panel.contains(e.target) && e.target !== btn && !e.target.closest('#archive-btn')) {
     // Only close if clicking in the chat transcript area.
     if (!e.target.closest('#chat')) return;
+    // Pinned panels stay open — see REGRESSION GUARD above.
+    if (document.body.classList.contains('has-pinned-archive-sidebar')) return;
     panel.classList.add('hidden');
   }
 });
