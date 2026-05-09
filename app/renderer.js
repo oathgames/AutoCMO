@@ -1678,15 +1678,17 @@ function friendlyError(raw, platformName) {
   // arrives from GA4 with a body that DEFINITIVELY cites missing OAuth
   // scope (see autocmo-core/analytics.go for the detector + sentinel).
   // Match here so users with a pre-v1.21.0 Google connection (which lacks
-  // the analytics.edit scope) see a Reconnect-Google chip instead of the
-  // raw HTTP error. Match BEFORE the generic "token expired" branch — the
-  // word "scope" is in our sentinel and could otherwise route to a
+  // the Analytics scope entirely) see a Reconnect-Google chip instead of
+  // the raw HTTP error. Match BEFORE the generic "token expired" branch —
+  // the word "scope" is in our sentinel and could otherwise route to a
   // less-actionable bucket. Match BEFORE the generic 403/forbidden bucket.
   // The chip target is `reconnect:google` — same as the Google Ads chip,
   // because Merlin uses one Google OAuth tile for all four scopes
-  // (adwords + webmasters.readonly + content + analytics.edit; see
-  // Hard-Won Security Rule 18). Reconnecting from this chip presents all
-  // four scopes on one consent screen.
+  // (adwords + webmasters.readonly + content + analytics.readonly; see
+  // Hard-Won Security Rule 18 and the ga-scope-readonly-downgrade
+  // REGRESSION GUARD in autocmo-core/oauth.go for why we run on
+  // .readonly rather than .edit). Reconnecting from this chip presents
+  // all four scopes on one consent screen.
   if (s.startsWith('mcp__merlin__google_analytics: scope_missing:')) {
     return 'Your Google connection is missing the Analytics permission. Reconnecting will add it.\nTry: [[chip:Reconnect Google:reconnect:google]]';
   }
