@@ -291,6 +291,68 @@ test('Loopback providers: authState === state (no |port suffix)', () => {
   }
 });
 
+// ── Cross-file scope parity (REGRESSION GUARD 2026-05-09) ──────────
+//
+// fast-open-google-scope incident: oauth-provider-config.js's `google.scopes`
+// silently drifted from autocmo-core/oauth.go's getGoogleOAuth().Scopes.
+// The fast-open path (this file) is the default for Google in the Merlin UI;
+// the binary path (oauth.go) is a legacy fallback for un-ported providers.
+// When the 2026-05-01 ga-scope-readonly-downgrade added analytics.readonly
+// to oauth.go, this file was missed. Every UI-driven Google OAuth silently
+// dropped the scope; only direct binary calls (which bypass fast-open)
+// requested all 4 scopes. The two-source-of-truth desync ate ~8 hours of
+// debugging.
+//
+// This test reads BOTH source files at runtime, parses out the Google scope
+// string from each, and asserts they're set-equal. Adding/removing scopes
+// in one place without the other now fails CI immediately.
+
+test('REGRESSION 2026-05-09: Google scopes match between oauth-provider-config.js and autocmo-core/oauth.go', () => {
+  const fastOpenScopes = PROVIDERS.google.scopes
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .sort();
+
+  // oauth.go lives in the sibling autocmo-core repo. Resolve via the
+  // workspace-root pattern (sessions/<topic>/{autoCMO,autocmo-core} layout
+  // and base-worktree {autoCMO,autocmo-core} layout both work — the relative
+  // hop is ../../autocmo-core/oauth.go from app/).
+  const oauthGoPath = path.resolve(__dirname, '..', '..', 'autocmo-core', 'oauth.go');
+  if (!fs.existsSync(oauthGoPath)) {
+    // CI runs the JS suite from autoCMO checkout only; skip the cross-repo
+    // check there. The mirror test in autocmo-core (oauth_google_scope_parity_test.go)
+    // catches drift from the Go side. Both halves of the parity guard ship
+    // in the same commit so neither side can drift without the other firing.
+    console.log('    (skipping — oauth.go not adjacent; Go-side mirror test handles it)');
+    return;
+  }
+
+  const oauthGoSrc = fs.readFileSync(oauthGoPath, 'utf8');
+  // Extract the Scopes string literal from getGoogleOAuth(). Anchored to
+  // the function name to avoid false matches in adjacent factories.
+  const fnAnchor = 'func getGoogleOAuth(';
+  const fnStart = oauthGoSrc.indexOf(fnAnchor);
+  assert.ok(fnStart > 0, 'oauth.go must contain func getGoogleOAuth(');
+  // Bound by next "func " to keep the slice tight.
+  const fnEnd = oauthGoSrc.indexOf('\nfunc ', fnStart + fnAnchor.length);
+  const fnBody = fnEnd > 0 ? oauthGoSrc.slice(fnStart, fnEnd) : oauthGoSrc.slice(fnStart);
+  // The Scopes line in Go is `Scopes:       "https://...auth/foo https://...auth/bar"`.
+  const m = fnBody.match(/Scopes:\s*"([^"]+)"/);
+  assert.ok(m && m[1], 'oauth.go getGoogleOAuth must have a Scopes: "..." line');
+  const binaryScopes = m[1]
+    .split(/\s+/)
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .sort();
+
+  assert.deepStrictEqual(
+    fastOpenScopes,
+    binaryScopes,
+    'fast-open google.scopes (oauth-provider-config.js) and binary getGoogleOAuth().Scopes (oauth.go) must contain the same set of scopes. Drift = silent UX failure: the fast-open URL the renderer sends to Google will be missing whichever scope was added/removed only on the other side, and Google will silently drop or include it. See REGRESSION GUARD comment block at oauth-provider-config.js:google.scopes for the live incident anchor (2026-05-08 → 05-09, fast-open-google-scope).',
+  );
+});
+
 // ── Determinism ─────────────────────────────────────────────────────
 
 test('Two buildAuthUrl calls produce different state + pkceVerifier', () => {
