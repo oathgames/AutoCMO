@@ -87,7 +87,22 @@ const PROVIDERS = {
     providerKey: 'google',
     authUrl: 'https://accounts.google.com/o/oauth2/v2/auth',
     clientId: '621539162889-6tdr07fufe97696knqvld0k62msr3di2.apps.googleusercontent.com',
-    scopes: 'https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/webmasters.readonly https://www.googleapis.com/auth/content',
+    // REGRESSION GUARD (2026-05-09, fast-open-google-scope):
+    // This scope string MUST stay in lockstep with autocmo-core/oauth.go's
+    // getGoogleOAuth().Scopes. Two sources of truth: (a) this file (used
+    // by the renderer's fast-open OAuth path — the default for Google
+    // because it shaves ~300ms off the binary-spawn cold start), and
+    // (b) oauth.go (used by the legacy binary-login fallback). Live
+    // incident anchor: 2026-05-08 → 05-09. The 2026-05-01
+    // ga-scope-readonly-downgrade added analytics.readonly to oauth.go
+    // but missed updating this file. Every OAuth attempt from the
+    // Merlin UI silently dropped the analytics scope; only direct
+    // binary calls (which bypass fast-open) requested all 4 scopes.
+    // ~8 hours of misdiagnosis ensued because the binary side was
+    // correct but the fast-open side was the actual code path running.
+    // oauth-provider-config.test.js source-scans both files together
+    // and fails CI if Google's scope string drifts between them.
+    scopes: 'https://www.googleapis.com/auth/adwords https://www.googleapis.com/auth/webmasters.readonly https://www.googleapis.com/auth/content https://www.googleapis.com/auth/analytics.readonly',
     redirectUri: '', // loopback — any port
     usesPKCE: true,
     extraParams: { access_type: 'offline', prompt: 'consent' },
