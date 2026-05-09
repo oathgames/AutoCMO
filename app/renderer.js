@@ -1711,6 +1711,38 @@ function friendlyError(raw, platformName) {
   // banner + waitlist chip. The waitlist chip opens merlingotme.com/waitlist
   // (handled in main.js via openExternal — Cluster-L delivery).
   if (sl.includes('1885183') || sl.includes('development mode')) return `Meta app is in Development Mode — ad creatives are blocked by Meta's platform policy.\nThis requires Meta App Review approval from Meta, not something Merlin can unlock from your side.\n[[deadend:${DEAD_END_META_DEV_MODE}]]`;
+  // REGRESSION GUARD (2026-05-06, meta-app-review-error live incident):
+  // Meta surfaces THREE distinct "your app needs more approval" errors,
+  // each with different root causes — and each requires a different
+  // remediation action by Merlin's operator (Ryan), not by the user.
+  // Pre-fix only 1885183 was caught; users hitting the other two saw
+  // either the raw Meta error JSON or fell through to the generic
+  // "Authorization failed" line. Live incident: paying users tried to
+  // OAuth Meta and got "the app is still in review" from Meta's auth
+  // dialog. The Merlin Meta app (823058806852722) IS Live, but our
+  // OAuth URL passes config_id=1258603313068894 which is a Facebook
+  // Login for Business "Login Configuration" — a SEPARATE approval
+  // surface in Meta Business Manager. The config can be in Pending /
+  // Development state independent of the parent app. So a Live app
+  // PLUS a not-yet-approved login-config = users see "in review."
+  //
+  // Other variants in the wild:
+  //   - "advanced access required for <permission>" — scope-level
+  //     gating; the app is Live but a specific permission is still on
+  //     Standard Access (only app team members can use it).
+  //   - "this app is pending review" / "pending approval" — same
+  //     login-configuration approval gate phrased differently.
+  //
+  // All three route to the same dead-end banner because none of them
+  // are user-fixable; they're Meta-dashboard actions for the operator
+  // (Merlin's own team).
+  if (
+    /still in review|pending review|pending approval|under review|app is in review/.test(sl) ||
+    /advanced access (required|needed)/.test(sl) ||
+    /not yet (approved|granted)/.test(sl)
+  ) {
+    return `Meta says this app is still pending approval for one or more permissions — ad creation is gated by Meta's platform policy.\nThis is a Meta Business Manager state and Merlin can't unlock it from your side. We've flagged it for resolution; meanwhile your existing ads continue to run.\n[[deadend:${DEAD_END_META_DEV_MODE}]]`;
+  }
   if (sl.includes('ad account') && sl.includes('disabled')) return 'Your Meta ad account has been disabled by Facebook.\nTry: [[chip:Open Meta Business:open-url:https://business.facebook.com]]';
 
   // ── Balance / billing errors ──

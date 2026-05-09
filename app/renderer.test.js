@@ -295,6 +295,48 @@ test('§3.12 — Meta 1885183 emits deadend sentinel, not generic contact-suppor
   );
 });
 
+test('Meta "still in review" / "pending approval" / "advanced access" surfaces dead-end (not raw error)', () => {
+  // REGRESSION GUARD (2026-05-06, meta-app-review-error live incident):
+  // Live user report — paying users tried to OAuth Meta and got
+  // "the app is still in review" from Meta's auth dialog. The Merlin
+  // Meta app (823058806852722) IS Live, but our OAuth URL passes
+  // config_id=1258603313068894 which is a Facebook Login for Business
+  // Login Configuration with its OWN approval state in Meta Business
+  // Manager. A Live app + a not-yet-approved login-config = users see
+  // "in review." Pre-fix only error subcode 1885183 ("Development
+  // Mode") was caught; the three other phrasings ("still in review",
+  // "pending approval", "advanced access required for X") fell through
+  // to the generic "Authorization failed" line or surfaced raw Meta
+  // JSON. None are user-fixable — they're operator-side Meta dashboard
+  // actions — so they all route to the same dead-end banner that 1885183
+  // uses.
+  const fnStart = RENDERER_JS.indexOf('function friendlyError(');
+  const fnEnd = RENDERER_JS.indexOf('function humanizeUpdateError', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+
+  // Source-scan: the regex catching the "still in review" family must exist.
+  assert.ok(
+    /still in review|pending review|pending approval|under review|app is in review/.test(body),
+    'friendlyError must catch the "still in review" / "pending approval" family of Meta errors'
+  );
+  assert.ok(
+    body.includes('advanced access (required|needed)'),
+    'friendlyError must catch "advanced access required/needed" — Meta\'s phrasing for scope-level Standard→Advanced gating'
+  );
+  // Same dead-end target as 1885183 — neither is user-fixable. Find
+  // the IF clause (not the prose comment that introduces the branch
+  // — both contain "still in review", so we skip past the first match
+  // until we find the `.test(sl)` regex check).
+  const ifIdx = body.search(/\/still in review\|pending review\|pending approval/);
+  assert.ok(ifIdx > 0, 'in-review IF clause must exist with the documented regex');
+  const tail = body.slice(ifIdx, ifIdx + 1500);
+  assert.ok(
+    tail.includes('[[deadend:${DEAD_END_META_DEV_MODE}]]') ||
+    tail.includes('[[deadend:meta_dev_mode_1885183]]'),
+    'the in-review branch must emit the same dead-end sentinel as 1885183 (both are Meta-side gates the user can\'t resolve)'
+  );
+});
+
 test('§3.13 — friendlyError chip-renders mcp__merlin__google_analytics scope_missing sentinel', () => {
   // REGRESSION GUARD (2026-05-01, ga-scope-reauth): the Go binary's
   // errAnalyticsScopeMissing sentinel uses the exact prefix
