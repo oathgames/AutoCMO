@@ -922,7 +922,7 @@ function buildTools(tool, z, ctx) {
   //                              cap is plan-tier-global, not per-endpoint).
   tools.push(defineTool({
     name: 'klaviyo',
-    description: 'Klaviyo email marketing — performance, lists, campaigns + email template CRUD (list/get/create/update/delete) + bulk template upload from a folder of HTML files + full programmatic Flows API (list/get/create/update-status/delete + bulk-import a manifest of email automations with CAN-SPAM gate). Token swap translates {{UNSUB_URL}} / {{ FIRST_NAME }} / {{COMPANY_ADDRESS}} placeholders into Klaviyo Django tags.',
+    description: 'Klaviyo email marketing — performance reports, lists, campaigns + email template CRUD (list/get/create/update/delete) + bulk template upload from a folder of HTML files + full programmatic Flows API (list/get/create/update-status/delete + bulk-import a manifest of email automations with CAN-SPAM gate). Performance analytics: flow-performance returns sends/opens/clicks/conversions/recovered-revenue per flow over a window; flow-message-performance breaks the same stats out per individual email inside one flow ("which subject line is winning"); metric-aggregate returns per-day counts of any tracked metric ("how many times did Started Checkout fire"). Token swap translates {{UNSUB_URL}} / {{ FIRST_NAME }} / {{COMPANY_ADDRESS}} placeholders into Klaviyo Django tags.',
     // REGRESSION GUARD (2026-04-29, Gitar PR #151 finding): klaviyo
     // tool's expanded action surface includes template-create / -update /
     // -delete and bulk-template-upload (51+ writes per call). Every other
@@ -948,8 +948,18 @@ function buildTools(tool, z, ctx) {
     concurrency: { platform: 'klaviyo' },
     input: {
       action: z.enum([
-        // Read-only reporting
+        // Read-only reporting (structural — flows + templates list, metric definitions).
+        // The "performance" action is misleadingly named — it returns metric / flow
+        // METADATA, not actual performance numbers. For real ROI numbers, use the
+        // three "*-performance" actions below (added 2026-05-09 per live user feedback).
         'performance', 'lists', 'campaigns',
+        // Performance reports — actual numbers a marketer evaluates flow ROI on.
+        // All three are read-only POST-bodies-as-filter against Klaviyo's
+        // 2024-10-15 reports API. flow-performance returns sends/opens/clicks/
+        // conversions/recovered-revenue per flow. flow-message-performance is
+        // the same statistics grouped by flow_message_id (which subject line is
+        // winning). metric-aggregate returns per-day counts of any tracked metric.
+        'flow-performance', 'flow-message-performance', 'metric-aggregate',
         // Email template CRUD + bulk
         'templates-list', 'template-get', 'template-create',
         'template-update', 'template-delete', 'templates-bulk-upload',
@@ -958,7 +968,7 @@ function buildTools(tool, z, ctx) {
         'flow-update-status', 'flow-delete', 'flows-bulk-import',
       ]).describe('Operation'),
       brand: brandSchema,
-      batchCount: z.coerce.number().int().optional().describe('Days of data (performance/campaigns)'),
+      batchCount: z.coerce.number().int().optional().describe('Days of data (performance/campaigns/flow-performance/flow-message-performance/metric-aggregate). Default 30.'),
       // Template fields (used by template-* + bulk-upload actions)
       templateId: z.string().optional().describe('Klaviyo template ID (get/update/delete)'),
       templateName: z.string().optional().describe('Display name for the template (create/update)'),
@@ -966,8 +976,10 @@ function buildTools(tool, z, ctx) {
       dir: z.string().optional().describe('Directory of .html files for bulk-upload (must be inside assets/brands/<brand>/)'),
       nameTemplate: z.string().optional().describe('Format string for bulk-upload, e.g. "POG / 01-welcome / {basename}". {basename} = filename without extension.'),
       applyTokens: z.boolean().optional().describe('Translate generic placeholders ({{UNSUB_URL}}, {{ FIRST_NAME }}, {{COMPANY_NAME}}, …) into Klaviyo Django tags. Default true for bulk-upload, false for single template-create/update.'),
-      // Flow fields (used by flow-* + flows-bulk-import actions)
-      flowId: z.string().optional().describe('Klaviyo flow ID (get/update-status/delete)'),
+      // Flow fields (used by flow-* + flows-bulk-import actions, AND flow-performance / flow-message-performance)
+      flowId: z.string().optional().describe('Klaviyo flow ID. Required for flow-get/update-status/delete and flow-message-performance; optional for flow-performance (when omitted, returns ALL flows).'),
+      // Performance fields
+      metricId: z.string().optional().describe('Klaviyo metric ID for metric-aggregate (pick one from the metrics list shown by the legacy "performance" action). Required for metric-aggregate.'),
       flowBody: z.any().optional().describe('Full flow body for flow-create. Shape: {name, trigger:{type, list_id?, metric?}, steps:[{type, ...}]}. Step types: "delay" {duration_seconds}, "send_email" {subject, preheader, from_email, from_name, template_id?, body?}, "wait_until" {time_of_day, timezone}, "branch" {condition}. The binary runs CheckFlowCANSPAM before any HTTP — trigger.type must be on the documented-consent allowlist (list_added, segment_added, profile_subscribed_marketing, ecommerce_placed_order, ecommerce_started_checkout, viewed_product, custom_event), every send_email step must have an unsubscribe token + physical address + subject + from_name. Failures REFUSE the create (no auto-fix).'),
       // REGRESSION GUARD (2026-04-29, Gitar PR #166): was z.string().optional()
       // — switched to z.enum so the LLM sees the valid set in the JSON Schema
