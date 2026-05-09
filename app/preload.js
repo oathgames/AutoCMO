@@ -411,6 +411,22 @@ contextBridge.exposeInMainWorld('merlin', {
     const h = (_, err) => cb(err); ipcRenderer.on('update-error', h);
     return () => ipcRenderer.removeListener('update-error', h);
   },
+  // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+  // Pending-restart banner — fires when /update wrote a JS module
+  // that's already in require.cache. Renderer MUST surface a
+  // non-dismissable banner with a Restart button. See
+  // app/binary-paths.js for the architectural rationale.
+  onUpdatePendingRestart: (cb) => {
+    const h = (_, info) => cb(info); ipcRenderer.on('update-pending-restart', h);
+    return () => ipcRenderer.removeListener('update-pending-restart', h);
+  },
+  // Fires once on startup AFTER a previous /update's pending-restart
+  // marker is cleared (i.e. the user has now restarted into the new
+  // version). Renderer can show a brief success toast.
+  onUpdateApplied: (cb) => {
+    const h = (_, info) => cb(info); ipcRenderer.on('update-applied', h);
+    return () => ipcRenderer.removeListener('update-applied', h);
+  },
   // §2.7: merlin:// URLs routed in from open-url (Mac) or second-instance
   // (Win/Linux). URL schema TBD; payload is the raw URL string — renderer
   // parses it. Returns an unsubscribe handle.

@@ -2922,6 +2922,60 @@ merlin.onUpdateError((err) => {
   document.getElementById('update-dismiss').classList.remove('hidden');
 });
 
+// REGRESSION GUARD (2026-05-09, binary-update-rsi):
+// Pending-restart banner — fires when /update wrote a JS module that's
+// already in require.cache. This is a CHANGE FROM PRIOR /update UX
+// where a Restart button appeared in a dismissible toast. The
+// pending-restart state is a stronger signal: until the user restarts,
+// they're running mixed-version code (renderer + main loaded fresh,
+// version.json fresh, but main.js + cached modules stale). Make it
+// less dismissible so users can't get stuck in a stale-code state for
+// hours like the 2026-05-08 → 05-09 fast-open scope debugging tour.
+//
+// We re-use the existing update-toast element rather than introducing
+// a new banner, but we hide its dismiss button and change the copy.
+merlin.onUpdatePendingRestart((info) => {
+  try {
+    const toast = document.getElementById('update-toast');
+    if (!toast) return;
+    toast.classList.remove('hidden');
+    const textEl = document.getElementById('update-text');
+    const btnEl = document.getElementById('update-btn');
+    const dismissEl = document.getElementById('update-dismiss');
+    if (textEl) {
+      const ver = info && info.toVersion ? `v${info.toVersion}` : 'the new version';
+      textEl.textContent = `Update applied — restart Merlin to activate ${ver}.`;
+    }
+    if (btnEl) {
+      btnEl.textContent = 'Restart';
+      btnEl.disabled = false;
+      btnEl.onclick = () => {
+        btnEl.disabled = true;
+        btnEl.textContent = 'Restarting…';
+        merlin.restartApp();
+      };
+    }
+    // Hide dismiss — pending-restart is non-dismissible by policy. The
+    // user's only path forward is the Restart button. They can still
+    // close the app via the OS chrome (and their next launch will pick
+    // up the new code), but they shouldn't be able to dismiss this
+    // toast and silently keep running stale code.
+    if (dismissEl) dismissEl.classList.add('hidden');
+  } catch {}
+});
+
+// One-time success toast on the launch immediately following a
+// pending-restart cycle. Fired from main.js's pending-restart marker
+// check after the marker is cleared. Safe to ignore.
+merlin.onUpdateApplied((info) => {
+  try {
+    if (typeof showToast === 'function') {
+      const ver = info && info.toVersion ? `v${info.toVersion}` : '';
+      showToast(`Merlin ${ver} is now active.`, { kind: 'success', duration: 4000 });
+    }
+  } catch {}
+});
+
 // ── Auth Code Paste Dialog ─────────────────────────────────
 // FALLBACK path only. The happy path is: the Claude Agent SDK opens the
 // browser, the user signs in, Claude redirects to http://localhost:<port>/
