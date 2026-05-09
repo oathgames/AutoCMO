@@ -20,6 +20,10 @@
     "electron": "41.2.0",
     "electron-builder": "^26.8.1"
   },
+  "//overrides": "REGRESSION GUARD (2026-05-09, npm-audit-fast-uri): fast-uri@3.1.0 (transitive via @anthropic-ai/claude-agent-sdk → @modelcontextprotocol/sdk → ajv) shipped two HIGH-severity advisories (GHSA-Q3J6-QGPJ-74H6, GHSA-V39H-62P7-JPJC) that broke v1.21.27's build-mac-installer + build-win-installer at the npm-audit gate. Patched in 3.1.2. Override forces every transitive copy to ^3.1.2 until the upstream chain (ajv → mcp-sdk → claude-agent-sdk) bumps naturally. Remove this override only AFTER confirming `npm ls fast-uri --omit=dev` shows >= 3.1.2 without it.",
+  "overrides": {
+    "fast-uri": "^3.1.2"
+  },
   "build": {
     "appId": "com.merlin.desktop",
     "productName": "Merlin",
