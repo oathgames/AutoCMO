@@ -629,16 +629,25 @@ if (app.isPackaged) {
   }
 }
 
-// Resolve the Merlin engine binary. We prefer the INSTALL location because
-// files placed there by the trusted installer don't get quarantined by
-// Windows Defender — the installer's user-approved trust extends to its
-// extraResources. Workspace is the fallback for dev and for cases where
-// ensureBinary had to download the binary at runtime.
+// REGRESSION GUARD (2026-05-09, binary-update-rsi):
+// Resolve the Merlin engine binary using a 3-tier preference order:
+//   1. canonical (user-writable per-OS — see app/binary-paths.js).
+//      This is where /update writes after this release. ensureBinary
+//      hydrates this from install-local on first launch.
+//   2. install-local (<appInstall>/.claude/tools/Merlin) — bundled with
+//      the installer. Used until canonical is hydrated. On Mac this is
+//      read-only (inside the .app bundle), which is why we needed the
+//      canonical user-writable layer in the first place — the
+//      pre-binary-update-rsi code wrote /update binaries to workspace
+//      while spawn preferred install-local, leading to the workspace
+//      copy never being read AND install-local never being updateable.
+//   3. workspace (<appRoot>/.claude/tools/Merlin) — legacy fallback for
+//      installs that pre-date this module. cleanupOrphanBinaries()
+//      deletes this once canonical is populated, so the fallback only
+//      fires on a one-time transitional launch.
+const binaryPaths = require('./binary-paths');
 function getBinaryPath() {
-  const binaryName = process.platform === 'win32' ? 'Merlin.exe' : 'Merlin';
-  const installBin = path.join(appInstall, '.claude', 'tools', binaryName);
-  try { fs.accessSync(installBin, fs.constants.F_OK); return installBin; } catch {}
-  return path.join(appRoot, '.claude', 'tools', binaryName);
+  return binaryPaths.resolveBinaryPath({ appInstall, appRoot });
 }
 
 let claudeSdkModulePromise = null;
@@ -11330,10 +11339,21 @@ async function ensureBinary(opts = {}) {
     try { fs.accessSync(getBinaryPath(), fs.constants.F_OK); return true; } catch {}
   }
 
-  // Workspace target — install location may not be writable
-  const binaryPath = path.join(appRoot, '.claude', 'tools', process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
+  // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+  // ensureBinary now writes to the CANONICAL user-writable location
+  // (~/Library/Application Support/Merlin/bin on Mac,
+  //  %LOCALAPPDATA%\Merlin\bin on Windows,
+  //  $XDG_DATA_HOME/Merlin/bin on Linux).
+  //
+  // Pre-fix wrote to workspace (<appRoot>/.claude/tools/) with the
+  // comment "install location may not be writable" — true on Mac, but
+  // the spawn path (getBinaryPath) preferred install-local, so the
+  // workspace copy was never actually read. The new canonical layer
+  // is what BOTH /update writes to AND getBinaryPath reads from,
+  // closing the desync.
+  const binaryPath = binaryPaths.getCanonicalBinaryPath();
 
-  // Make sure the tools directory exists
+  // Make sure the canonical tools directory exists
   try { fs.mkdirSync(path.dirname(binaryPath), { recursive: true }); } catch {}
 
   if (onProgress) onProgress('Fetching engine...');
@@ -11656,7 +11676,22 @@ async function downloadAndApplyUpdate() {
     }
     // Phase 2: write each verified file. Each write is preceded by a
     // one-file backup so we can roll back the entire update on failure.
+    //
+    // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+    // Track which writes hit a JS module that's already in
+    // require.cache. Such modules CANNOT be reloaded without a process
+    // restart — Node's require.cache locks them at first load. Pre-fix,
+    // a /update could write a fresh app/main.js or
+    // app/oauth-provider-config.js to disk, the renderer would read
+    // the new version.json and show "v1.21.28" to the user, but every
+    // OAuth click + every spawn would still execute the OLD code from
+    // memory. This was THE failure mode behind the 2026-05-08 → 05-09
+    // 8-hour Google scope debugging tour: users had auto-updated, but
+    // their running process was still on the old fast-open scope set.
+    // Live anchor: every paying user who ran /update without then
+    // restarting was silently affected.
     const rollbackList = [];
+    const cachedModuleWrites = []; // <-- set by stale-cache tracker
     try {
       for (const { filePath, content } of stagedUpdatables) {
         // Re-check at write time — belt and braces. If something bypassed the
@@ -11671,6 +11706,19 @@ async function downloadAndApplyUpdate() {
           const backup = fullPath + '.rollback';
           try { fs.copyFileSync(fullPath, backup); rollbackList.push({ fullPath, backup }); } catch {}
         }
+        // Stale-cache tracker: BEFORE the write, ask the binary-paths
+        // helper whether this file path corresponds to a module already
+        // in require.cache. If yes, log it for the post-write marker.
+        // Done before write so we capture the pre-overwrite state — the
+        // require.cache key is keyed on the path that was originally
+        // loaded, which doesn't change just because we replace its file
+        // content. Done inside the loop (not after) so a write that
+        // throws halfway through still produces an accurate cached-set.
+        try {
+          if (binaryPaths.isCachedJsModulePath(fullPath)) {
+            cachedModuleWrites.push(filePath);
+          }
+        } catch {}
         fs.writeFileSync(fullPath, content);
       }
     } catch (writeErr) {
@@ -11684,6 +11732,42 @@ async function downloadAndApplyUpdate() {
     // Clean up backups once all writes succeeded.
     for (const { backup } of rollbackList) {
       try { fs.unlinkSync(backup); } catch {}
+    }
+
+    // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+    // If the Phase 2 write replaced any JS module currently in
+    // require.cache, we MUST surface a restart-required banner — the
+    // old code is still in memory and will silently keep running until
+    // the next process launch. The marker file is read at startup AND
+    // immediately after this update completes (next IPC frame), so
+    // the renderer can render a non-dismissable "Restart to apply"
+    // banner. The marker is cleared the next time main.js boots —
+    // because once we're in a new process, the new module IS loaded.
+    if (cachedModuleWrites.length > 0) {
+      try {
+        binaryPaths.writePendingRestartMarker(stateDir, {
+          fromVersion: getCurrentVersion(),
+          toVersion: latestVersion,
+          files: cachedModuleWrites,
+        });
+        console.log('[update] pending-restart marker written; cached modules touched:', cachedModuleWrites.length);
+      } catch (e) {
+        console.warn('[update] could not write pending-restart marker:', e.message);
+      }
+      // Notify the renderer immediately — don't wait for next launch
+      // to surface the banner. The renderer's ipc handler can show a
+      // toast / banner / modal based on UX rules; the marker exists
+      // as a fallback so a user who closes the toast without restarting
+      // still sees the banner on their next launch.
+      try {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('update-pending-restart', {
+            fromVersion: getCurrentVersion(),
+            toVersion: latestVersion,
+            files: cachedModuleWrites,
+          });
+        }
+      } catch {}
     }
 
     // Phase 3: delete files that a previous version shipped but the new
@@ -11748,7 +11832,14 @@ async function downloadAndApplyUpdate() {
       if (actualBinaryHash !== expectedBinaryHash) {
         throw new Error(`Binary checksum mismatch: expected ${expectedBinaryHash.slice(0, 12)}..., got ${actualBinaryHash.slice(0, 12)}...`);
       }
-      const binaryPath = path.join(appRoot, '.claude', 'tools', process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
+      // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+      // Write the new binary to the CANONICAL location (user-writable
+      // per-OS), not workspace. See app/binary-paths.js for the full
+      // architectural rationale. cleanupOrphanBinaries() runs on next
+      // launch to delete any stale workspace binary so the fallback
+      // doesn't shadow the canonical one.
+      const binaryPath = binaryPaths.getCanonicalBinaryPath();
+      try { fs.mkdirSync(path.dirname(binaryPath), { recursive: true }); } catch {}
       if (fs.existsSync(binaryPath)) fs.copyFileSync(binaryPath, binaryPath + '.backup');
       try {
         fs.writeFileSync(binaryPath, binary);
@@ -12604,7 +12695,87 @@ app.whenReady().then(async () => {
     try { appendErrorLog(`${new Date().toISOString()} [workspace] bootstrap threw: ${e.message}\n`); } catch {}
   }
 
+  // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+  // Hydrate the canonical user-writable binary location from
+  // install-local on every launch (idempotent; no-op when canonical is
+  // already at-or-above install-local's version). Then sweep stale
+  // binaries from legacy locations (workspace, os.tmpdir orphans,
+  // installer-stage tmp files). Both run AFTER bootstrapWorkspace so
+  // appInstall is guaranteed to be valid, BEFORE createWindow so
+  // getBinaryPath() returns the right answer for any spawn the
+  // window's first paint triggers (SDK preflight, connection probe,
+  // etc.). Either failing is non-fatal — getBinaryPath() falls
+  // through to install-local and the user still launches.
+  try {
+    const hydrateResult = await binaryPaths.hydrateCanonicalBinary({
+      appInstall,
+      getBinaryVersionAt,
+      log: (msg) => {
+        console.log(msg);
+        try { appendErrorLog(`${new Date().toISOString()} ${msg}\n`); } catch {}
+      },
+    });
+    if (hydrateResult && hydrateResult.hydrated) {
+      console.log('[binary-paths] canonical hydrated:', hydrateResult.target);
+    }
+  } catch (e) {
+    console.error('[binary-paths] hydration threw (non-fatal):', e.message);
+    try { appendErrorLog(`${new Date().toISOString()} [binary-paths] hydration threw: ${e.message}\n`); } catch {}
+  }
+
+  try {
+    const cleanupResult = binaryPaths.cleanupOrphanBinaries({
+      appRoot,
+      log: (msg) => {
+        console.log(msg);
+        try { appendErrorLog(`${new Date().toISOString()} ${msg}\n`); } catch {}
+      },
+    });
+    if (cleanupResult && cleanupResult.deleted.length > 0) {
+      console.log('[binary-paths] orphan-cleanup deleted', cleanupResult.deleted.length, 'file(s)');
+    }
+  } catch (e) {
+    console.error('[binary-paths] orphan-cleanup threw (non-fatal):', e.message);
+    try { appendErrorLog(`${new Date().toISOString()} [binary-paths] orphan-cleanup threw: ${e.message}\n`); } catch {}
+  }
+
   await createWindow();
+
+  // REGRESSION GUARD (2026-05-09, binary-update-rsi):
+  // If a previous /update wrote to a JS module that's loaded into
+  // require.cache, it left behind a pending-restart marker. Now that
+  // we're in a fresh process, the just-written module IS loaded —
+  // clear the marker. Until we clear it, surface a banner to the
+  // renderer so the user knows the previous /update applied; this
+  // closes the case where a user ran /update in a previous session,
+  // closed Merlin without restarting, and now reopens — they'd
+  // otherwise see no indication that the prior update is now active.
+  try {
+    const pending = binaryPaths.readPendingRestartMarker(stateDir);
+    if (pending) {
+      // We're in a fresh process — the cached modules are no longer
+      // stale. Clear the marker. Best-effort; if delete fails, the
+      // marker hangs around until next launch (idempotent: re-clearing
+      // is fine).
+      binaryPaths.clearPendingRestartMarker(stateDir);
+      // Optional one-time toast: "Update applied: vX.Y.Z is now
+      // running". The renderer subscribes to update-applied IPC and
+      // renders a brief success toast. If the renderer ignores it,
+      // no harm done.
+      try {
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('update-applied', {
+            toVersion: pending.toVersion,
+            fromVersion: pending.fromVersion,
+            files: pending.files,
+          });
+        }
+      } catch {}
+      console.log('[update] cleared pending-restart marker; running v' + pending.toVersion);
+    }
+  } catch (e) {
+    console.warn('[update] pending-restart marker check failed (non-fatal):', e.message);
+  }
 
   // Warmup-perf: move the idempotent migrations off the critical path. These
   // only touch user state files (tokens, vault, legacy skills/results, stray
