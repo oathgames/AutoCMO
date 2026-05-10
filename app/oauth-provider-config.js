@@ -70,7 +70,35 @@ const PROVIDERS = {
     scopes: 'ads_management,pages_manage_ads,pages_read_engagement,business_management,pages_show_list',
     redirectUri: 'https://merlingotme.com/auth/callback',
     usesPKCE: false,
-    extraParams: { config_id: '1258603313068894' },
+    // REGRESSION GUARD (2026-05-09, meta-config-id-fast-open):
+    // extraParams MUST stay empty (or carry only fields already present
+    // in autocmo-core/oauth.go's getMetaOAuth ExtraParams).
+    //
+    // Live incident anchor: 2026-05-09. Users on Mac (and any user
+    // tripping Meta's stricter checks — VPN, country mismatch, brand-new
+    // FB account) hit "Feature Unavailable. Facebook Login is currently
+    // unavailable for this app, since we are updating additional details
+    // for this app. Please try again later." We had ALREADY shipped the
+    // FBLB-config-id drop in v1.21.27 (autocmo-core PR #167) — but
+    // ONLY in oauth.go's getMetaOAuth. THIS file (the JS fast-open path
+    // that the renderer ACTUALLY uses, ~300ms ahead of the binary
+    // cold-start) still hardcoded `config_id: '1258603313068894'` here.
+    // So every UI-driven Meta connect built an authorize URL containing
+    // the FBLB config_id, routed users through the FBLB-Configuration-
+    // gated flow, and FBLB's separate approval state surfaced
+    // "Feature Unavailable" for any user the strict-checks system flagged.
+    //
+    // SAME bug class as the 2026-05-08 fast-open Google scope drift
+    // (PR #235). Two sources of truth, fix landed on one side, hid for
+    // 8 days. The PR #235 parity test only covered SCOPES — extraParams
+    // was a separate drift vector that nothing checked. The
+    // oauth-provider-config.test.js companion to this fix extends that
+    // parity test to cover extraParams keys for every provider.
+    //
+    // To opt into the FBLB flow on a per-user basis: pass an explicit
+    // config_id via opts.extraParams in oauth-fast-open.js. Do NOT
+    // re-add it as a default here.
+    extraParams: {},
   },
   tiktok: {
     displayName: 'TikTok Ads',

@@ -158,14 +158,28 @@ test('generateState produces 32-hex string', () => {
 
 // ── buildAuthUrl per-provider ───────────────────────────────────────
 
-test('buildAuthUrl: Meta — URL shape + Worker redirect + no PKCE', () => {
+test('buildAuthUrl: Meta — URL shape + Worker redirect + no PKCE + no config_id', () => {
+  // REGRESSION GUARD (2026-05-09, meta-config-id-fast-open):
+  // The previous version of this test asserted config_id === '1258603313068894'
+  // — pinning the FBLB Configuration ID into every Meta OAuth URL by default.
+  // That config_id silently routed users through the FBLB-Configuration-gated
+  // flow, which had its own approval state separate from the parent app's
+  // Live status. Live anchor: 2026-05-09 — Mac users hitting "Feature
+  // Unavailable" because Meta's strict checks refused the FBLB-gated flow
+  // even though standard FB Login (which is what we WANT to use) was Live.
+  // PR #167 dropped config_id from autocmo-core/oauth.go's getMetaOAuth on
+  // 2026-05-09 morning; this commit completes the same fix on the JS side.
+  // The assertion now anti-asserts config_id's PRESENCE.
   const { authUrl, state, authState, pkceVerifier, redirectUri } = buildAuthUrl('meta', { localPort: 54321 });
   const u = parseUrl(authUrl);
   assert.strictEqual(u.host, 'www.facebook.com');
   assert.strictEqual(u.pathname, '/v22.0/dialog/oauth');
   assert.strictEqual(u.params.client_id, '823058806852722');
   assert.strictEqual(u.params.redirect_uri, 'https://merlingotme.com/auth/callback');
-  assert.strictEqual(u.params.config_id, '1258603313068894');
+  assert.ok(
+    !('config_id' in u.params),
+    'Meta OAuth URL must NOT carry a default config_id — the FBLB Configuration has its own approval state separate from the parent app, which silently surfaces as "Feature Unavailable" for users tripping Meta\'s strict checks. See REGRESSION GUARD in oauth-provider-config.js extraParams comment block.',
+  );
   assert.strictEqual(u.params.response_type, 'code');
   assert.strictEqual(u.params.state, `${state}|54321`);
   assert.strictEqual(authState, `${state}|54321`);
@@ -351,6 +365,119 @@ test('REGRESSION 2026-05-09: Google scopes match between oauth-provider-config.j
     binaryScopes,
     'fast-open google.scopes (oauth-provider-config.js) and binary getGoogleOAuth().Scopes (oauth.go) must contain the same set of scopes. Drift = silent UX failure: the fast-open URL the renderer sends to Google will be missing whichever scope was added/removed only on the other side, and Google will silently drop or include it. See REGRESSION GUARD comment block at oauth-provider-config.js:google.scopes for the live incident anchor (2026-05-08 → 05-09, fast-open-google-scope).',
   );
+});
+
+// ── Cross-file ExtraParams parity (REGRESSION GUARD 2026-05-09) ────
+//
+// meta-config-id-fast-open incident: fast-open Meta entry hardcoded
+// `extraParams: { config_id: '1258603313068894' }`, but the binary's
+// getMetaOAuth had ALREADY dropped this default in v1.21.27 (PR #167)
+// after Meta's FBLB Configuration approval state diverged from the
+// app's Live status, surfacing "Feature Unavailable" to users.
+// PR #167 fixed the binary side. The JS fast-open side was never
+// touched. Every UI-driven Meta OAuth (which uses fast-open by default)
+// kept routing through the FBLB-gated flow for ANOTHER day, surfacing
+// "Feature Unavailable" again on 2026-05-09 — same root cause as
+// the Google scope drift. Same class of bug.
+//
+// The Google scope parity test above only covered scopes — extraParams
+// was a separate drift vector that nothing checked. This test extends
+// the parity to cover EVERY provider's extraParams keys, comparing
+// the fast-open extraParams object to the binary's ExtraParams map
+// in the corresponding factory function.
+//
+// Why parity is per-key, not per-value:
+//   - The binary may apply extraParams conditionally (cfg.OAuth*.Foo
+//     overrides, env-var defaults). Comparing values would flag
+//     intentional conditionality.
+//   - What matters for "no surprise default" is that both sides
+//     advertise the SAME SET of always-set keys.
+//
+// Skips per-provider when the binary side has clearly-dynamic keys
+// (e.g. "scope" assembly via concatenation) — the test focuses on
+// hardcoded-default keys like config_id, app_id, prompt, access_type.
+
+test('REGRESSION 2026-05-09: ExtraParams keys match between oauth-provider-config.js and oauth.go for every active provider', () => {
+  const oauthGoPath = path.resolve(__dirname, '..', '..', 'autocmo-core', 'oauth.go');
+  if (!fs.existsSync(oauthGoPath)) {
+    console.log('    (skipping — oauth.go not adjacent; Go-side mirror test handles it)');
+    return;
+  }
+  const oauthGoSrc = fs.readFileSync(oauthGoPath, 'utf8');
+
+  // Map fast-open provider key → Go factory function name.
+  const goFactoryName = {
+    meta: 'getMetaOAuth',
+    tiktok: 'getTiktokOAuth',
+    google: 'getGoogleOAuth',
+    shopify: 'getShopifyOAuth',
+    amazon: 'getAmazonOAuth',
+    reddit: 'getRedditOAuth',
+    etsy: 'getEtsyOAuth',
+    linkedin: 'getLinkedInOAuth', // capital I matches Go convention
+    stripe: 'getStripeOAuth',
+    slack: 'getSlackOAuth',
+  };
+
+  const drift = [];
+  for (const [providerKey, fnName] of Object.entries(goFactoryName)) {
+    const provider = PROVIDERS[providerKey];
+    if (!provider) continue;
+    const fastOpenKeys = Object.keys(provider.extraParams || {}).sort();
+
+    const fnAnchor = `func ${fnName}(`;
+    const fnStart = oauthGoSrc.indexOf(fnAnchor);
+    if (fnStart < 0) {
+      drift.push(`${providerKey}: oauth.go missing ${fnAnchor}`);
+      continue;
+    }
+    const fnEnd = oauthGoSrc.indexOf('\nfunc ', fnStart + fnAnchor.length);
+    const fnBody = fnEnd > 0 ? oauthGoSrc.slice(fnStart, fnEnd) : oauthGoSrc.slice(fnStart);
+
+    // Locate the FIRST ExtraParams literal — the default. Conditional
+    // overrides later in the function (e.g. `if cfg.X != "" { p.ExtraParams = ... }`)
+    // are intentional opt-ins, not drift.
+    //
+    // Match shapes accepted:
+    //   ExtraParams: map[string]string{},
+    //   ExtraParams: map[string]string{"key": "..."},
+    //   ExtraParams: map[string]string{"k1":"v1","k2":"v2"},
+    //   ExtraParams:  nil,
+    const extraMatch = fnBody.match(/ExtraParams:\s*(?:nil|map\[string\]string\{([^}]*)\})/);
+    if (!extraMatch) {
+      // Function has no default ExtraParams field — treat as empty.
+      if (fastOpenKeys.length > 0) {
+        drift.push(`${providerKey}: fast-open declares extraParams keys [${fastOpenKeys.join(', ')}] but oauth.go's ${fnName} has NO ExtraParams default field`);
+      }
+      continue;
+    }
+    const inner = extraMatch[1] || '';
+    // Extract keys from `"key": "value"` pairs.
+    const keyRe = /"([^"]+)"\s*:\s*"[^"]*"/g;
+    const binaryKeys = [];
+    let km;
+    while ((km = keyRe.exec(inner)) !== null) {
+      binaryKeys.push(km[1]);
+    }
+    binaryKeys.sort();
+
+    if (JSON.stringify(fastOpenKeys) !== JSON.stringify(binaryKeys)) {
+      drift.push(
+        `${providerKey}: fast-open extraParams keys = [${fastOpenKeys.join(', ')}], ` +
+        `binary ${fnName} default ExtraParams keys = [${binaryKeys.join(', ')}]`
+      );
+    }
+  }
+
+  if (drift.length > 0) {
+    throw new Error(
+      'ExtraParams parity failure between oauth-provider-config.js (fast-open) and ' +
+      'autocmo-core/oauth.go (binary). Live anchor: 2026-05-09 meta-config-id-fast-open ' +
+      'incident — fast-open Meta entry kept config_id long after the binary dropped it, ' +
+      'surfacing "Feature Unavailable" to users tripping Meta\'s strict checks.\n\n' +
+      'Drift detected:\n  ' + drift.join('\n  ')
+    );
+  }
 });
 
 // ── Determinism ─────────────────────────────────────────────────────
