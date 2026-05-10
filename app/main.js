@@ -10903,9 +10903,41 @@ async function installUpdateFromLatestRelease() {
           return; // installation succeeded — outer handler will quit the app
         } catch (err) {
           console.error('[update][mac]', err && err.message);
+          // Telemetry — log the full failure reason so future debugging
+          // doesn't have to re-derive it from console output.
+          try {
+            appendErrorLog(`${new Date().toISOString()} [update][mac] in-place ditto failed: ${err && err.message}\n`);
+          } catch {}
           // Cleanup mount if we got that far.
           if (mountedAt) {
             try { spawnSync('hdiutil', ['detach', '-force', mountedAt], { timeout: 30000 }); } catch {}
+          }
+          // REGRESSION GUARD (2026-05-10, mac-app-bundle-cleanup):
+          // Before falling back to the manual-drag flow, pre-clean any
+          // existing /Applications/Merlin*.app duplicates so Finder
+          // doesn't hit the "Keep Both" dialog when the user drags. The
+          // running app is preserved (cleanupOrphanMacAppBundles refuses
+          // to delete it). After the user drags the new bundle, Finder
+          // sees an empty slot at /Applications/Merlin.app and just
+          // copies in cleanly — no duplicate creation.
+          //
+          // This pre-clean is the difference between "user gets one
+          // unified Merlin.app on disk" and "user accumulates Merlin 2,
+          // 3, 4, … .app on every fallback fire." Without it, the
+          // fallback path is itself the bug source.
+          try {
+            const preCleanup = binaryPaths.cleanupOrphanMacAppBundles({
+              runningExePath: app.getPath('exe'),
+              log: (msg) => {
+                console.log(msg);
+                try { appendErrorLog(`${new Date().toISOString()} ${msg}\n`); } catch {}
+              },
+            });
+            if (preCleanup && preCleanup.deleted && preCleanup.deleted.length > 0) {
+              console.log('[update][mac] pre-cleaned', preCleanup.deleted.length, 'orphan .app bundle(s) before manual-drag fallback');
+            }
+          } catch (cleanErr) {
+            console.warn('[update][mac] pre-clean failed (non-fatal):', cleanErr && cleanErr.message);
           }
           if (win && !win.isDestroyed()) {
             win.webContents.send('update-progress', 'Automatic install failed — opening the installer. Drag Merlin to Applications to finish.');
@@ -12737,6 +12769,34 @@ app.whenReady().then(async () => {
   } catch (e) {
     console.error('[binary-paths] orphan-cleanup threw (non-fatal):', e.message);
     try { appendErrorLog(`${new Date().toISOString()} [binary-paths] orphan-cleanup threw: ${e.message}\n`); } catch {}
+  }
+
+  // REGRESSION GUARD (2026-05-10, mac-app-bundle-cleanup):
+  // Mac users reported every update produces /Applications/Merlin 2.app,
+  // Merlin 3.app, etc. instead of replacing the existing bundle.
+  // Two failure modes feed the same UX: (a) /update's hdiutil+ditto
+  // in-place replace fails for some reason and falls back to `open <dmg>`,
+  // user drags Merlin.app → Finder "Keep Both" → Merlin 2.app; (b) user
+  // downloads from merlingotme.com manually and drags every time, same
+  // Keep Both behavior. Self-healing fix: scan /Applications for the
+  // strict pattern `^Merlin( \d+)?\.app$` on every launch, keep the
+  // running app, delete the rest. Bundle-identifier match guards against
+  // any unrelated third-party "Merlin"-named app.
+  // No-op on Windows / Linux. Best-effort — never blocks app launch.
+  try {
+    const macCleanupResult = binaryPaths.cleanupOrphanMacAppBundles({
+      runningExePath: app.getPath('exe'),
+      log: (msg) => {
+        console.log(msg);
+        try { appendErrorLog(`${new Date().toISOString()} ${msg}\n`); } catch {}
+      },
+    });
+    if (macCleanupResult && macCleanupResult.deleted && macCleanupResult.deleted.length > 0) {
+      console.log('[binary-paths] mac-app cleanup deleted', macCleanupResult.deleted.length, 'orphan bundle(s)');
+    }
+  } catch (e) {
+    console.error('[binary-paths] mac-app cleanup threw (non-fatal):', e.message);
+    try { appendErrorLog(`${new Date().toISOString()} [binary-paths] mac-app cleanup threw: ${e.message}\n`); } catch {}
   }
 
   await createWindow();

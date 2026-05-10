@@ -345,6 +345,131 @@ function cleanupOrphanBinaries({ appRoot, log = console.log }) {
   return result;
 }
 
+// ─── Mac .app bundle orphan cleanup (REGRESSION GUARD 2026-05-10) ──
+//
+// Live anchor: 2026-05-10. Mac users reported every update produces
+// `Merlin 2.app`, `Merlin 3.app`, `Merlin 4.app` etc. in /Applications
+// instead of replacing in place. Two failure modes feed the same UX:
+//
+//   1. The /update flow's hdiutil+ditto in-place replace
+//      (main.js:10828+) fails for some reason (permission, mount race,
+//      signature lock, App Translocation), the catch block falls back
+//      to `open <dmg>` which opens Finder, the user drags Merlin.app
+//      → Finder sees existing /Applications/Merlin.app → "Keep Both"
+//      dialog → /Applications/Merlin 2.app gets created. Next update
+//      cycle the user is now running Merlin 2.app, ditto replaces
+//      Merlin 2.app fine, but Merlin.app sits orphaned. Manual drag of
+//      another DMG → Merlin 3.app. Etc.
+//
+//   2. Manual download path: user goes to merlingotme.com/download/mac,
+//      gets a DMG, drags Merlin.app to /Applications every time. Same
+//      Keep Both → infinite duplicates.
+//
+// Both compound to the same end state: multiple Merlin*.app bundles in
+// /Applications, only one of which is actually running and getting
+// updated, the rest accumulating cruft and confusing the user.
+//
+// FIX: same pattern as cleanupOrphanBinaries — auto-clean on every
+// launch. Scan /Applications for `Merlin*.app` matching the duplicate
+// pattern, identify the running app via app.getPath('exe'), keep that
+// one, delete the rest. Self-heals regardless of how the user got into
+// the duplicate state.
+//
+// Safety:
+//   - Match a STRICT regex: /^Merlin( \d+)?\.app$/ (matches "Merlin.app",
+//     "Merlin 2.app", "Merlin 3.app", … but NOT "MerlinX.app",
+//     "Merlin Pro.app", "Merlinette.app").
+//   - NEVER delete the running app (resolved from app.getPath('exe')).
+//   - NEVER delete an app without a Contents/Info.plist (i.e. it must
+//     actually look like an .app bundle, not a misnamed file).
+//   - Require Contents/Info.plist's CFBundleIdentifier to MATCH the
+//     running app's identifier — defense against any third-party
+//     "Merlin"-named app that happens to live alongside ours.
+//   - macOS-only. No-op on Windows / Linux.
+//
+// Returns { deleted: [...], skipped: [...], errors: [...] } for telemetry.
+// Never throws — every delete is best-effort. Idempotent.
+
+function cleanupOrphanMacAppBundles({ runningExePath, log = console.log }) {
+  const result = { deleted: [], skipped: [], errors: [] };
+  if (process.platform !== 'darwin') {
+    return { ...result, reason: 'not-darwin' };
+  }
+  // Resolve the running .app bundle from the executable path.
+  // app.getPath('exe') = /Applications/Merlin.app/Contents/MacOS/Merlin
+  //   → walk up two levels = /Applications/Merlin.app
+  // The caller (main.js boot path) passes app.getPath('exe').
+  let runningAppPath = null;
+  if (runningExePath) {
+    runningAppPath = path.resolve(path.dirname(runningExePath), '..', '..');
+    if (!runningAppPath.endsWith('.app')) {
+      // Caller didn't pass the executable path correctly — bail rather
+      // than risk deleting wrong things.
+      return { ...result, reason: `running exe path doesn't resolve to .app bundle: ${runningExePath}` };
+    }
+  }
+  // Read the running app's bundle identifier so we can refuse to delete
+  // anything with a different identifier.
+  let runningBundleID = null;
+  if (runningAppPath) {
+    try {
+      const plistPath = path.join(runningAppPath, 'Contents', 'Info.plist');
+      const plist = fs.readFileSync(plistPath, 'utf8');
+      // Cheap parse: look for <key>CFBundleIdentifier</key>\n\t*<string>...</string>
+      const m = plist.match(/<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>([^<]+)<\/string>/);
+      if (m) runningBundleID = m[1].trim();
+    } catch {}
+  }
+  // Scan /Applications for the duplicate pattern.
+  const apps = '/Applications';
+  let entries = [];
+  try {
+    entries = fs.readdirSync(apps);
+  } catch (e) {
+    return { ...result, reason: `cannot read ${apps}: ${e.message}` };
+  }
+  const dupRe = /^Merlin( \d+)?\.app$/;
+  for (const name of entries) {
+    if (!dupRe.test(name)) continue;
+    const fullPath = path.join(apps, name);
+    if (runningAppPath && fullPath === runningAppPath) {
+      result.skipped.push(`${fullPath} (running)`);
+      continue;
+    }
+    // Confirm it looks like an actual app bundle.
+    const infoPlist = path.join(fullPath, 'Contents', 'Info.plist');
+    if (!fs.existsSync(infoPlist)) {
+      result.skipped.push(`${fullPath} (no Contents/Info.plist — not an .app bundle)`);
+      continue;
+    }
+    // Confirm bundle identifier matches the running app's.
+    if (runningBundleID) {
+      try {
+        const plist = fs.readFileSync(infoPlist, 'utf8');
+        const m = plist.match(/<key>\s*CFBundleIdentifier\s*<\/key>\s*<string>([^<]+)<\/string>/);
+        const otherID = m ? m[1].trim() : null;
+        if (otherID !== runningBundleID) {
+          result.skipped.push(`${fullPath} (CFBundleIdentifier=${otherID} != running ${runningBundleID})`);
+          continue;
+        }
+      } catch (e) {
+        result.skipped.push(`${fullPath} (Info.plist read failed: ${e.message})`);
+        continue;
+      }
+    }
+    // Safe to delete.
+    try {
+      fs.rmSync(fullPath, { recursive: true, force: true });
+      result.deleted.push(fullPath);
+      log(`[binary-paths] cleaned orphan Mac .app bundle: ${fullPath}`);
+    } catch (e) {
+      result.errors.push({ path: fullPath, message: e.message });
+      log(`[binary-paths] orphan .app delete failed for ${fullPath}: ${e.message}`);
+    }
+  }
+  return result;
+}
+
 // ─── Pending-restart marker (E1 fix) ────────────────────────────────
 //
 // Every JS module loaded into the Electron main process via `require()`
@@ -449,6 +574,7 @@ module.exports = {
   resolveBinaryPath,
   hydrateCanonicalBinary,
   cleanupOrphanBinaries,
+  cleanupOrphanMacAppBundles,
   compareVersionStrings,
   writePendingRestartMarker,
   readPendingRestartMarker,

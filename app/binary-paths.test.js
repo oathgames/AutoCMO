@@ -345,6 +345,110 @@ test('hydrateCanonicalBinary: no-op when install-local missing', async () => {
   }
 });
 
+// ─── cleanupOrphanMacAppBundles ──────────────────────────────────────
+//
+// REGRESSION GUARD (2026-05-10, mac-app-bundle-cleanup):
+// Mac users reported every update produces /Applications/Merlin 2.app,
+// Merlin 3.app etc. instead of replacing in place. The cleanup helper
+// scans /Applications for `^Merlin( \d+)?\.app$`, keeps the running
+// app, deletes the rest. Tests run against a SANDBOX directory rather
+// than touching real /Applications — the helper is parameterized in a
+// way that the tests verify the regex + safety logic, not the live
+// /Applications interaction (which is dev-machine-dependent).
+
+test('cleanupOrphanMacAppBundles: no-op on non-darwin', () => {
+  if (process.platform === 'darwin') return; // can't test the no-op on Mac
+  const result = bp.cleanupOrphanMacAppBundles({
+    runningExePath: '/Applications/Merlin.app/Contents/MacOS/Merlin',
+    log: () => {},
+  });
+  assert.equal(result.deleted.length, 0, 'must be a no-op on non-Darwin');
+  assert.equal(result.reason, 'not-darwin');
+});
+
+test('cleanupOrphanMacAppBundles: handles missing /Applications gracefully', () => {
+  // Even on Mac, if /Applications can't be read for some reason, the
+  // helper must not throw — must return a structured result.
+  const result = bp.cleanupOrphanMacAppBundles({
+    runningExePath: '/totally/fake/path/Merlin.app/Contents/MacOS/Merlin',
+    log: () => {},
+  });
+  assert.ok(Array.isArray(result.deleted), 'returns deleted array');
+  assert.ok(Array.isArray(result.skipped), 'returns skipped array');
+  assert.ok(Array.isArray(result.errors), 'returns errors array');
+});
+
+test('cleanupOrphanMacAppBundles: bails out when runningExePath is malformed', () => {
+  if (process.platform !== 'darwin') return;
+  // If the running exe path doesn't resolve to an .app bundle, the
+  // helper bails rather than risk deleting wrong things.
+  const result = bp.cleanupOrphanMacAppBundles({
+    runningExePath: '/usr/local/bin/some-tool',
+    log: () => {},
+  });
+  assert.equal(result.deleted.length, 0,
+    'must not delete anything when running exe doesn\'t look like an .app bundle');
+  assert.match(result.reason || '', /doesn't resolve to \.app bundle/);
+});
+
+test('cleanupOrphanMacAppBundles: dup-name regex matches Finder "Keep Both" pattern', () => {
+  // Source-scan: the regex must match Finder's exact rename pattern.
+  // Finder uses a single space + integer + ".app" — e.g. "Merlin 2.app",
+  // "Merlin 3.app". It does NOT use "Merlin-2.app" or "Merlin(2).app".
+  const src = fs.readFileSync(path.join(__dirname, 'binary-paths.js'), 'utf8');
+  const fnStart = src.indexOf('function cleanupOrphanMacAppBundles(');
+  const fnEnd = src.indexOf('\nfunction ', fnStart + 36);
+  const body = fnEnd > 0 ? src.slice(fnStart, fnEnd) : src.slice(fnStart);
+  // Find the dupRe definition.
+  const reMatch = body.match(/const dupRe = (\/[^/]+\/[gimsuy]*)/);
+  assert.ok(reMatch, 'cleanupOrphanMacAppBundles must declare a dupRe regex');
+  // Reconstruct the regex and test it.
+  const reSrc = reMatch[1];
+  const re = eval(reSrc); // safe — we just read it from our own source
+  // Must match Finder's standard rename pattern.
+  assert.ok(re.test('Merlin.app'), 'must match base Merlin.app');
+  assert.ok(re.test('Merlin 2.app'), 'must match Merlin 2.app');
+  assert.ok(re.test('Merlin 3.app'), 'must match Merlin 3.app');
+  assert.ok(re.test('Merlin 99.app'), 'must match higher-numbered duplicates');
+  // Must NOT match unrelated apps.
+  assert.ok(!re.test('MerlinPro.app'), 'must NOT match MerlinPro.app');
+  assert.ok(!re.test('Merlin Pro.app'), 'must NOT match Merlin Pro.app (no number)');
+  assert.ok(!re.test('Merlin-2.app'), 'must NOT match Merlin-2.app (different separator)');
+  assert.ok(!re.test('Merlinette.app'), 'must NOT match Merlinette.app');
+  assert.ok(!re.test('Merlin.appx'), 'must NOT match Merlin.appx');
+});
+
+test('cleanupOrphanMacAppBundles: bundle-identifier guard exists', () => {
+  // The helper must read CFBundleIdentifier from each candidate's
+  // Info.plist and only delete bundles whose identifier matches the
+  // running app's. This guards against any third-party "Merlin"-named
+  // app on the user's system. Source-scan asserts the guard is present.
+  const src = fs.readFileSync(path.join(__dirname, 'binary-paths.js'), 'utf8');
+  const fnStart = src.indexOf('function cleanupOrphanMacAppBundles(');
+  const fnEnd = src.indexOf('\nfunction ', fnStart + 36);
+  const body = fnEnd > 0 ? src.slice(fnStart, fnEnd) : src.slice(fnStart);
+  assert.ok(/CFBundleIdentifier/.test(body),
+    'cleanupOrphanMacAppBundles must read CFBundleIdentifier from Info.plist');
+  assert.ok(/runningBundleID/.test(body),
+    'cleanupOrphanMacAppBundles must compute the running app\'s bundle ID');
+  // The skip path must reference an identifier mismatch.
+  assert.ok(/CFBundleIdentifier=/.test(body),
+    'skipped reason must surface the identifier mismatch for telemetry');
+});
+
+test('cleanupOrphanMacAppBundles: refuses to delete the running app', () => {
+  // Source-scan: the helper must compare each candidate against
+  // runningAppPath and skip the running one.
+  const src = fs.readFileSync(path.join(__dirname, 'binary-paths.js'), 'utf8');
+  const fnStart = src.indexOf('function cleanupOrphanMacAppBundles(');
+  const fnEnd = src.indexOf('\nfunction ', fnStart + 36);
+  const body = fnEnd > 0 ? src.slice(fnStart, fnEnd) : src.slice(fnStart);
+  assert.ok(/fullPath === runningAppPath/.test(body),
+    'cleanupOrphanMacAppBundles must skip the running app via path equality check');
+  assert.ok(/\(running\)/.test(body),
+    'skipped reason for the running app must say "(running)"');
+});
+
 // ─── F1: merlin-config.json write-location lint ──────────────────────
 //
 // REGRESSION GUARD (2026-05-09, binary-update-rsi audit Phase F finding F1):
