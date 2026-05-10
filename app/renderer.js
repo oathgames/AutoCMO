@@ -1708,13 +1708,54 @@ function friendlyError(raw, platformName) {
   }
 
   // ── Platform-specific token expiration ──
+  //
+  // REGRESSION GUARD (2026-05-09, friendly-error-platform-priority):
+  // Routing MUST prioritize the explicit `platformName` arg over substring-
+  // matching the error string. Pre-fix this branch matched purely on
+  // `sl.includes('google')` etc., which silently misrouted any Meta error
+  // whose body happened to mention "google" (Google's auth servers, library
+  // traces, redirect-URL fragments containing google domains, etc.) to the
+  // Google Ads "Reconnect Google Ads" chip. Live anchor: 2026-05-09 — user
+  // clicked Connect Meta and got "Your Google Ads token has expired.
+  // Reconnect Google Ads" in the modal because the underlying Meta error
+  // string contained "google" somewhere and the substring match won over
+  // the platformName signal that the call site KNEW.
+  //
+  // platformName is the AUTHORITATIVE routing signal — it's set by the
+  // caller (main.js's runFastOpenOAuth or the modal showModal call) at the
+  // call site that KNOWS which platform the user clicked. The error string
+  // is hostile input — it's an opaque server response that may contain
+  // ANY substring including names of unrelated platforms.
+  //
+  // Order:
+  //   1. If platformName is set, route by it (canonical, 1:1 mapping).
+  //   2. If platformName is empty, fall back to substring matching for
+  //      legacy callers without platform context.
+  //   3. Generic ${platformName || 'platform'} fallback if neither hits.
   if (sl.includes('token') && (sl.includes('expir') || sl.includes('invalid'))) {
+    const pn = (platformName || '').toLowerCase().trim();
+    // Priority 1: explicit platformName routing (authoritative).
+    if (pn) {
+      if (pn === 'meta' || pn === 'facebook' || pn.includes('meta') || pn.includes('facebook')) return 'Your Meta access token has expired (they last ~60 days).\nTry: [[chip:Reconnect Meta:reconnect:meta]]';
+      if (pn.includes('tiktok')) return 'Your TikTok access token has expired.\nTry: [[chip:Reconnect TikTok:reconnect:tiktok]]';
+      if (pn === 'google' || pn === 'google ads' || pn.startsWith('google')) return 'Your Google Ads token has expired.\nTry: [[chip:Reconnect Google Ads:reconnect:google]]';
+      if (pn.includes('shopify')) return 'Your Shopify connection has expired.\nTry: [[chip:Reconnect Shopify:reconnect:shopify]]';
+      if (pn.includes('etsy')) return 'Your Etsy access token has expired.\nTry: [[chip:Reconnect Etsy:reconnect:etsy]]';
+      if (pn.includes('amazon')) return 'Your Amazon access token has expired.\nTry: [[chip:Reconnect Amazon:reconnect:amazon]]';
+      if (pn.includes('reddit')) return 'Your Reddit access token has expired.\nTry: [[chip:Reconnect Reddit:reconnect:reddit]]';
+      if (pn.includes('linkedin')) return 'Your LinkedIn access token has expired.\nTry: [[chip:Reconnect LinkedIn:reconnect:linkedin]]';
+      if (pn.includes('stripe')) return 'Your Stripe connection has expired.\nTry: [[chip:Reconnect Stripe:reconnect:stripe]]';
+      if (pn.includes('slack')) return 'Your Slack connection has expired.\nTry: [[chip:Reconnect Slack:reconnect:slack]]';
+    }
+    // Priority 2: substring fallback for legacy callers without platformName.
+    // Order matters — meta/facebook FIRST so a generic stack trace mentioning
+    // multiple platforms still routes correctly.
     if (sl.includes('meta') || sl.includes('facebook')) return 'Your Meta access token has expired (they last ~60 days).\nTry: [[chip:Reconnect Meta:reconnect:meta]]';
     if (sl.includes('tiktok')) return 'Your TikTok access token has expired.\nTry: [[chip:Reconnect TikTok:reconnect:tiktok]]';
     if (sl.includes('google')) return 'Your Google Ads token has expired.\nTry: [[chip:Reconnect Google Ads:reconnect:google]]';
     if (sl.includes('shopify')) return 'Your Shopify connection has expired.\nTry: [[chip:Reconnect Shopify:reconnect:shopify]]';
     if (sl.includes('etsy')) return 'Your Etsy access token has expired.\nTry: [[chip:Reconnect Etsy:reconnect:etsy]]';
-    return `Your ${platformName || 'platform'} token has expired.\nTry: [[chip:Reconnect:reconnect:${platformName || ''}]]`;
+    return `Your ${platformName || 'platform'} token has expired.\nTry: [[chip:Reconnect:reconnect:${(platformName || '').toLowerCase()}]]`;
   }
 
   // ── Meta-specific errors ──

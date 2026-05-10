@@ -370,6 +370,86 @@ test('§3.13 — friendlyError chip-renders mcp__merlin__google_analytics scope_
   );
 });
 
+// ─────────────────────────────────────────────────────────────────────
+// REGRESSION GUARD (2026-05-09, friendly-error-platform-priority):
+// The "token expired" routing branch in friendlyError MUST prioritize
+// the explicit `platformName` arg over substring-matching the error
+// string. Pre-fix, a Meta error string containing the substring "google"
+// (e.g. mention of Google's auth servers, library traces, redirect-URL
+// fragments) silently routed to the Google Ads "Reconnect Google Ads"
+// chip — even though the call site KNEW the user clicked Connect Meta.
+//
+// Live anchor: 2026-05-09 — Connect Meta produced a "Your Google Ads
+// token has expired. Reconnect Google Ads" modal because the underlying
+// Meta error string contained "google" somewhere.
+// ─────────────────────────────────────────────────────────────────────
+
+test('§3.16 — friendlyError token-expired branch prioritizes platformName over error-substring', () => {
+  // Source-scan: the platformName-priority block must exist BEFORE the
+  // substring-matching fallback inside the token-expired branch.
+  const fnStart = RENDERER_JS.indexOf('function friendlyError(');
+  const fnEnd = RENDERER_JS.indexOf('function humanizeUpdateError', fnStart);
+  assert.ok(fnEnd > fnStart, 'friendlyError fn boundary located');
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+
+  // Locate the token-expired branch.
+  const branchIdx = body.search(/sl\.includes\('token'\)\s*&&\s*\(sl\.includes\('expir'/);
+  assert.ok(branchIdx > 0, 'token-expired branch must exist in friendlyError');
+
+  // Inside the branch, the platformName-priority block must come first.
+  // Recognized by `const pn = (platformName || '').toLowerCase()` followed
+  // by `if (pn)` gating per-platform routes.
+  const branchSlice = body.slice(branchIdx, branchIdx + 4000);
+  const pnConstIdx = branchSlice.search(/const pn\s*=\s*\(platformName\s*\|\|\s*['"]\s*['"]\s*\)\.toLowerCase\(\)/);
+  assert.ok(pnConstIdx > 0,
+    'token-expired branch must extract platformName into a `pn` local before substring matching');
+
+  // The substring-fallback `sl.includes('meta')` etc. must come AFTER the
+  // platformName routing. We can spot this by checking the FIRST occurrence
+  // of `sl.includes('google')` inside the branch is AFTER the `if (pn)` body.
+  const slGoogleIdx = branchSlice.search(/sl\.includes\(['"]google['"]\)/);
+  assert.ok(slGoogleIdx > pnConstIdx,
+    'sl.includes(\'google\') substring fallback must come AFTER the platformName-priority block');
+
+  // The platformName branch for Meta must exist — covers the live-anchor
+  // case where the error string contains "google" but the platform is Meta.
+  assert.ok(
+    /pn\s*===\s*['"]meta['"]\s*\|\|\s*pn\s*===\s*['"]facebook['"]\s*\|\|\s*pn\.includes\(['"]meta['"]\)/.test(branchSlice),
+    'platformName-priority must explicitly route "meta" / "facebook" before any substring match'
+  );
+
+  // Defense-in-depth: assert that EVERY active platform has a platformName
+  // route — meta, tiktok, google, shopify, etsy, amazon, reddit, linkedin,
+  // stripe, slack. Drift here means a future provider added to the binary
+  // but not added to friendlyError's platformName routing → that provider's
+  // expired-token errors fall through to substring matching, re-introducing
+  // the original cross-platform-misroute risk.
+  const requiredPlatforms = ['meta', 'tiktok', 'google', 'shopify', 'etsy', 'amazon', 'reddit', 'linkedin', 'stripe', 'slack'];
+  for (const p of requiredPlatforms) {
+    const re = new RegExp(`pn\\.(?:includes|startsWith)\\(['"]${p}['"]\\)|pn\\s*===\\s*['"]${p}['"]`);
+    assert.ok(re.test(branchSlice),
+      `platformName-priority block must route "${p}" — drift = expired-token errors for ${p} fall through to substring matching, re-introducing the 2026-05-09 cross-platform misroute risk`);
+  }
+});
+
+test('§3.16 — token-expired branch reconnect chip uses lowercased platformName for action key', () => {
+  // The fallthrough `[[chip:Reconnect:reconnect:${platformName}]]` was
+  // pre-fix passing platformName as-is — if a caller supplied "Meta"
+  // (capitalized), the chip action `reconnect:Meta` would not match the
+  // dispatcher's lowercase platform-key map, silently breaking the chip.
+  // Defense: lowercase BEFORE interpolating into the action key.
+  const fnStart = RENDERER_JS.indexOf('function friendlyError(');
+  const fnEnd = RENDERER_JS.indexOf('function humanizeUpdateError', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  const branchIdx = body.search(/sl\.includes\('token'\)\s*&&\s*\(sl\.includes\('expir'/);
+  const branchSlice = body.slice(branchIdx, branchIdx + 4000);
+  // The fallthrough generic-platform line must lowercase the platformName.
+  assert.ok(
+    /\[\[chip:Reconnect:reconnect:\$\{\(platformName \|\| ['"]['"]\)\.toLowerCase\(\)\}\]\]/.test(branchSlice),
+    'token-expired generic fallthrough chip must lowercase platformName before substituting into the action key — capitalized variants break the chip dispatcher'
+  );
+});
+
 test('SDK ede_diagnostic / error_during_execution surfaces a friendly message, NEVER the raw diagnostic', () => {
   // REGRESSION GUARD (2026-05-05, sdk-ede-diagnostic):
   //
