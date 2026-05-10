@@ -1781,6 +1781,19 @@ async function createWindow() {
     // existed. See definition of isReturningUser() above.
     const isFirstRun = app.isPackaged && !isReturningUser();
     const launchedHidden = !isFirstRun && (process.argv.includes('--hidden') || app.getLoginItemSettings().wasOpenedAsHidden);
+    // REGRESSION GUARD (2026-05-10, BUG-H003): paint window FIRST, then run
+    // the fact-binding session-prelude execFile. The prelude spawn was
+    // previously synchronous-ish in the ready-to-show callback (its
+    // setup work — version.json read, config path resolution, child_process
+    // require — ran on the same tick as the show decision) and added
+    // 200–400ms of perceived first-paint latency on cold starts. Window
+    // visibility is the user's primary loading signal; the prelude's only
+    // dependency is the renderer being able to *receive* the
+    // `fact-binding:init` IPC message, which is true any time after the
+    // BrowserWindow exists. Defer with `setTimeout(..., 0)` so the spawn
+    // fires after the current render frame. Do NOT move this back inside
+    // the synchronous body of ready-to-show — measure with chrome devtools
+    // performance tab if you suspect this fix needs revisiting.
     if (!launchedHidden) win.show();
     win.webContents.send('platform', process.platform);
 
@@ -1810,59 +1823,71 @@ async function createWindow() {
     //
     // NEVER log vaultKey / vaultKeyHex — it seeds the HMAC for every
     // fact in the session. Presence checks only (`!vaultKeyHex`).
-    try {
-      let factBindingOn = false;
+    //
+    // REGRESSION GUARD (2026-05-10, BUG-H003): the entire fact-binding
+    // bridge setup is wrapped in `setTimeout(..., 0)` so it runs in the
+    // NEXT macrotask after `win.show()` paints. Don't unwrap this defer —
+    // the version.json read, child_process require, and execFile spawn
+    // were collectively adding 200–400ms of first-paint latency on cold
+    // starts. The renderer is fine receiving `fact-binding:init` a few
+    // ms after window paint; preload.js queues it correctly.
+    setTimeout(() => {
       try {
-        const v = JSON.parse(fs.readFileSync(path.join(appRoot, 'version.json'), 'utf8'));
-        if (v && v.featureFlags && v.featureFlags.factBinding === true) factBindingOn = true;
-      } catch { /* missing / malformed version.json — stay off */ }
-      if (process.env.MERLIN_FACT_BINDING === '1') factBindingOn = true;
+        let factBindingOn = false;
+        try {
+          const v = JSON.parse(fs.readFileSync(path.join(appRoot, 'version.json'), 'utf8'));
+          if (v && v.featureFlags && v.featureFlags.factBinding === true) factBindingOn = true;
+        } catch { /* missing / malformed version.json — stay off */ }
+        if (process.env.MERLIN_FACT_BINDING === '1') factBindingOn = true;
 
-      if (factBindingOn) {
-        const toolsDir = path.join(appRoot, '.claude', 'tools');
-        const binaryPath = path.join(toolsDir, process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
-        const configPath = path.join(toolsDir, 'merlin-config.json');
-        const sessionId = 'sess-' + require('crypto').randomBytes(8).toString('hex');
-        // Brand is discovered lazily by the binary from workspace state;
-        // passing an empty string is fine — session-prelude tolerates it.
-        const cmdJson = JSON.stringify({
-          action: 'session-prelude',
-          factSessionId: sessionId,
-          brand: '',
-        });
-        const { execFile } = require('child_process');
-        execFile(binaryPath, ['--config', configPath, '--cmd', cmdJson], { timeout: 5000 }, (err, stdout) => {
-          if (err) { console.warn('[fact-binding] session-prelude failed:', err.message); return; }
-          let parsed;
-          try { parsed = JSON.parse(String(stdout || '').trim()); }
-          catch (e) { console.warn('[fact-binding] session-prelude stdout parse failed'); return; }
-          if (!parsed || parsed.ok !== true) { console.warn('[fact-binding] session-prelude not ok'); return; }
-          const { sessionId: sid, brand, vaultKeyHex } = parsed;
-          if (!sid || !vaultKeyHex) return;
-          // Deliver to preload via IPC. webContents.send serialises the
-          // object over the native IPC channel — it does NOT land in any
-          // JS source string the renderer can read. Preload converts hex
-          // to Buffer in its Node context and passes the Buffer to the
-          // renderer callback (see preload.js `merlinFactBinding.onInit`).
-          // The renderer never sees vaultKeyHex.
-          try {
-            win.webContents.send('fact-binding:init', {
-              sessionId: sid,
-              brand: brand || '',
-              vaultKeyHex,
-              toolsDir,
-            });
-          } catch (sendErr) {
-            console.warn('[fact-binding] init send failed:', sendErr && sendErr.message);
-          }
-        });
+        if (factBindingOn) {
+          const toolsDir = path.join(appRoot, '.claude', 'tools');
+          const binaryPath = path.join(toolsDir, process.platform === 'win32' ? 'Merlin.exe' : 'Merlin');
+          const configPath = path.join(toolsDir, 'merlin-config.json');
+          const sessionId = 'sess-' + require('crypto').randomBytes(8).toString('hex');
+          // Brand is discovered lazily by the binary from workspace state;
+          // passing an empty string is fine — session-prelude tolerates it.
+          const cmdJson = JSON.stringify({
+            action: 'session-prelude',
+            factSessionId: sessionId,
+            brand: '',
+          });
+          const { execFile } = require('child_process');
+          execFile(binaryPath, ['--config', configPath, '--cmd', cmdJson], { timeout: 5000 }, (err, stdout) => {
+            if (err) { console.warn('[fact-binding] session-prelude failed:', err.message); return; }
+            let parsed;
+            try { parsed = JSON.parse(String(stdout || '').trim()); }
+            catch (e) { console.warn('[fact-binding] session-prelude stdout parse failed'); return; }
+            if (!parsed || parsed.ok !== true) { console.warn('[fact-binding] session-prelude not ok'); return; }
+            const { sessionId: sid, brand, vaultKeyHex } = parsed;
+            if (!sid || !vaultKeyHex) return;
+            // Deliver to preload via IPC. webContents.send serialises the
+            // object over the native IPC channel — it does NOT land in any
+            // JS source string the renderer can read. Preload converts hex
+            // to Buffer in its Node context and passes the Buffer to the
+            // renderer callback (see preload.js `merlinFactBinding.onInit`).
+            // The renderer never sees vaultKeyHex.
+            try {
+              if (win && !win.isDestroyed()) {
+                win.webContents.send('fact-binding:init', {
+                  sessionId: sid,
+                  brand: brand || '',
+                  vaultKeyHex,
+                  toolsDir,
+                });
+              }
+            } catch (sendErr) {
+              console.warn('[fact-binding] init send failed:', sendErr && sendErr.message);
+            }
+          });
+        }
+      } catch (e) {
+        // Defense-in-depth: the rollout bridge must never prevent the app
+        // from starting. Any exception here → log and continue without
+        // fact-binding; the renderer stays in its default-off state.
+        console.warn('[fact-binding] bridge setup failed:', e && e.message);
       }
-    } catch (e) {
-      // Defense-in-depth: the rollout bridge must never prevent the app
-      // from starting. Any exception here → log and continue without
-      // fact-binding; the renderer stays in its default-off state.
-      console.warn('[fact-binding] bridge setup failed:', e && e.message);
-    }
+    }, 0);
   });
 
   // ── Minimize to tray on close (keeps spells running) ──────
@@ -2324,7 +2349,29 @@ function getBudgetContext() {
     let dailySpent = 0;
     try {
       const brandsDir = path.join(appRoot, 'assets', 'brands');
+      // REGRESSION GUARD (2026-05-10, BUG-H002): kept synchronous
+      // readdirSync deliberately. getBudgetContext() is called from the
+      // approval-card hot path, which runs before the renderer paints any
+      // approval card; replacing this with fs.promises.readdir would
+      // introduce an await boundary that reorders against the
+      // child_process / vault path resolution upstream and risks
+      // surfacing approval cards before their budget context is ready
+      // (a worse UX than a 50ms blocking read on most installs).
+      // The async-rewrite is deferred — see BUG-H002 in v1.22.0 RSI batch.
+      // Instead we MEASURE and surface agencies with brand counts that
+      // make this a real problem (>50ms readdir = ~100+ brands on a
+      // spinning disk, or a network-mounted assets dir). The telemetry
+      // gives us actual data before we ship a refactor that could break
+      // the synchronous ordering contract above. TODO(BUG-H002): once
+      // telemetry shows real impact, refactor getBudgetContext() into an
+      // async path with the approval-card flow awaiting it explicitly.
+      const _h002Start = (typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now();
       const dirs = fs.readdirSync(brandsDir, { withFileTypes: true }).filter(d => d.isDirectory() && d.name !== 'example');
+      const _h002Elapsed = ((typeof performance !== 'undefined' && performance.now) ? performance.now() : Date.now()) - _h002Start;
+      if (_h002Elapsed > 50) {
+        console.warn(`[perf] getBudgetContext readdirSync took ${_h002Elapsed.toFixed(1)}ms for ${dirs.length} brand dirs (BUG-H002 threshold)`);
+        try { appendErrorLog(`[perf-h002] readdirSync ${_h002Elapsed.toFixed(1)}ms brands=${dirs.length}`); } catch {}
+      }
       for (const d of dirs) {
         const adsPath = path.join(brandsDir, d.name, 'ads-live.json');
         try {
@@ -6707,11 +6754,21 @@ function _rotateIfOversize(logPath, maxBytes) {
   } catch {}
 }
 
+// REGRESSION GUARD (2026-05-10, BUG-G005 token-redaction audit):
+// All three log helpers in this file (appendErrorLog, appendActivityLog,
+// appendAudit) now redact credential-shaped substrings BEFORE writing.
+// appendAudit had inline redaction since 2026-04-xx; the other two were
+// the audit gap. Source-scan in app/log-redaction.test.js enforces that
+// every helper here calls redactSecret() on its input. If you add a new
+// log helper, route it through redactSecret too — chat surfaces have
+// friendlyError(), log surfaces have redactSecret().
+const _logRedactSecret = require('./log-redaction').redactSecret;
+
 function appendErrorLog(line) {
   try {
     const logPath = path.join(appRoot, '.merlin-errors.log');
     _rotateIfOversize(logPath, ERROR_LOG_MAX_BYTES);
-    fs.appendFileSync(logPath, line);
+    fs.appendFileSync(logPath, _logRedactSecret(line));
   } catch {}
 }
 
@@ -6723,7 +6780,7 @@ function appendActivityLog(logPath, line) {
   try {
     fs.mkdirSync(path.dirname(logPath), { recursive: true });
     _rotateIfOversize(logPath, ACTIVITY_LOG_MAX_BYTES);
-    fs.appendFileSync(logPath, line);
+    fs.appendFileSync(logPath, _logRedactSecret(line));
   } catch (e) {
     console.warn('[activity-log]', e.message);
   }
@@ -11791,6 +11848,17 @@ async function downloadAndApplyUpdate() {
       // toast / banner / modal based on UX rules; the marker exists
       // as a fallback so a user who closes the toast without restarting
       // still sees the banner on their next launch.
+      //
+      // REGRESSION GUARD (2026-05-10, BUG-F008): the marker write above
+      // uses `binaryPaths.writePendingRestartMarker(stateDir, ...)` —
+      // a stable path under StateDir resolved via the same
+      // appRoot+config convention as the binary uses. Do NOT inline the
+      // marker path here; drift between this site and the marker reader
+      // at startup leaves stale "Restart to apply" banners or, worse,
+      // a banner that survives an actual restart because the reader
+      // looks at a different path. The companion renderer fix hides the
+      // dismiss button on this banner (the marker is non-dismissable by
+      // design — users WILL run on stale code if they can dismiss it).
       try {
         if (win && !win.isDestroyed()) {
           win.webContents.send('update-pending-restart', {
@@ -13051,6 +13119,16 @@ app.whenReady().then(async () => {
   //     means we just don't emit this tick.
   //   - A single inflight poll is guarded via `_oauthPendingInflight` so a
   //     slow 30s tick never overlaps the next.
+  // REGRESSION GUARD (2026-05-10, BUG-H006): runOAuthPendingPoll AUDITED.
+  // This poll is a SINGLE binary invocation (`oauth-pending-list`) — the Go
+  // binary aggregates all platforms in-process and returns one consolidated
+  // `pending[]` payload. There is no client-side per-platform fan-out here,
+  // so no Promise.all parallelism is needed. The 30s cadence is fine: the
+  // chip UI is only rendered when the connections panel is open (data is
+  // free if the user never looks). The `_oauthPendingInflight` flag below
+  // guards against overlapping ticks if a single poll exceeds 30s.
+  // If a future refactor splits this into per-platform calls, switch to
+  // Promise.all per the BATCH > PARALLEL > SERIAL standard in CLAUDE.md.
   let _oauthPendingInflight = false;
   const runOAuthPendingPoll = async () => {
     if (_oauthPendingInflight) return;

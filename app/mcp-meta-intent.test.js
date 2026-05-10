@@ -352,6 +352,51 @@ test('meta_pause_asset refuses when neither adId nor campaignId is given', async
 
 // ── Legacy meta_ads compat ────────────────────────────────────────────
 
+// REGRESSION GUARD (2026-05-10, D003): nextSuggested + errorNextAction are
+// declared on the universal envelope but were never populated by any handler.
+// Five high-impact tools now thread breadcrumbs so the agent has a concrete
+// follow-up. Two of them (meta_launch_test_ad, meta_launch_test_batch) plus
+// meta_scale_winner also surface "Check budget context via dashboard" as the
+// error-path next_action so a budget-cap rejection points the agent at the
+// right tool to recover.
+
+test('meta_launch_test_ad envelope carries nextSuggested:[meta_review_performance] on success path (D003)', () => {
+  // Source-scan the file — the binary is unreachable in the test harness
+  // and the wrapper would fail before reaching the success branch. Pin the
+  // literal so a future refactor that strips nextSuggested fails CI.
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'mcp-meta-intent.js'), 'utf8');
+  // Capture from `'meta-push'` through to the closing of toEnvelope's options.
+  const m = src.match(/runBinary\(ctx,\s*'meta-push',\s*args\)[\s\S]*?errorNextAction:[^\n]+/);
+  assert.ok(m, 'meta_launch_test_ad must dispatch via meta-push and thread nextSuggested + errorNextAction');
+  assert.match(m[0], /nextSuggested:\s*\[\s*'meta_review_performance'\s*\]/,
+    'meta_launch_test_ad must thread nextSuggested:["meta_review_performance"]');
+  assert.match(m[0], /errorNextAction:\s*'Check budget context via dashboard'/,
+    'meta_launch_test_ad error path must carry "Check budget context via dashboard"');
+});
+
+test('meta_launch_test_batch envelope carries nextSuggested + errorNextAction (D003)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'mcp-meta-intent.js'), 'utf8');
+  const m = src.match(/runBinary\(ctx,\s*'meta-bulk-push',\s*args\)[\s\S]*?errorNextAction:[^\n]+/);
+  assert.ok(m, 'meta_launch_test_batch block must dispatch via meta-bulk-push');
+  assert.match(m[0], /nextSuggested:\s*\[\s*'meta_review_performance'\s*\]/);
+  assert.match(m[0], /errorNextAction:\s*'Check budget context via dashboard'/);
+});
+
+test('meta_setup_account envelope carries nextSuggested for next-step routing (D003)', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const src = fs.readFileSync(path.join(__dirname, 'mcp-meta-intent.js'), 'utf8');
+  // Capture the toEnvelope call right before the meta_review_performance tool.
+  const m = src.match(/return toEnvelope\(result,\s*\{[\s\S]*?meta_audit[\s\S]*?\}\);/);
+  assert.ok(m, 'meta_setup_account must thread nextSuggested through toEnvelope after auto-persist');
+  assert.match(m[0], /nextSuggested:\s*\[\s*'meta_audit',\s*'meta_review_performance'\s*\]/,
+    'meta_setup_account must surface meta_audit + meta_review_performance as the canonical next steps');
+});
+
 test('legacy meta_ads still accepts action=insights and doesn\'t require brand', () => {
   // meta_ads keeps brandRequired:false — per-action enforcement lives in
   // runBinary via BRAND_OPTIONAL_ACTIONS. This test pins that decision

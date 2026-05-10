@@ -802,3 +802,291 @@ test('regression guards — every group has a dated comment block', () => {
     `expected ≥8 dated regression guard blocks, found ${guardMatches.length}`,
   );
 });
+
+// ─────────────────────────────────────────────────────────────────────
+// Group 6 — v1.22.0 RSI UX fixes (2026-05-10)
+// BUG-F002, F003, F004, F006, F007, F008, F010, H007, H008
+// ─────────────────────────────────────────────────────────────────────
+
+test('§F002 — loadConnections paints .loading on tiles before async fetch', () => {
+  const fnStart = RENDERER_JS.indexOf('function loadConnections()');
+  assert.ok(fnStart > 0, 'loadConnections defined');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /_preTiles\.forEach\(t\s*=>\s*t\.classList\.add\(['"]loading['"]\)\)/.test(body),
+    'tiles get .loading class before IPC call',
+  );
+  assert.ok(
+    /BUG-F002/.test(body),
+    'F002 regression guard comment present',
+  );
+});
+
+test('§F002 — .magic-tile.loading CSS rule injected with pointer-events suppressed', () => {
+  assert.ok(
+    /merlin-magic-tile-loading-style/.test(RENDERER_JS),
+    'style element id wired',
+  );
+  assert.ok(
+    /\.magic-tile\.loading\s*\{[^}]*opacity:\s*0\.5[^}]*pointer-events:\s*none[^}]*cursor:\s*wait/.test(RENDERER_JS),
+    '.magic-tile.loading rule defines opacity, pointer-events:none, cursor:wait',
+  );
+});
+
+test('§F002 — .loading class cleared after 10s safety timeout', () => {
+  const fnStart = RENDERER_JS.indexOf('function loadConnections()');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /setTimeout\([\s\S]*?classList\.remove\(['"]loading['"]\)[\s\S]*?\},\s*10000\)/.test(body),
+    'safety setTimeout removes .loading after 10s',
+  );
+});
+
+test('§F003 — getConnectedPlatforms wrapped in Promise.race with 10s timeout', () => {
+  const fnStart = RENDERER_JS.indexOf('function loadConnections()');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /Promise\.race\(\[fetchPromise,\s*timeoutPromise\]\)/.test(body),
+    'Promise.race deadline wraps the IPC',
+  );
+  assert.ok(
+    /connection-status-timeout/.test(body),
+    'timeout error tag is "connection-status-timeout"',
+  );
+  assert.ok(
+    /BUG-F003/.test(body),
+    'F003 regression guard comment present',
+  );
+});
+
+test('§F003 — timeout path surfaces a retry toast', () => {
+  const fnStart = RENDERER_JS.indexOf('function loadConnections()');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /Connection check timed out/.test(body),
+    'user-facing copy on timeout',
+  );
+});
+
+test('§F004 — showSpellToast queues toasts FIFO instead of stacking', () => {
+  assert.ok(
+    /const _toastQueue\s*=\s*\[\]/.test(RENDERER_JS),
+    '_toastQueue array declared',
+  );
+  assert.ok(
+    /let _toastActive\s*=\s*false/.test(RENDERER_JS),
+    '_toastActive single-active flag declared',
+  );
+  // showSpellToast just enqueues + calls _toastShowNext now — the old
+  // direct-DOM-append shape is gone.
+  const fnStart = RENDERER_JS.indexOf('function showSpellToast(title, detail, type)');
+  assert.ok(fnStart > 0, 'showSpellToast defined');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /_toastQueue\.push\(\{\s*title,\s*detail,\s*type\s*\}\)/.test(body),
+    'showSpellToast enqueues',
+  );
+  assert.ok(
+    /_toastShowNext\(\)/.test(body),
+    'showSpellToast triggers next-show',
+  );
+  assert.ok(
+    /BUG-F004/.test(RENDERER_JS),
+    'F004 regression guard comment present',
+  );
+});
+
+test('§F004 — 3+ pending toasts coalesce into "(N) Notifications" summary', () => {
+  const fnStart = RENDERER_JS.indexOf('function _toastShowNext');
+  assert.ok(fnStart > 0, '_toastShowNext defined');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /_toastQueue\.length\s*>=\s*3/.test(body),
+    'coalesce threshold at 3+',
+  );
+  assert.ok(
+    /\(\$\{n\}\)\s*Notifications/.test(body),
+    'summary copy uses "(N) Notifications" form',
+  );
+});
+
+test('§F006 — loadPerfBar renders empty-state for unset brand instead of shimmer', () => {
+  const fnStart = RENDERER_JS.indexOf('async function loadPerfBar(days, brandOverride)');
+  assert.ok(fnStart > 0, 'loadPerfBar defined');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  // The empty-brand early-out must come before the cache+fetch path.
+  assert.ok(
+    /if \(!brand\) \{[\s\S]*?No ad data for this brand[\s\S]*?run a campaign/.test(body),
+    'empty-brand branch renders the F006 empty-state copy',
+  );
+  assert.ok(
+    /BUG-F006/.test(body),
+    'F006 regression guard comment present',
+  );
+});
+
+test('§F006 — renderPerfBar treats empty metrics map as no-data', () => {
+  const fnStart = RENDERER_JS.indexOf('function renderPerfBar(perf)');
+  assert.ok(fnStart > 0, 'renderPerfBar defined');
+  const fnEnd = RENDERER_JS.indexOf('\nfunction renderPerfBarSkeleton', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /Object\.keys\(perf\.metrics\)\.length\s*===\s*0/.test(body),
+    'empty metrics object check present',
+  );
+  assert.ok(
+    /renderPerfBarEmpty\(text\)/.test(body),
+    'empty path delegates to renderPerfBarEmpty',
+  );
+});
+
+test('§F007 — MutationObserver on archive-panel triggers loadArchive on hidden→visible', () => {
+  assert.ok(
+    /ensureArchiveAutoRefreshOnVisible/.test(RENDERER_JS),
+    'auto-refresh IIFE name present',
+  );
+  const idx = RENDERER_JS.indexOf('ensureArchiveAutoRefreshOnVisible');
+  const slice = RENDERER_JS.slice(idx, idx + 1500);
+  assert.ok(
+    /new MutationObserver/.test(slice),
+    'observer constructed',
+  );
+  assert.ok(
+    /attributeFilter:\s*\[['"]class['"]\]/.test(slice),
+    'observes class attribute changes',
+  );
+  assert.ok(
+    /loadArchive\(\)/.test(slice),
+    'fires loadArchive() on hidden→visible',
+  );
+  assert.ok(
+    /BUG-F007/.test(RENDERER_JS),
+    'F007 regression guard comment present',
+  );
+});
+
+test('§F008 — pending-restart dismiss is hidden via class + display + disabled + aria', () => {
+  const idx = RENDERER_JS.indexOf('merlin.onUpdatePendingRestart');
+  assert.ok(idx > 0, 'onUpdatePendingRestart handler present');
+  const slice = RENDERER_JS.slice(idx, idx + 2500);
+  assert.ok(
+    /dismissEl\.style\.display\s*=\s*['"]none['"]/.test(slice),
+    'inline display:none applied',
+  );
+  assert.ok(
+    /dismissEl\.disabled\s*=\s*true/.test(slice),
+    'dismiss button disabled',
+  );
+  assert.ok(
+    /dismissEl\.setAttribute\(['"]aria-disabled['"],\s*['"]true['"]\)/.test(slice),
+    'aria-disabled set',
+  );
+  assert.ok(
+    /dismissEl\.onclick\s*=\s*null/.test(slice),
+    'prior onclick handler severed',
+  );
+  assert.ok(
+    /BUG-F008/.test(slice),
+    'F008 regression guard comment present',
+  );
+});
+
+test('§F010 — empty-brand state shows "Set up your first brand" instead of "No brand"', () => {
+  const fnStart = RENDERER_JS.indexOf('async function loadBrands()');
+  assert.ok(fnStart > 0, 'loadBrands defined');
+  const fnEnd = RENDERER_JS.indexOf('\nfunction updateVertical', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /Set up your first brand/.test(body),
+    'fresh-user copy present',
+  );
+  // The new empty-state option uses value=__add__ so the existing
+  // change-event router triggers startBrandSetupConversation.
+  assert.ok(
+    /setupOpt\.value\s*=\s*['"]__add__['"]/.test(body),
+    'setup option routes through __add__ for the existing change handler',
+  );
+  assert.ok(
+    /BUG-F010/.test(body),
+    'F010 regression guard comment present',
+  );
+});
+
+test('§F010 — when brands exist but savedBrand is unmatched, first option auto-selected', () => {
+  const fnStart = RENDERER_JS.indexOf('async function loadBrands()');
+  const fnEnd = RENDERER_JS.indexOf('\nfunction updateVertical', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  assert.ok(
+    /let matched\s*=\s*false/.test(body),
+    'matched flag tracked',
+  );
+  assert.ok(
+    /if \(!matched\)\s*\{[\s\S]*?firstOpt\.selected\s*=\s*true/.test(body),
+    'first option auto-selected when no match',
+  );
+});
+
+test('§H007 — facts watcher polls at 500ms (down from 120ms)', () => {
+  assert.ok(
+    /pollMs:\s*500/.test(RENDERER_JS),
+    'pollMs is 500',
+  );
+  assert.ok(
+    !/pollMs:\s*120/.test(RENDERER_JS),
+    'old pollMs:120 is gone',
+  );
+  assert.ok(
+    /BUG-H007/.test(RENDERER_JS),
+    'H007 regression guard comment present',
+  );
+});
+
+test('§H008 — _factStreamConsume buffers deltas and debounces the bridge tailPush', () => {
+  const fnStart = RENDERER_JS.indexOf('function _factStreamConsume(delta)');
+  assert.ok(fnStart > 0, '_factStreamConsume defined');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  // tailPush must NOT be called inside _factStreamConsume — only the
+  // debounced flusher should call it.
+  assert.ok(
+    !/_factBridge\.tailPush/.test(body),
+    'consume path no longer calls tailPush directly',
+  );
+  assert.ok(
+    /_factPushPending\s*\+=\s*delta/.test(body),
+    'consume path appends to the debounce buffer',
+  );
+  assert.ok(
+    /setTimeout\(_factStreamFlushPending,\s*FACT_PUSH_DEBOUNCE_MS\)/.test(body),
+    'debounce timer scheduled at FACT_PUSH_DEBOUNCE_MS',
+  );
+  assert.ok(
+    /const FACT_PUSH_DEBOUNCE_MS\s*=\s*100/.test(RENDERER_JS),
+    'debounce is 100ms',
+  );
+  assert.ok(
+    /BUG-H008/.test(RENDERER_JS),
+    'H008 regression guard comment present',
+  );
+});
+
+test('§H008 — _factStreamFinalize flushes pending buffer before tailFinalize', () => {
+  const fnStart = RENDERER_JS.indexOf('function _factStreamFinalize()');
+  assert.ok(fnStart > 0, '_factStreamFinalize defined');
+  const fnEnd = RENDERER_JS.indexOf('\n}\n', fnStart);
+  const body = RENDERER_JS.slice(fnStart, fnEnd);
+  // The flush must happen BEFORE tailFinalize so any buffered deltas
+  // make it into the quarantine.
+  const flushIdx = body.search(/_factStreamFlushPending\(\)/);
+  const finalizeIdx = body.search(/_factBridge\.tailFinalize/);
+  assert.ok(flushIdx > 0, 'flush call present');
+  assert.ok(finalizeIdx > 0, 'tailFinalize call present');
+  assert.ok(flushIdx < finalizeIdx, 'flush comes before tailFinalize');
+});

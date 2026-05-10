@@ -559,6 +559,53 @@ test('ADVERSARIAL: multiple loose videos share thumbnails gracefully', () => {
   } finally { cleanup(tmp); }
 });
 
+test('REGRESSION GUARD H001 (2026-05-10): scan terminates at ARCHIVE_MAX_DEPTH on a 12-level tree', () => {
+  // Build results/d0/d1/d2/.../d11/file.mp4 — 12 nested levels under results/.
+  // ARCHIVE_MAX_DEPTH=6 means files at depth 7+ (7 nested levels) MUST NOT
+  // surface, AND the scan must terminate without spinning. We verify both:
+  //   (a) the file at depth 12 is not in the output
+  //   (b) a file deliberately placed at depth 6 IS in the output (boundary check)
+  //   (c) wall-clock completion under 5s (catches infinite-recursion regressions)
+  const tmp = makeTmpRoot();
+  try {
+    setupFixture(tmp);
+    let deepDir = path.join(tmp, 'results');
+    for (let i = 0; i < 12; i++) deepDir = path.join(deepDir, 'd' + i);
+    writeBuf(path.join(deepDir, 'too_deep_h001.mp4'), 1_200_000);
+
+    // Boundary: a file 6 levels under results/ (results/b0/b1/b2/b3/b4/b5/file.mp4)
+    // — this is at walk() depth 6, which the guard MUST allow.
+    let boundaryDir = path.join(tmp, 'results');
+    for (let i = 0; i < 6; i++) boundaryDir = path.join(boundaryDir, 'b' + i);
+    writeBuf(path.join(boundaryDir, 'boundary_ok.mp4'), 1_200_000);
+
+    // A file 7 levels under results/ — just past the cap, MUST be skipped.
+    let overDir = path.join(tmp, 'results');
+    for (let i = 0; i < 7; i++) overDir = path.join(overDir, 'o' + i);
+    writeBuf(path.join(overDir, 'over_cap.mp4'), 1_200_000);
+
+    const start = Date.now();
+    const items = scanArchive(tmp);
+    const elapsed = Date.now() - start;
+
+    assert.ok(elapsed < 5000, `Scan must terminate quickly even on deep trees (took ${elapsed}ms)`);
+    assert.strictEqual(
+      items.find(i => i.id && i.id.endsWith('too_deep_h001.mp4')),
+      undefined,
+      'File at depth 12 must NOT surface (beyond ARCHIVE_MAX_DEPTH)',
+    );
+    assert.strictEqual(
+      items.find(i => i.id && i.id.endsWith('over_cap.mp4')),
+      undefined,
+      'File at depth 7 (one past the cap) must NOT surface',
+    );
+    assert.ok(
+      items.find(i => i.id && i.id.endsWith('boundary_ok.mp4')),
+      'Boundary file at exactly ARCHIVE_MAX_DEPTH must surface',
+    );
+  } finally { cleanup(tmp); }
+});
+
 test('scanArchive sorts newest first', () => {
   const tmp = makeTmpRoot();
   try {

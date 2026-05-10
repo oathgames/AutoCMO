@@ -48,6 +48,7 @@
     "app/mcp-envelope.js",
     "app/mcp-errors.js",
     "app/mcp-idempotency.js",
+    "app/log-redaction.js",
     "app/mcp-jobs.js",
     "app/mcp-meta-intent.js",
     "app/mcp-preview.js",

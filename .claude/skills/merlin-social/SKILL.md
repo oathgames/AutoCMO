@@ -214,9 +214,23 @@ Failures surface in the report with the specific rule + message — Ryan needs t
 
 The bulk-import report is structured: `{imported, blocked, failed, total, results: [{name, automation_id, status, issues, dashboard_url, ...}]}`. Summarize as: *"Imported 7 of 8 flows. Blocked: 'Browse Abandonment' (TCPA: first message missing STOP opt-out). Created flows are drafts — review in Postscript dashboard, then activate or pass `activate: true` on next import."*
 
+<!-- Updated 2026-05-10 (v1.22.0 RSI fixes B001/B002/B004/D004/D005/E003) -->
 ## Klaviyo (`mcp__merlin__klaviyo`)
 
-`performance` · `lists` · `campaigns` · `templates-list` · `template-get` · `template-create` · `template-update` · `template-delete` · `templates-bulk-upload`
+`performance` · `lists` · `campaigns` · `templates-list` · `template-get` · `template-create` · `template-update` · `template-delete` · `templates-bulk-upload` · `flow-performance` · `flow-message-performance` · `metric-aggregate`
+
+### Flow performance routing (numbers, not playbook)
+
+When the user wants email/SMS flow analytics — "how are my flows doing", "what's my recovered revenue", "which subject line is winning", "how many checkouts last week" — route to the dedicated reporting actions instead of paraphrasing from `performance`:
+
+| Question style | Tool call |
+|---|---|
+| "how are my flows doing" / "recovered revenue" / "is abandoned cart working" | `klaviyo({action: "flow-performance", brand})` |
+| "which subject line is winning" / "best message in welcome series" | `klaviyo({action: "flow-message-performance", brand})` |
+| "how many checkouts last week" / "aggregate add-to-cart count" | `klaviyo({action: "metric-aggregate", brand})` |
+
+Cross-link: `merlin-analytics` owns the same routing hints from the analytics-question side (flow ROI as a perf metric). This skill owns the *playbook* (which flows to build, RFM segmentation, deliverability); `merlin-analytics` owns the *numbers*. Either path lands on the same Klaviyo actions.
+
 
 **Review solicitation pattern** (daily scheduled task): find fulfilled orders 5–7 days old (via `shopify-orders`), draft a Klaviyo campaign per order (max 3/day to avoid spam): product photo + "How are you liking your {product}?" + review link. Publish as draft — user or `merlin-optimize` approves.
 

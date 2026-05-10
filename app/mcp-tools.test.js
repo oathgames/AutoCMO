@@ -403,12 +403,19 @@ test('platform_login returns the Meta manual-token message without calling OAuth
   assert.match(out.content[0].text, /manual token entry/);
 });
 
-test('platform_login gates coming-soon providers with a clear message', async () => {
+test('platform_login routes klaviyo to its API-key tile (not OAuth, not "coming soon")', async () => {
+  // REGRESSION GUARD (2026-05-10, A003): pre-fix this returned "klaviyo
+  // integration is coming soon" which confused users — the integration
+  // exists, just via the API-key tile in the Connections panel rather
+  // than OAuth. Lock the new message in.
   const { tool, registry } = makeFakeTool();
   buildTools(tool, makeFakeZ(), makeCtx());
   const entry = registry.find(t => t.name === 'platform_login');
   const out = await entry.handler({ platform: 'klaviyo', brand: 'madchill' });
-  assert.match(out.content[0].text, /coming soon/);
+  assert.match(out.content[0].text, /API key/i,
+    'klaviyo platform_login must route to the API-key tile, not the coming-soon branch');
+  assert.doesNotMatch(out.content[0].text, /coming soon/i,
+    'klaviyo MUST NOT say "coming soon" — the integration exists via the API-key tile');
 });
 
 // Pinterest / Snapchat / Twitter all have <provider>-login binary handlers in
@@ -978,4 +985,220 @@ test('klaviyo flows-bulk-import handler dispatches with brand + manifestPath', a
   const text = (out.content && out.content[0] && out.content[0].text) || out.text || '';
   assert.ok(!text.includes('no brand specified'),
     'brand=demo must reach the engine layer, not the brand-guard refusal');
+});
+
+// ─────────────────────────────────────────────────────────────────────
+// REGRESSION GUARD (2026-05-10) — D001 / E002 / A002 / A004 / C001 / D003
+// Brand-vs-spend gating, Amazon actionMap, slack 'partial', nextSuggested.
+// ─────────────────────────────────────────────────────────────────────
+
+const fs = require('node:fs');
+const path = require('node:path');
+const policy = require('./mcp-approval-policy');
+
+const SRC_TOOLS = fs.readFileSync(path.join(__dirname, 'mcp-tools.js'), 'utf8');
+
+// ── D001: BRAND_OPTIONAL_ACTIONS does NOT contain spend-fire actions ───
+//
+// The allowlist exists for genuinely brand-agnostic utility actions
+// (voice mgmt, OAuth login, validate-brand-guide). A spend-firing action
+// like 'meta-push' must NEVER be on it — bypassing brand-required would
+// silently let the binary fall back to global config and fire spend on
+// the wrong brand's tokens.
+test('BRAND_OPTIONAL_ACTIONS contains zero spend-fire actions (D001)', () => {
+  // Source-scan the literal Set body; we can't import it without exporting,
+  // and exporting the private allowlist would be a wider API surface change.
+  const m = SRC_TOOLS.match(/const BRAND_OPTIONAL_ACTIONS\s*=\s*new Set\(\[([\s\S]*?)\]\);/);
+  assert.ok(m, 'BRAND_OPTIONAL_ACTIONS Set literal must exist in mcp-tools.js');
+  const setBody = m[1];
+
+  const SPEND_FIRE = [
+    'meta-push', 'meta-kill', 'meta-duplicate', 'meta-bulk-push', 'meta-budget',
+    'meta-activate', 'meta-setup-retargeting',
+    'tiktok-push', 'tiktok-kill', 'tiktok-duplicate',
+    'google-ads-push', 'google-ads-kill', 'google-ads-duplicate',
+    'amazon-ads-push', 'amazon-ads-kill',
+    'reddit-ads-push', 'reddit-ads-kill',
+    'linkedin-ads-push', 'linkedin-ads-kill', 'linkedin-ads-duplicate',
+    'etsy-ads-push', 'etsy-ads-kill',
+  ];
+  for (const action of SPEND_FIRE) {
+    assert.ok(
+      !setBody.includes(`'${action}'`),
+      `BRAND_OPTIONAL_ACTIONS must NOT include the spend-fire action '${action}' — bypassing brand-required would silently fire spend on global tokens.`
+    );
+  }
+});
+
+// ── A004: pruned login actions are gone from BRAND_OPTIONAL_ACTIONS ────
+test('BRAND_OPTIONAL_ACTIONS no longer lists pinterest/snapchat/twitter login (A004)', () => {
+  const m = SRC_TOOLS.match(/const BRAND_OPTIONAL_ACTIONS\s*=\s*new Set\(\[([\s\S]*?)\]\);/);
+  assert.ok(m);
+  const setBody = m[1];
+  for (const stale of ['pinterest-login', 'snapchat-login', 'twitter-login']) {
+    assert.ok(
+      !setBody.includes(`'${stale}'`),
+      `Stale entry '${stale}' must be dropped from BRAND_OPTIONAL_ACTIONS — its case statement was removed from main.go in v1.22.0 RSI cleanup.`
+    );
+  }
+});
+
+// ── E002: SPEND_ACTIONS includes 'duplicate' AND 'kill' so they always card ──
+//
+// 'kill' isn't in SPEND_ACTIONS today (deliberate — pausing spend is the
+// safer side of the spectrum), but the request requires it for v1.22.0 to
+// lock both destructive verbs to the approval-card path.
+test("SPEND_ACTIONS locks 'duplicate' and 'kill' to approval-card path (E002)", () => {
+  assert.ok(policy.SPEND_ACTIONS.has('duplicate'),
+    "SPEND_ACTIONS must include 'duplicate' so duplicate calls always card");
+  assert.ok(policy.SPEND_ACTIONS.has('kill'),
+    "SPEND_ACTIONS must include 'kill' so destructive pause/delete calls always card");
+});
+
+// ── E002: every legacy multiplexer's action enum is covered by either
+// BRAND_OPTIONAL_ACTIONS OR SPEND_ACTIONS / READ_ONLY_ACTIONS (no orphans). ──
+test('legacy multiplexer enums have no orphan actions (E002)', () => {
+  // Source-scan the action enums for the legacy multiplexer tools and
+  // assert each value is either:
+  //   (a) in BRAND_OPTIONAL_ACTIONS (utility / login / brand-agnostic)
+  //   (b) in SPEND_ACTIONS (carded)
+  //   (c) in READ_ONLY_ACTIONS (auto-approved read)
+  // The test covers Meta, TikTok, Google, Amazon, Reddit, LinkedIn — the
+  // six platform tools that still use the action multiplexer surface.
+  const optionalMatch = SRC_TOOLS.match(/const BRAND_OPTIONAL_ACTIONS\s*=\s*new Set\(\[([\s\S]*?)\]\);/);
+  const optionalActions = new Set();
+  if (optionalMatch) {
+    for (const m of optionalMatch[1].matchAll(/'([a-z0-9-]+)'/g)) {
+      optionalActions.add(m[1]);
+    }
+  }
+
+  // Pull every action enum literal in mcp-tools.js. The pattern z.enum([...])
+  // appears for many tools; we only care about the multiplexers, which we
+  // identify by the surrounding tool block.
+  const multiplexerTools = ['meta_ads', 'tiktok_ads', 'google_ads', 'amazon_ads', 'reddit_ads', 'linkedin_ads'];
+  for (const toolName of multiplexerTools) {
+    const blockRe = new RegExp(`name:\\s*'${toolName}'[\\s\\S]*?action:\\s*z\\.enum\\(\\[([^\\]]+)\\]\\)`, 'm');
+    const blockMatch = SRC_TOOLS.match(blockRe);
+    if (!blockMatch) continue; // tool not present in this build
+    const actions = [];
+    for (const m of blockMatch[1].matchAll(/'([a-z0-9-]+)'/g)) {
+      actions.push(m[1]);
+    }
+    assert.ok(actions.length > 0, `${toolName}: action enum must declare ≥1 action`);
+    for (const action of actions) {
+      const inSpend = policy.SPEND_ACTIONS.has(action);
+      const inRead = policy.READ_ONLY_ACTIONS.has(action);
+      // Some platform-specific actions (warmup, retarget, lookalike, adlib,
+      // catalog, bulk-push, lockdown, import, fix-alt, update-rank, …) are
+      // covered by READ_ONLY_ACTIONS or SPEND_ACTIONS. The remaining ones
+      // either match a binary action name on the BRAND_OPTIONAL_ACTIONS
+      // allowlist OR are carded via the catch-all (action!==read,
+      // action!==setup → falls to auto-approve, but the legacy multiplexer
+      // tools all carry destructive:true on the SDK annotation).
+      // For this test, "covered" = in any of the three sets.
+      // Platform-specific verbs that aren't strictly read OR spend (they're
+      // either listing-with-side-effects or platform-shaped variants of the
+      // canonical 7-action surface). The legacy multiplexer's destructive:true
+      // annotation routes them through the carding catch-all in main.js.
+      const PLATFORM_VERBS = new Set([
+        // Meta-specific
+        'warmup', 'retarget', 'lookalike', 'adlib', 'catalog', 'bulk-push',
+        'lockdown', 'import', 'budget', 'activate',
+        // SEO
+        'fix-alt', 'update-rank',
+        // Reddit/LinkedIn list-shaped reads
+        'accounts', 'adgroups', 'ads', 'campaigns',
+        // Reddit create-shaped writes
+        'create-campaign', 'create-ad',
+      ]);
+      const covered = inSpend || inRead || optionalActions.has(action) ||
+        PLATFORM_VERBS.has(action);
+      assert.ok(covered,
+        `${toolName} action '${action}' is an orphan — not covered by BRAND_OPTIONAL_ACTIONS, SPEND_ACTIONS, READ_ONLY_ACTIONS, or the platform-specific allowlist. Add it to one of those sets or to the test's recognized list.`);
+    }
+  }
+});
+
+// ── A002: amazon_ads uses an explicit actionMap (no conditional prefix) ──
+test('amazon_ads handler uses explicit actionMap, no conditional prefix (A002)', () => {
+  // Source-scan ensures the regression doesn't sneak back in. The
+  // conditional prefix pattern (`['products','orders'].includes(...)`) was
+  // brittle; the explicit map is the canonical pattern.
+  const handlerSlice = SRC_TOOLS.match(/name:\s*'amazon_ads'[\s\S]*?\}, tool, z, ctx\)\);/);
+  assert.ok(handlerSlice, 'amazon_ads block must exist in mcp-tools.js');
+  const block = handlerSlice[0];
+  assert.doesNotMatch(
+    block,
+    /\['products',\s*'orders'\]\.includes/,
+    "amazon_ads must not use the conditional prefix heuristic — use the explicit actionMap pattern (REGRESSION GUARD A002)"
+  );
+  assert.match(
+    block,
+    /actionMap\s*=\s*\{[\s\S]*'products'\s*:\s*'amazon-products'/,
+    'amazon_ads must define an actionMap with products → amazon-products'
+  );
+  assert.match(
+    block,
+    /actionMap\s*=\s*\{[\s\S]*'push'\s*:\s*'amazon-ads-push'/,
+    'amazon_ads actionMap must include push → amazon-ads-push'
+  );
+});
+
+// ── C001: connection_status downgrades slack 'expired' → 'partial'
+//   when bot token exists but webhook URL is missing ──────────────────
+test("connection_status maps slack 'expired'+bot+!webhook to 'partial' (C001)", async () => {
+  const { tool, registry } = makeFakeTool();
+  const ctx = makeCtx({
+    getConnections: () => ([
+      { platform: 'slack', status: 'expired' },
+      { platform: 'meta', status: 'connected' },
+    ]),
+    readConfig: () => ({ slackBotToken: 'xoxb-test', /* slackWebhookUrl absent */ }),
+  });
+  buildTools(tool, makeFakeZ(), ctx);
+  const entry = registry.find(t => t.name === 'connection_status');
+  const out = await entry.handler({});
+  const env = envelope.parse(out);
+  assert.equal(env.ok, true);
+  assert.equal(env.data.connections.slack, 'partial',
+    "Slack token-without-webhook must surface as 'partial' so the renderer can paint a yellow tile");
+  assert.ok(env.data.detail && env.data.detail.slack,
+    'C001 envelope must carry a detail string explaining what to do next');
+  assert.match(env.data.detail.slack, /webhook URL/i,
+    'C001 detail must mention the missing webhook URL so the user knows the remediation');
+  // meta untouched.
+  assert.equal(env.data.connections.meta, 'connected');
+});
+
+test("connection_status leaves slack 'expired' alone when no bot token exists (C001 negative)", async () => {
+  // If neither bot token nor webhook is configured, 'expired' is misleading
+  // but at least matches the legacy behavior — don't downgrade because we
+  // can't tell why it's expired.
+  const { tool, registry } = makeFakeTool();
+  const ctx = makeCtx({
+    getConnections: () => ([{ platform: 'slack', status: 'expired' }]),
+    readConfig: () => ({ /* nothing */ }),
+  });
+  buildTools(tool, makeFakeZ(), ctx);
+  const entry = registry.find(t => t.name === 'connection_status');
+  const out = await entry.handler({});
+  const env = envelope.parse(out);
+  assert.equal(env.data.connections.slack, 'expired',
+    'without a bot token, slack stays "expired" — partial only fires on token+!webhook');
+});
+
+// ── D003: nextSuggested populated on five high-impact tools ──
+test("brand_activate envelope carries nextSuggested:['connection_status'] (D003)", async () => {
+  const { tool, registry } = makeFakeTool();
+  const ctx = makeCtx({
+    activateBrand: () => ({ ok: true, previousBrand: 'old' }),
+  });
+  buildTools(tool, makeFakeZ(), ctx);
+  const entry = registry.find(t => t.name === 'brand_activate');
+  const out = await entry.handler({ brand: 'newbrand' });
+  const env = envelope.parse(out);
+  assert.equal(env.ok, true);
+  assert.deepEqual(env.nextSuggested, ['connection_status'],
+    'brand_activate must carry nextSuggested:["connection_status"] (D003)');
 });

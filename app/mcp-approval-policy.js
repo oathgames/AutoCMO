@@ -37,15 +37,31 @@ const READ_ONLY_ACTIONS = Object.freeze(new Set([
   'campaigns', 'list', 'list-avatars', 'discover', 'adlib',
   'competitor-scan', 'landing-audit', 'dry-run', 'version',
   'blog-list', 'update-rank',
+  // Reddit / LinkedIn list ad accounts (no spend, no destructive op).
+  'accounts',
+  // Reddit ad-group / ad list (parallel to 'campaigns' — read-only listing).
+  'adgroups', 'ads',
 ]));
 
 // SPEND_ACTIONS gate the approval card. `push` is the only action eligible
 // for in-cap auto-approve (caller passes an explicit, knowable dailyBudget).
 // `duplicate` always cards because the platform inherits the source's
 // server-side budget — we cannot verify the eventual spend from canUseTool.
+// `kill` always cards because pausing a campaign affects every ad under it
+// (the failure mode the meta_pause_asset preview gate guards against —
+// E002 lift the same rule into the universal SPEND_ACTIONS set).
 // `setup` / `setup-retargeting` always card because they touch ad-account
 // state without necessarily moving budget.
-const SPEND_ACTIONS = Object.freeze(new Set(['push', 'duplicate', 'setup', 'setup-retargeting']));
+// REGRESSION GUARD (2026-05-10, E002): adding 'kill' here means every
+// destructive verb on a legacy multiplexer routes through the card path —
+// no orphan that auto-approves a stop-spend operation under the catch-all.
+const SPEND_ACTIONS = Object.freeze(new Set([
+  'push', 'duplicate', 'kill', 'setup', 'setup-retargeting',
+  // Reddit explicit creators (the multiplexer routes 'create-campaign' and
+  // 'create-ad' to reddit-create-campaign / reddit-create-ad in the binary —
+  // both fire real spend without the universal `push` semantics).
+  'create-campaign', 'create-ad',
+]));
 
 // ── Intent-tool routing ─────────────────────────────────────────────
 //

@@ -248,9 +248,16 @@ const BRAND_OPTIONAL_ACTIONS = new Set([
   'slack-login', 'slack-exchange', 'slack-post',
   // OAuth login flows — user may connect globally or per-brand; the binary
   // writes to the correct scope based on whether brand was passed.
+  // REGRESSION GUARD (2026-05-10, A004): pinterest-login, snapchat-login,
+  // and twitter-login were dropped because their case statements were
+  // also removed from main.go's action router during the v1.22.0 RSI
+  // cleanup. Leaving them in this allowlist would silently let an LLM
+  // call an unreachable action with no brand and get a generic "unknown
+  // action" error from the binary instead of the specific BRAND_MISSING
+  // envelope — confusing the agent's recovery path.
   'meta-login', 'tiktok-login', 'google-login', 'amazon-login',
   'shopify-login', 'klaviyo-login', 'etsy-login', 'reddit-login',
-  'linkedin-login', 'pinterest-login', 'snapchat-login', 'twitter-login',
+  'linkedin-login',
   'stripe-login',
   // AppLovin + Postscript are API-key connectors (no OAuth). The *-login
   // actions in the binary just verify the key and persist it — no brand
@@ -441,11 +448,24 @@ function firstLine(text) {
  * Convert a runBinary result into an envelope.
  *
  * @param {{text: string, error?: boolean}} result
- * @param {object} [opts] - { data: extra data to attach on success }
+ * @param {object} [opts] - { data?, meta?, nextSuggested?, errorNextAction? }
+ *
+ * REGRESSION GUARD (2026-05-10, D003): nextSuggested + errorNextAction were
+ * declared on the envelope shape but never populated by any handler — so the
+ * agent had no breadcrumb on what to do next after a successful spend tool
+ * fired or after a budget-cap rejection. Five high-impact tools now thread
+ * nextSuggested through this adapter (meta_setup_account → audit/perf,
+ * meta_launch_test_ad → review_performance, meta_launch_test_batch →
+ * review_performance, brand_scrape → brand_guide/brand_activate, brand_activate
+ * → connection_status) and three spend tools surface "Check budget context
+ * via dashboard" on error envelopes.
  */
 function toEnvelope(result, opts = {}) {
   if (result && result.error) {
     const classified = errors.classifyOrFallback(result.text, result.text || 'Action failed');
+    if (opts.errorNextAction && !classified.next_action) {
+      classified.next_action = opts.errorNextAction;
+    }
     return envelope.fail(classified, opts.meta ? { meta: opts.meta } : undefined);
   }
   const text = (result && result.text) || '';
@@ -454,6 +474,7 @@ function toEnvelope(result, opts = {}) {
       { summary: firstLine(text), text },
       opts.data || {},
     ),
+    nextSuggested: opts.nextSuggested,
     meta: opts.meta,
   });
 }
@@ -492,8 +513,39 @@ function buildTools(tool, z, ctx) {
       try {
         const connections = ctx.getConnections(brand || '');
         const status = {};
-        for (const c of connections) status[c.platform] = c.status;
-        return { summary: `Checked ${Object.keys(status).length} platforms`, connections: status };
+        const detail = {};
+        for (const c of connections) {
+          status[c.platform] = c.status;
+        }
+        // REGRESSION GUARD (2026-05-10, C001): Slack reports 'expired' when a
+        // bot token exists but slackWebhookUrl is missing — that's not actually
+        // expired, the user just hasn't pasted the webhook URL needed for
+        // posting. Surface a 'partial' state with a human-readable explanation
+        // so the renderer can paint a yellow/orange tile (token present but
+        // posting unavailable) rather than a red "expired/reconnect" tile that
+        // would push the user back through OAuth they've already completed.
+        // Detection: if Slack came back as 'expired' but readBrandConfig shows
+        // a bot token AND no webhook URL, downgrade to 'partial'.
+        if (status.slack === 'expired') {
+          let cfg = {};
+          try {
+            cfg = brand
+              ? (typeof ctx.readBrandConfig === 'function' ? ctx.readBrandConfig(brand) : {})
+              : (typeof ctx.readConfig === 'function' ? ctx.readConfig() : {});
+          } catch { /* ignore — fall through */ }
+          const hasBot = !!cfg.slackBotToken;
+          const hasWebhook = !!cfg.slackWebhookUrl;
+          if (hasBot && !hasWebhook) {
+            status.slack = 'partial';
+            detail.slack = 'Token connected; paste webhook URL to enable posting';
+          }
+        }
+        const out = {
+          summary: `Checked ${Object.keys(status).length} platforms`,
+          connections: status,
+        };
+        if (Object.keys(detail).length > 0) out.detail = detail;
+        return out;
       } catch (e) {
         return envelope.fail(errors.makeError('INTERNAL_ERROR', { message: e.message }));
       }
@@ -848,8 +900,25 @@ function buildTools(tool, z, ctx) {
     handler: async (args) => {
       const budgetError = validateBudget(ctx, args, 'Amazon');
       if (budgetError) return validationEnvelope(budgetError);
-      const prefix = ['products', 'orders'].includes(args.action) ? 'amazon-' : 'amazon-ads-';
-      return toEnvelope(await runBinary(ctx, prefix + args.action, args));
+      // REGRESSION GUARD (2026-05-10, A002): the prior code computed the
+      // binary action via a conditional prefix swap on a hardcoded
+      // ['products','orders'] list. Adding a new read-only action (e.g.
+      // 'inventory') would silently route to amazon-ads-inventory and 404,
+      // because the conditional defaults to the ads prefix on miss. The
+      // explicit map below mirrors the actionMap pattern used by seo /
+      // content / voice / competitor_spy and fails loudly with
+      // INVALID_INPUT when the action is unknown.
+      const actionMap = {
+        'products': 'amazon-products',
+        'orders':   'amazon-orders',
+        'status':   'amazon-ads-status',
+        'setup':    'amazon-ads-setup',
+        'push':     'amazon-ads-push',
+        'insights': 'amazon-ads-insights',
+        'kill':     'amazon-ads-kill',
+      };
+      if (!actionMap[args.action]) return validationEnvelope(`Unknown amazon_ads action: ${args.action}`);
+      return toEnvelope(await runBinary(ctx, actionMap[args.action], args));
     },
   }, tool, z, ctx));
 
@@ -922,7 +991,7 @@ function buildTools(tool, z, ctx) {
   //                              cap is plan-tier-global, not per-endpoint).
   tools.push(defineTool({
     name: 'klaviyo',
-    description: 'Klaviyo email marketing — performance reports, lists, campaigns + email template CRUD (list/get/create/update/delete) + bulk template upload from a folder of HTML files + full programmatic Flows API (list/get/create/update-status/delete + bulk-import a manifest of email automations with CAN-SPAM gate). Performance analytics: flow-performance returns sends/opens/clicks/conversions/recovered-revenue per flow over a window; flow-message-performance breaks the same stats out per individual email inside one flow ("which subject line is winning"); metric-aggregate returns per-day counts of any tracked metric ("how many times did Started Checkout fire"). Token swap translates {{UNSUB_URL}} / {{ FIRST_NAME }} / {{COMPANY_ADDRESS}} placeholders into Klaviyo Django tags.',
+    description: 'Klaviyo email marketing — performance reports, lists, campaigns + email template CRUD (list/get/create/update/delete) + bulk template upload from a folder of HTML files + full programmatic Flows API (list/get/create/update-status/delete + bulk-import a manifest of email automations with CAN-SPAM gate). Performance analytics: flow-performance returns sends/opens/clicks/conversions/recovered-revenue per flow over a window; flow-message-performance breaks the same stats out per individual email inside one flow ("which subject line is winning"); metric-aggregate returns per-day counts of any tracked metric ("how many times did Started Checkout fire"). Token swap translates {{UNSUB_URL}} / {{ FIRST_NAME }} / {{COMPANY_ADDRESS}} placeholders into Klaviyo Django tags. When to use (REGRESSION GUARD 2026-05-10, E003 — agent-routing hints): For email-flow ROI ("how is my welcome series doing"), use action="flow-performance". For per-email A/B inside a flow ("which welcome email is winning"), use "flow-message-performance". For metric time-series ("how many checkouts last week"), use "metric-aggregate".',
     // REGRESSION GUARD (2026-04-29, Gitar PR #151 finding): klaviyo
     // tool's expanded action surface includes template-create / -update /
     // -delete and bulk-template-upload (51+ writes per call). Every other
@@ -1757,15 +1826,31 @@ function buildTools(tool, z, ctx) {
           instructions: 'Ask the user to click the Meta tile in the Connections panel and paste their token from developers.facebook.com/tools/explorer. Then use connection_status to verify.',
         };
       }
+      // REGRESSION GUARD (2026-05-10, v1.22.0 RSI bug A003):
+      // Klaviyo is INTENTIONALLY routed differently from pinterest/snapchat/
+      // twitter. Klaviyo IS available — but via API-key tile, not OAuth. The
+      // pre-fix message ("klaviyo integration is coming soon") confused users
+      // because the integration exists, just on a different connection path.
+      // Now we route to a dedicated branch that points at the tile.
+      if (args.platform === 'klaviyo') {
+        return {
+          summary: 'Klaviyo connects via API key, not OAuth',
+          instructions: 'Open the Connections panel, click the Klaviyo tile, and paste your Private API Key from klaviyo.com → Settings → API Keys. Klaviyo OAuth is not yet supported (TODO provider per CLAUDE.md). After connecting, mcp__merlin__klaviyo will work for the connected brand.',
+        };
+      }
       // Coming-soon defense-in-depth — pinterest/snapchat/twitter were
       // dropped from the zod enum (D5.3 fix) so the agent can't reach this
-      // branch for them anymore. Klaviyo stays in this list because its
-      // OAuth flow isn't wired (users connect via API-key tile today); the
-      // branch redirects the model to the tile rather than failing.
-      // Defense-in-depth: keep the dormant entries here so a future enum
-      // addition that forgets to wire the provider lands a friendly message
-      // instead of a binary fatal.
-      const comingSoon = ['klaviyo', 'pinterest', 'snapchat', 'twitter'];
+      // branch for them anymore. Defense-in-depth: keep the dormant entries
+      // here so a future enum addition that forgets to wire the provider
+      // lands a friendly message instead of a binary fatal.
+      //
+      // klaviyo stays in this list as belt-and-braces protection. The
+      // early `args.platform === 'klaviyo'` branch above ALWAYS catches
+      // klaviyo with the API-key tile copy, so this entry is unreachable
+      // today — but if a future refactor accidentally removes that branch,
+      // klaviyo falls through to a generic "coming soon" message instead
+      // of a binary fatal, preserving the friendly-error contract.
+      const comingSoon = ['pinterest', 'snapchat', 'twitter', 'klaviyo'];
       if (comingSoon.includes(args.platform)) {
         return {
           summary: `${args.platform} integration is coming soon`,
@@ -1931,7 +2016,13 @@ function buildTools(tool, z, ctx) {
           },
         });
 
-        return { summary: `Scraped ${url}`, signal };
+        // REGRESSION GUARD (2026-05-10, D003): explicit envelope.ok with
+        // nextSuggested so the agent knows the canonical next steps after a
+        // successful scrape are brand_guide synthesis and brand_activate.
+        return envelope.ok({
+          data: { summary: `Scraped ${url}`, signal },
+          nextSuggested: ['brand_guide', 'brand_activate'],
+        });
       } catch (e) {
         // REGRESSION GUARD (2026-04-20): every scrape failure must map to
         // a structured envelope so the onboarding skill can tell the user
@@ -2231,13 +2322,19 @@ function buildTools(tool, z, ctx) {
           message: (result && result.message) || 'brand activation failed',
         }));
       }
-      return {
-        summary: result.previousBrand && result.previousBrand !== brand
-          ? `Activated brand "${brand}" (was "${result.previousBrand}")`
-          : `Activated brand "${brand}"`,
-        brand,
-        previousBrand: result.previousBrand || '',
-      };
+      // REGRESSION GUARD (2026-05-10, D003): nextSuggested points the agent
+      // at connection_status so the post-activation flow can show what
+      // platforms are wired up for the now-active brand.
+      return envelope.ok({
+        data: {
+          summary: result.previousBrand && result.previousBrand !== brand
+            ? `Activated brand "${brand}" (was "${result.previousBrand}")`
+            : `Activated brand "${brand}"`,
+          brand,
+          previousBrand: result.previousBrand || '',
+        },
+        nextSuggested: ['connection_status'],
+      });
     },
   }, tool, z, ctx));
 
