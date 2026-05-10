@@ -480,6 +480,157 @@ test('REGRESSION 2026-05-09: ExtraParams keys match between oauth-provider-confi
   }
 });
 
+// ── COMPREHENSIVE cross-file parity (REGRESSION GUARD 2026-05-09) ──
+//
+// Defense-in-depth uber-test that audits EVERY shared data shape between
+// oauth-provider-config.js and autocmo-core/oauth.go for EVERY active
+// provider. Live anchor: the 2026-05-08→09 24-hour incident in which we
+// shipped THREE separate two-source-of-truth fixes:
+//
+//   - 2026-05-08: Google scope drift (PR #235) — fast-open scopes missed
+//     the analytics.readonly addition. 8-day silent failure window.
+//   - 2026-05-09: Meta config_id drift (PR #240) — fast-open extraParams
+//     kept the FBLB config_id long after the binary dropped it. Caused
+//     "Feature Unavailable" for non-admin users.
+//   - 2026-05-09: ExtraParams parity test added (extends the original
+//     scope parity to cover the broader extraParams class).
+//
+// The Phase A audit on 2026-05-09 morning confirmed scope parity but
+// MISSED extraParams. This test closes ALL OTHER drift vectors at once
+// — clientId, authUrl, usesPKCE, and redirectUri — so any future change
+// to oauth.go or oauth-provider-config.js that touches a shared field
+// without matching the other side fails CI immediately.
+//
+// Per-field rationale:
+//   clientId   — public OAuth app ID. Drift = wrong app receives the
+//                authorize request; users see "App not found" or
+//                config_id-style mismatch errors.
+//   authUrl    — authorize endpoint. Drift = browser opens to a 404
+//                or wrong provider entirely.
+//   usesPKCE   — RFC 7636. Binary derives this from RedirectURI being
+//                empty (loopback only); JS declares it explicitly. Drift
+//                = either side adds code_challenge that the other side
+//                doesn't expect to verify, or omits it when needed.
+//   redirectUri — RFC 8252 §7.3. Loopback (empty) vs Worker-relay
+//                 (https://merlingotme.com/auth/callback). Drift =
+//                 OAuth provider rejects the redirect_uri as unregistered.
+//
+// Skipped: token URL (binary-only), client secret (Hard-Won Rule 2 —
+// stays server-side), Shopify (uses a different binary code path
+// entirely; intentionally omitted from ACTIVE_PLATFORMS, see
+// REGRESSION GUARD comment at the array decl).
+
+test('REGRESSION 2026-05-09: COMPREHENSIVE parity (clientId, authUrl, usesPKCE, redirectUri) for every active provider', () => {
+  const oauthGoPath = path.resolve(__dirname, '..', '..', 'autocmo-core', 'oauth.go');
+  if (!fs.existsSync(oauthGoPath)) {
+    console.log('    (skipping — oauth.go not adjacent; Go-side mirror test handles it)');
+    return;
+  }
+  const oauthGoSrc = fs.readFileSync(oauthGoPath, 'utf8');
+
+  // Map fast-open provider key → Go factory function name.
+  // Shopify uses a different binary code path (runShopifyLogin) so it's
+  // NOT validated by this generic test — its parity is enforced by
+  // shopify_handoff.go-specific tests.
+  const goFactoryName = {
+    meta: 'getMetaOAuth',
+    tiktok: 'getTiktokOAuth',
+    google: 'getGoogleOAuth',
+    amazon: 'getAmazonOAuth',
+    reddit: 'getRedditOAuth',
+    etsy: 'getEtsyOAuth',
+    linkedin: 'getLinkedInOAuth',
+    stripe: 'getStripeOAuth',
+    slack: 'getSlackOAuth',
+  };
+
+  function extractGoField(fnBody, fieldName) {
+    const re = new RegExp(`\\b${fieldName}:\\s*"([^"]*)"`);
+    const m = fnBody.match(re);
+    return m ? m[1] : null;
+  }
+
+  function fnBody(fnName) {
+    const fnAnchor = `func ${fnName}(`;
+    const fnStart = oauthGoSrc.indexOf(fnAnchor);
+    if (fnStart < 0) return null;
+    const fnEnd = oauthGoSrc.indexOf('\nfunc ', fnStart + fnAnchor.length);
+    return fnEnd > 0 ? oauthGoSrc.slice(fnStart, fnEnd) : oauthGoSrc.slice(fnStart);
+  }
+
+  const drift = [];
+
+  for (const [providerKey, fnName] of Object.entries(goFactoryName)) {
+    const provider = PROVIDERS[providerKey];
+    if (!provider) {
+      drift.push(`${providerKey}: missing from PROVIDERS map`);
+      continue;
+    }
+    const body = fnBody(fnName);
+    if (!body) {
+      drift.push(`${providerKey}: oauth.go missing func ${fnName}`);
+      continue;
+    }
+
+    // ── clientId parity ──────────────────────────────────────────
+    const goClientID = extractGoField(body, 'ClientID');
+    if (goClientID !== null && provider.clientId !== goClientID) {
+      drift.push(`${providerKey}: clientId mismatch — fast-open="${provider.clientId}", binary="${goClientID}"`);
+    }
+
+    // ── authUrl parity ───────────────────────────────────────────
+    const goAuthURL = extractGoField(body, 'AuthURL');
+    if (goAuthURL !== null && provider.authUrl && provider.authUrl !== goAuthURL) {
+      drift.push(`${providerKey}: authUrl mismatch — fast-open="${provider.authUrl}", binary="${goAuthURL}"`);
+    }
+
+    // ── scopes parity (set equality, separator-tolerant) ─────────
+    const goScopes = extractGoField(body, 'Scopes');
+    if (goScopes !== null) {
+      const norm = (s) => s.split(/[\s,]+/).map((x) => x.trim()).filter(Boolean).sort();
+      const fastSet = norm(provider.scopes || '');
+      const binarySet = norm(goScopes);
+      if (JSON.stringify(fastSet) !== JSON.stringify(binarySet)) {
+        drift.push(`${providerKey}: scopes mismatch — fast-open=[${fastSet.join(',')}], binary=[${binarySet.join(',')}]`);
+      }
+    }
+
+    // ── redirectUri parity ───────────────────────────────────────
+    // Convention:
+    //   loopback → JS redirectUri="" AND Go has NO RedirectURI field
+    //              (or RedirectURI="" — both express loopback in Go's
+    //              runOAuthWithResume which constructs http://localhost:<port>/callback).
+    //   worker-relay → JS redirectUri="https://...callback" AND Go has
+    //                  matching RedirectURI literal.
+    const goRedirectURI = extractGoField(body, 'RedirectURI');
+    const fastIsLoopback = !provider.redirectUri;
+    const binaryIsLoopback = goRedirectURI === null || goRedirectURI === '';
+    if (fastIsLoopback !== binaryIsLoopback) {
+      drift.push(`${providerKey}: redirect convention mismatch — fast-open ${fastIsLoopback ? 'loopback' : 'worker-relay'}, binary ${binaryIsLoopback ? 'loopback' : 'worker-relay'}`);
+    } else if (!fastIsLoopback && goRedirectURI && provider.redirectUri !== goRedirectURI) {
+      drift.push(`${providerKey}: redirectUri value mismatch — fast-open="${provider.redirectUri}", binary="${goRedirectURI}"`);
+    }
+
+    // ── usesPKCE parity ──────────────────────────────────────────
+    // Binary derives PKCE from RedirectURI being empty (loopback only).
+    // JS declares it explicitly. They must agree.
+    const binaryUsesPKCE = binaryIsLoopback;
+    if (provider.usesPKCE !== binaryUsesPKCE) {
+      drift.push(`${providerKey}: usesPKCE mismatch — fast-open=${provider.usesPKCE}, binary derives ${binaryUsesPKCE} from RedirectURI emptiness`);
+    }
+  }
+
+  if (drift.length > 0) {
+    throw new Error(
+      'COMPREHENSIVE OAuth parity failure between oauth-provider-config.js (fast-open) and ' +
+      'autocmo-core/oauth.go (binary). Fields checked: clientId, authUrl, scopes, redirectUri, ' +
+      'usesPKCE. Live anchor: 2026-05-09 incident bundle (Google scope drift PR #235, Meta ' +
+      'config_id drift PR #240, this comprehensive guard PR).\n\nDrift detected:\n  ' +
+      drift.join('\n  ')
+    );
+  }
+});
+
 // ── Determinism ─────────────────────────────────────────────────────
 
 test('Two buildAuthUrl calls produce different state + pkceVerifier', () => {
