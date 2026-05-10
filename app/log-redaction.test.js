@@ -29,13 +29,18 @@ test('redactSecret scrubs OpenAI-style sk- keys', () => {
 });
 
 test('redactSecret scrubs Stripe live keys', () => {
-  const got = redactSecret('key=sk_live_51HxYzAbCdEf012345678901');
+  // Fixture intentionally uses a clearly-fake suffix (no Stripe account-ID
+  // prefix `51`/`52`) so GitHub's push-protection secret scanner does not
+  // flag this test as committing a real key. The redaction regex matches
+  // on the `sk_live_` prefix + ≥8 base62 chars, not on Stripe's heuristic.
+  const got = redactSecret('key=sk_live_FAKEFIXTUREabcdefgh1234567890');
   assert.ok(got.includes('[REDACTED]'), got);
-  assert.ok(!got.includes('sk_live_51'), `stripe key still visible: ${got}`);
+  assert.ok(!got.includes('sk_live_FAKE'), `stripe key still visible: ${got}`);
 });
 
 test('redactSecret scrubs Stripe test keys', () => {
-  const got = redactSecret('key=sk_test_51HxYzAbCdEf012345678901');
+  // Same fake-fixture rule as above — sidesteps the live-key scanner heuristic.
+  const got = redactSecret('key=sk_test_FAKEFIXTUREabcdefgh1234567890');
   assert.ok(got.includes('[REDACTED]'), got);
 });
 
