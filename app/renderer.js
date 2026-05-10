@@ -298,6 +298,20 @@ function showModal({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmL
     bodyEl.replaceChildren(bodyNode);
   } else if (bodyHTML !== undefined) {
     bodyEl.innerHTML = bodyHTML;
+  } else if (body && typeof body === 'string' && /\[\[chip:/.test(body)) {
+    // REGRESSION GUARD (2026-05-09, modal-chip-render-fix):
+    // Pre-fix bodyEl.textContent rendered chip sentinels (e.g.
+    // [[chip:Update Merlin:update]]) verbatim as plain text — every
+    // platform "Connection Failed" modal that surfaced a friendly
+    // error containing a chip showed users the literal sentinel
+    // string. Live anchor: 2026-05-09 Discord OAuth failure on Mac
+    // surfaced the bug across the entire modal surface (Shopify,
+    // Discord, Meta, Google all emit chip sentinels via
+    // friendlyError). Fix: detect chip sentinels, build a DOM node
+    // through the same parser that renderErrorToBubble uses, and
+    // hand it to bodyEl. Renders clickable chip buttons in the
+    // modal body identically to chat-bubble errors.
+    bodyEl.replaceChildren(buildErrorChipDom(body));
   } else {
     bodyEl.textContent = body || '';
   }
@@ -1900,21 +1914,41 @@ function renderErrorToBubble(bubble, rawError, platformName) {
     }
   }
   // Now split remaining text on chip sentinels and build DOM.
-  const chipRe = /\[\[chip:([^:\]]+):([^\]]+)\]\]/g;
+  bubble.appendChild(buildErrorChipDom(remaining));
+}
+
+// REGRESSION GUARD (2026-05-09, modal-chip-render-fix):
+// buildErrorChipDom — single source of truth for converting friendly-error
+// chip sentinels (e.g. [[chip:Reconnect Google:reconnect:google]]) into a
+// DOM subtree with clickable buttons interleaved with plain text. Used by
+// both renderErrorToBubble (chat surface) AND showModal (alert/dialog
+// surface). Pre-fix the modal path's bodyEl.textContent rendered the
+// sentinels verbatim — users saw raw "[[chip:Update Merlin:update]]" text
+// on every platform's Connection Failed dialog. Live anchor: 2026-05-09
+// Discord OAuth failure on Mac surfaced the bug.
+//
+// Contract: returns a single DOM Node (a div). Caller handles insertion
+// (appendChild / replaceChildren). Pure: no side effects beyond DOM
+// construction; click handlers wired via addEventListener.
+//
+// If the input contains no chip sentinels, returns a div with textContent
+// set to the input — same shape as the chip case so callers can treat the
+// return uniformly.
+function buildErrorChipDom(text) {
   const container = document.createElement('div');
   container.className = 'error-chip-host';
   container.style.cssText = 'white-space:pre-wrap;word-wrap:break-word';
+  const safeText = typeof text === 'string' ? text : '';
+  if (!/\[\[chip:/.test(safeText)) {
+    container.textContent = safeText;
+    return container;
+  }
+  const chipRe = /\[\[chip:([^:\]]+):([^\]]+)\]\]/g;
   let lastIdx = 0;
   let match;
-  const hasChips = /\[\[chip:/.test(remaining);
-  if (!hasChips) {
-    container.textContent = remaining;
-    bubble.appendChild(container);
-    return;
-  }
-  while ((match = chipRe.exec(remaining)) !== null) {
+  while ((match = chipRe.exec(safeText)) !== null) {
     if (match.index > lastIdx) {
-      container.appendChild(document.createTextNode(remaining.slice(lastIdx, match.index)));
+      container.appendChild(document.createTextNode(safeText.slice(lastIdx, match.index)));
     }
     const label = match[1].trim();
     const action = match[2].trim();
@@ -1927,10 +1961,10 @@ function renderErrorToBubble(bubble, rawError, platformName) {
     container.appendChild(btn);
     lastIdx = match.index + match[0].length;
   }
-  if (lastIdx < remaining.length) {
-    container.appendChild(document.createTextNode(remaining.slice(lastIdx)));
+  if (lastIdx < safeText.length) {
+    container.appendChild(document.createTextNode(safeText.slice(lastIdx)));
   }
-  bubble.appendChild(container);
+  return container;
 }
 
 function _dispatchErrorChipAction(action) {

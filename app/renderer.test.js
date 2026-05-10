@@ -634,6 +634,81 @@ test('post-crash-reload — toast subscribes to onPostCrashReload bridge', () =>
 });
 
 // ─────────────────────────────────────────────────────────────────────
+// REGRESSION GUARD (2026-05-09, modal-chip-render-fix):
+// showModal() body MUST run chip sentinels through buildErrorChipDom
+// when the body string contains [[chip:LABEL:ACTION]] markers — pre-fix
+// it set bodyEl.textContent = body which rendered the literal sentinel
+// string verbatim in the modal. Live anchor: 2026-05-09 Discord OAuth
+// failure on Mac surfaced "[[chip:Update Merlin:update]]" as raw text
+// in the Connection Failed modal. Same friendly-error layer feeds the
+// chat bubble and the modal — both surfaces must parse chips.
+// ─────────────────────────────────────────────────────────────────────
+
+test('§3.15 — buildErrorChipDom is defined as a single source of truth for chip parsing', () => {
+  // The DOM-builder logic was previously inlined inside renderErrorToBubble,
+  // which meant showModal had no path to chip rendering. This test pins the
+  // factored-out helper so future edits don't re-inline.
+  assert.ok(
+    /function buildErrorChipDom\s*\(/.test(RENDERER_JS),
+    'renderer.js must export buildErrorChipDom() as a top-level function',
+  );
+  // Helper must handle both branches: chip present + no chip.
+  const fnStart = RENDERER_JS.indexOf('function buildErrorChipDom(');
+  const fnEnd = RENDERER_JS.indexOf('\nfunction ', fnStart + 25);
+  const body = fnEnd > 0 ? RENDERER_JS.slice(fnStart, fnEnd) : RENDERER_JS.slice(fnStart);
+  // The chip sentinel appears in regex-literal form here (`\[\[chip:`),
+  // so we search for the source-code escaped form rather than the raw
+  // bracket pair (which doesn't exist in the source).
+  assert.ok(/\\\[\\\[chip:/.test(body), 'helper must reference the chip sentinel regex pattern');
+  assert.ok(/document\.createElement\(['"]button['"]/.test(body),
+    'helper must build button elements for each chip');
+  assert.ok(/_dispatchErrorChipAction/.test(body),
+    'chip click handlers must wire through _dispatchErrorChipAction');
+});
+
+test('§3.15 — showModal pipes chip-bearing body through buildErrorChipDom', () => {
+  // The fix path: when body is a string containing [[chip:..., bodyEl
+  // gets a chip-parsed DOM tree instead of textContent.
+  const fnStart = RENDERER_JS.indexOf('function showModal(');
+  const fnEnd = RENDERER_JS.indexOf('\nfunction ', fnStart + 18);
+  const body = fnEnd > 0 ? RENDERER_JS.slice(fnStart, fnEnd) : '';
+  assert.ok(body, 'showModal function body must be locatable');
+  assert.ok(
+    /buildErrorChipDom\s*\(\s*body\s*\)/.test(body),
+    'showModal must call buildErrorChipDom(body) on chip-bearing strings',
+  );
+  // The textContent fallback must come AFTER the chip check, so callers
+  // who pass a chip-bearing string don't fall through to the literal
+  // render path.
+  const chipIdx = body.search(/buildErrorChipDom\s*\(\s*body\s*\)/);
+  const textContentIdx = body.search(/bodyEl\.textContent\s*=\s*body\s*\|\|\s*''/);
+  assert.ok(
+    chipIdx > 0 && textContentIdx > chipIdx,
+    'the buildErrorChipDom branch must be evaluated BEFORE bodyEl.textContent fallback',
+  );
+});
+
+test('§3.15 — renderErrorToBubble delegates to buildErrorChipDom (no inline copy)', () => {
+  // Prior to this fix, renderErrorToBubble had its own inline copy of
+  // the chip-parsing DOM-builder. Pin the delegation so a future edit
+  // can't fork the logic and re-introduce drift between the two
+  // surfaces.
+  const fnStart = RENDERER_JS.indexOf('function renderErrorToBubble(');
+  const fnEnd = RENDERER_JS.indexOf('\nfunction ', fnStart + 28);
+  const body = fnEnd > 0 ? RENDERER_JS.slice(fnStart, fnEnd) : '';
+  assert.ok(body, 'renderErrorToBubble function body must be locatable');
+  assert.ok(
+    /buildErrorChipDom\s*\(\s*remaining\s*\)/.test(body),
+    'renderErrorToBubble must delegate chip parsing to buildErrorChipDom',
+  );
+  // Also: the inline copy of the chip-build loop must NOT exist twice
+  // in this function's body. Anti-assertion — count the loop signature.
+  const inlineLoopMatches = body.match(/while\s*\(\s*\(\s*match\s*=\s*chipRe\.exec/g) || [];
+  assert.equal(inlineLoopMatches.length, 0,
+    'renderErrorToBubble must not contain its own chip-parsing loop — delegate to buildErrorChipDom');
+});
+
+// ─────────────────────────────────────────────────────────────────────
 // Cross-cutting — REGRESSION GUARD comments are present per rule
 // ─────────────────────────────────────────────────────────────────────
 
