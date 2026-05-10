@@ -37,9 +37,19 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const MCP_TOOLS_SRC = fs.readFileSync(path.join(__dirname, 'mcp-tools.js'), 'utf8');
-const MAIN_GO_SRC = fs.readFileSync(
-  path.join(__dirname, '..', '..', 'autocmo-core', 'main.go'), 'utf8',
-);
+
+// The Go binary lives in a sibling repo (autocmo-core, private). It IS
+// present in dev workspaces (D:\autoCMO-claude\sessions\<topic>\autocmo-core)
+// but NOT in the public-repo CI runner — Merlin's CI only checks out the
+// autoCMO repo. When main.go isn't reachable we skip the parity tests
+// gracefully rather than fail the build (the parity contract is enforced
+// at dev-time, not in public-repo CI). Local devs ALWAYS hit the full
+// suite because their sibling worktree is always present.
+const MAIN_GO_PATH = path.join(__dirname, '..', '..', 'autocmo-core', 'main.go');
+const MAIN_GO_SRC = fs.existsSync(MAIN_GO_PATH)
+  ? fs.readFileSync(MAIN_GO_PATH, 'utf8')
+  : null;
+const PARITY_AVAILABLE = MAIN_GO_SRC !== null;
 
 // ── Tool → binary-action prefix map ─────────────────────────────
 //
@@ -225,7 +235,7 @@ function extractGoCases(src) {
 }
 
 const TOOL_ENUMS = extractToolEnums(MCP_TOOLS_SRC);
-const GO_CASES = extractGoCases(MAIN_GO_SRC);
+const GO_CASES = PARITY_AVAILABLE ? extractGoCases(MAIN_GO_SRC) : new Set();
 
 // ── Tests ───────────────────────────────────────────────────────
 
@@ -252,7 +262,7 @@ test('every multi-action MCP tool has a TOOL_ROUTING entry', () => {
     `Add a row above or mark { skip: true } if the tool's handler doesn't follow the prefix pattern.`);
 });
 
-test('every action enum value maps to a Go switch case', () => {
+test('every action enum value maps to a Go switch case', { skip: !PARITY_AVAILABLE && 'autocmo-core sibling repo not present (public-repo CI)' }, () => {
   const offenders = [];
   for (const route of TOOL_ROUTING) {
     if (route.skip) continue;
@@ -280,7 +290,7 @@ test('every action enum value maps to a Go switch case', () => {
     `Either add the case in main.go's router or add an explicit entry to TOOL_ROUTING's actionMap to redirect.`);
 });
 
-test('seo update-rank case exists (2026-04-23 incident)', () => {
+test('seo update-rank case exists (2026-04-23 incident)', { skip: !PARITY_AVAILABLE && 'autocmo-core sibling repo not present (public-repo CI)' }, () => {
   // Anchor the historical bug class explicitly so a future regression
   // surfaces with the right context.
   assert.ok(GO_CASES.has('seo-update-rank'),
@@ -302,7 +312,7 @@ test('amazon_ads action map covers every enum value', () => {
   }
 });
 
-test('GO_CASES extraction sanity check — found enough cases to be confident', () => {
+test('GO_CASES extraction sanity check — found enough cases to be confident', { skip: !PARITY_AVAILABLE && 'autocmo-core sibling repo not present (public-repo CI)' }, () => {
   // Raw guard: if the main.go regex breaks, GO_CASES would be tiny and
   // every parity test would silently false-positive (claiming everything
   // is missing). Pin a floor — main.go has 200+ cases as of 2026-05-10.
