@@ -141,6 +141,36 @@ Leave `trigger` blank only for user-initiated pauses from the UI. A blank trigge
 
 **Never write raw metrics to memory.md.** If a line needs a number, that number lives in a DecisionFact or a dashboard fact envelope — memory cites the ID instead. Two citation formats: `[dec-<8hex>]` for DecisionFact IDs (kill/scale/pause events), `[facts: <id>, <id>]` for dashboard fact envelope IDs (metric-level receipts). See the Memory Harmony Rule in merlin-setup's merlin-memory task prompt for the full policy.
 
+<!-- Updated 2026-05-10 (v1.22.0 RSI fixes B001/B002/B004/D004/D005/E003) -->
+## Tool selection guide — intent tools vs legacy multiplexer (BUG-D004 / BUG-D005)
+
+**Prefer intent tools over the legacy `meta_ads` action-multiplexer.** Intent tools have tighter input validation, per-action approval cards (so the user sees exactly what's about to be killed / scaled / paused / launched), and structured error envelopes that downstream agents can branch on. The legacy `meta_ads({action: ...})` multiplexer is still wired up for actions that don't yet have a dedicated intent tool, but it ships with looser validation and a single "ads action approved" card that hides the specific operation.
+
+**Preferred intent tools (use these by default):**
+
+| Verb | Intent tool | Notes |
+|---|---|---|
+| review / pull insights | `mcp__merlin__meta_review_performance` | Read-only; no card. |
+| launch a single test ad | `mcp__merlin__meta_launch_test_ad` | One-creative variant; cards once. |
+| launch a batch of test ads | `mcp__merlin__meta_launch_test_batch` | N creatives → one ad set; batched approval. |
+| scale a winner | `mcp__merlin__meta_scale_winner` | Cards with the proposed budget jump; routes through `meta_ads({action: "duplicate"})` under the hood with stricter pre-validation. |
+| pause a single asset | `mcp__merlin__meta_pause_asset` | Per-asset card; non-destructive (asset can be re-activated). |
+| kill a single asset | `mcp__merlin__meta_kill_asset` | Per-asset card; destructive — emits a `DecisionFact` (see Decision Facts above). |
+| promote test → retargeting | `mcp__merlin__meta_promote_to_retargeting` | Builds the retargeting variant from a winner. |
+| build lookalike from purchasers | `mcp__merlin__meta_build_lookalike` | Cards once; idempotent per ad. |
+| audit (read-only inspection) | `mcp__merlin__meta_audit` | See Meta Audit table below. |
+| set up Testing + Scaling campaigns | `mcp__merlin__meta_setup_account` | Cards once on first run. |
+| program retargeting audiences | `mcp__merlin__meta_prepare_retargeting` | Cards once. |
+| catalog / DPA setup | `mcp__merlin__meta_dpa_setup` | Cards once. |
+| activate a paused asset | `mcp__merlin__meta_activate_asset` | Per-asset card. |
+| budget-tweak on an existing ad set | `mcp__merlin__meta_adjust_budget` | Cards with the delta; routes through `meta_ads({action: "budget"})` under the hood. |
+| competitor research (Ad Library) | `mcp__merlin__meta_research_competitor_ads` | Read-only. |
+| import account state | `mcp__merlin__meta_import_account_state` | Read-only refresh of `ads-live.json`. |
+
+**Use the legacy `meta_ads({action: ...})` multiplexer ONLY when no intent tool exists for the verb yet** (e.g. `lookalike` if `meta_build_lookalike` is unavailable, `setup-retargeting` if `meta_prepare_retargeting` is unavailable, etc.). When you fall back to the multiplexer, state in chat *why* — e.g. *"using `meta_ads({action: 'X'})` as fallback — no dedicated intent tool yet."* This makes the gap visible to whoever's adding intent tools next.
+
+The same rule applies to TikTok / Google / Reddit / Amazon: prefer per-verb intent tools where they exist; fall back to the platform-multiplexer (`tiktok_ads({action: "..."})`, etc.) only when the intent tool is missing.
+
 ## Action Reference
 
 ### Meta Ads (`mcp__merlin__meta_ads`)

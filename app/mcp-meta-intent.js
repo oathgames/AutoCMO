@@ -34,14 +34,20 @@ function firstLine(text) {
   return idx === -1 ? text.trim().slice(0, 200) : text.slice(0, idx).trim().slice(0, 200);
 }
 
+// REGRESSION GUARD (2026-05-10, D003): opts.nextSuggested + opts.errorNextAction
+// thread breadcrumbs into the universal envelope so the agent has a concrete
+// follow-up after the tool fires (success) or fails (e.g. budget-cap rejection).
 function toEnvelope(result, opts = {}) {
   if (result && result.error) {
     const err = errors.classifyOrFallback(result.text || result.error || '');
+    if (opts.errorNextAction && !err.next_action) {
+      err.next_action = opts.errorNextAction;
+    }
     return envelope.fail(err);
   }
   const text = (result && result.text) || '';
   const data = Object.assign({ summary: firstLine(text) || 'Done.', text }, opts.data || {});
-  return envelope.ok({ data });
+  return envelope.ok({ data, nextSuggested: opts.nextSuggested });
 }
 
 function validationEnvelope(message, data) {
@@ -112,7 +118,9 @@ function buildMetaIntentTools({ tool, z, ctx, defineTool, runBinary, validateBud
           console.error('[meta_setup_account] auto-persist failed:', e.message);
         }
       }
-      return toEnvelope(result);
+      return toEnvelope(result, {
+        nextSuggested: ['meta_audit', 'meta_review_performance'],
+      });
     },
   }, tool, z, ctx));
 
@@ -171,7 +179,10 @@ function buildMetaIntentTools({ tool, z, ctx, defineTool, runBinary, validateBud
       if (!args.adImagePath && !args.adVideoPath && !args.postId && !args.carouselCards) {
         return validationEnvelope('Provide adImagePath, adVideoPath, postId, or carouselCards — one is required.');
       }
-      return toEnvelope(await runBinary(ctx, 'meta-push', args));
+      return toEnvelope(await runBinary(ctx, 'meta-push', args), {
+        nextSuggested: ['meta_review_performance'],
+        errorNextAction: 'Check budget context via dashboard',
+      });
     },
   }, tool, z, ctx));
 
@@ -217,7 +228,10 @@ function buildMetaIntentTools({ tool, z, ctx, defineTool, runBinary, validateBud
       if (!Array.isArray(args.ads) || args.ads.length === 0) {
         return validationEnvelope('meta_launch_test_batch requires a non-empty `ads` array.');
       }
-      return toEnvelope(await runBinary(ctx, 'meta-bulk-push', args));
+      return toEnvelope(await runBinary(ctx, 'meta-bulk-push', args), {
+        nextSuggested: ['meta_review_performance'],
+        errorNextAction: 'Check budget context via dashboard',
+      });
     },
   }, tool, z, ctx));
 
@@ -261,7 +275,9 @@ function buildMetaIntentTools({ tool, z, ctx, defineTool, runBinary, validateBud
       // ads scaled — silent no-op on a costImpact:'spend' tool. The
       // correct action is 'meta-duplicate' which clones the source ad
       // into a new ad set at the supplied dailyBudget.
-      return toEnvelope(await runBinary(ctx, 'meta-duplicate', args));
+      return toEnvelope(await runBinary(ctx, 'meta-duplicate', args), {
+        errorNextAction: 'Check budget context via dashboard',
+      });
     },
   }, tool, z, ctx));
 

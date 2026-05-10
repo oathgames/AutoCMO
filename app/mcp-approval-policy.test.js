@@ -291,6 +291,41 @@ test('main.js no longer carries the inline SPEND action set', () => {
   );
 });
 
+// ── Contract 4: INTENT_TOOL_TO_ACTION ↔ INTENT_TOOL_LABELS parity (D002) ──
+//
+// REGRESSION GUARD (2026-05-10, D002): the two maps are independently
+// authored and silently drift — adding a new intent tool to one but not the
+// other is a class of bug that ships a correctly-routed call with a generic
+// "Publish this ad" label, OR a labelled card with no routing (falls
+// through to auto-approve). The parity test catches both directions.
+
+test('every key in INTENT_TOOL_TO_ACTION has a matching INTENT_TOOL_LABELS entry (or is read-only)', () => {
+  // Read-only intents intentionally have no label override (they auto-approve
+  // via READ_ONLY_ACTIONS without ever drawing a card). Every SPEND or SETUP
+  // mapped tool MUST have a label override — otherwise the card text is the
+  // generic action verb.
+  for (const [toolName, action] of Object.entries(policy.INTENT_TOOL_TO_ACTION)) {
+    const isReadOnly = policy.READ_ONLY_ACTIONS.has(action);
+    if (isReadOnly) continue;
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(policy.INTENT_TOOL_LABELS, toolName),
+      `${toolName} → '${action}' (carding action) is missing a INTENT_TOOL_LABELS entry — the approval card will use the generic verb.`
+    );
+  }
+});
+
+test('every key in INTENT_TOOL_LABELS has a matching INTENT_TOOL_TO_ACTION entry', () => {
+  // The reverse direction: a label without a routing entry is dead weight —
+  // the label override path in main.js never fires because resolveMerlinAction
+  // returns label:null for unmapped tools.
+  for (const toolName of Object.keys(policy.INTENT_TOOL_LABELS)) {
+    assert.ok(
+      Object.prototype.hasOwnProperty.call(policy.INTENT_TOOL_TO_ACTION, toolName),
+      `${toolName} is in INTENT_TOOL_LABELS but missing from INTENT_TOOL_TO_ACTION — the label is unreachable.`
+    );
+  }
+});
+
 test('main.js threads intentToolLabel through the approval-card payload', () => {
   // Without the label override, the card reads "Scale this winning ad" for
   // a `meta_launch_test_batch` of 50 ads — confusing UX. Pin the override

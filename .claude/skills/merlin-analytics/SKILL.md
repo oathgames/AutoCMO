@@ -170,9 +170,25 @@ Every write action requires an approval card (`cmd.Approved` must be true); the 
 
 When BOTH Shopify and GA4 report revenue: Shopify wins per Hard-Won Security Rule 10 (`pickRevenueSource`). GA4 attribution is shown as a diagnostic side panel, never as the topline number.
 
+<!-- Updated 2026-05-10 (v1.22.0 RSI fixes B001/B002/B004/D004/D005/E003) -->
+## Email/SMS performance (Klaviyo flow analytics)
+
+When the user asks about email/SMS flow ROI, recovered revenue, subject-line winners, or aggregate site events (checkouts, add-to-carts), prefer the Klaviyo flow-performance surface over the cross-platform `dashboard` — it pulls per-flow / per-message metrics straight from Klaviyo's reporting API.
+
+| Question style | Tool call |
+|---|---|
+| "how are my flows doing" / "what's my recovered revenue" / "is the abandoned cart working" | `mcp__merlin__klaviyo({action: "flow-performance", brand})` |
+| "which subject line is winning" / "best message in my welcome series" / "compare my flow emails" | `mcp__merlin__klaviyo({action: "flow-message-performance", brand})` |
+| "how many checkouts last week" / "site-wide add-to-cart count" / "aggregate event totals" | `mcp__merlin__klaviyo({action: "metric-aggregate", brand})` |
+
+Cross-link: deeper email strategy / flow taxonomy / RFM segmentation / deliverability lives in `merlin-social`. This skill owns the *numbers*; `merlin-social` owns the *playbook*.
+
 ## Routing hints
 
 - "numbers" / "how we doing" / "performance" / "dashboard" → `dashboard({action: "dashboard"})`
+- "how are my flows doing" / "recovered revenue" / "klaviyo flow ROI" → `klaviyo({action: "flow-performance"})`
+- "which subject line is winning" / "best email in my flow" → `klaviyo({action: "flow-message-performance"})`
+- "how many checkouts last week" / "aggregate site events" → `klaviyo({action: "metric-aggregate"})`
 - "why aren't ads converting" / "audit my page" / "landing page" → apply Conversion Rubric, run `landing-audit` if available
 - "what should I do next" → `dashboard` + read `memory.md`, propose top action
 - "marketing calendar" / "launch schedule" / "content gaps" → `dashboard({action: "calendar"})`

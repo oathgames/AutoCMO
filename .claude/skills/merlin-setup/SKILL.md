@@ -79,15 +79,35 @@ DO NOT narrate each setup step. The app has a native progress bar — do the wor
 
    **Goal capture — DEFER, do not ask.** Skip the revenue-target question entirely during onboarding. `goal.md` stays absent on first setup; the dashboard cleanly omits the pacing section when no goal file exists. After setup completes, the user can set their target conversationally any time (e.g. *"set my revenue target to $50k"*) and the agent runs `{"action": "goal-set", "brand": "<brand>", "goal": {"targetRevenue": 50000, "window": "monthly"}}` then. Asking a free-text "what's your target?" question during onboarding cost a SDK round-trip + a friction point for negligible value: most users skip it, and the ones who care set it later anyway.
 
-   **Brand activation — call `brand_activate` IMMEDIATELY after writing brand.md.** Before any further work, run `brand_activate({brand: "<slug>"})`. This atomically promotes the freshly-scaffolded folder to the active brand: the dropdown swaps to the new brand, the connections / spells / perf bar refresh, and every subsequent bubble in this conversation is associated with the new brand's thread. Failing to activate leaves the user stuck on the previous brand — they see the new brand's setup chat, but the dropdown and SDK session belong to the old brand. The MCP call returns `{ summary, brand, previousBrand }`; on success continue silently, on failure surface a one-line error and stop (the brand was scaffolded but not activated — likely a folder-name slug bug).
+   **Brand activation — call `brand_activate` IMMEDIATELY after writing brand.md.** Before any further work, run `brand_activate({brand: "<slug>"})`. This atomically promotes the freshly-scaffolded folder to the active brand: the dropdown swaps to the new brand, the connections / spells / perf bar refresh, and every subsequent bubble in this conversation is associated with the new brand's thread. Failing to activate leaves the user stuck on the previous brand — they see the new brand's setup chat, but the dropdown and SDK session belong to the old brand. The MCP call returns `{ summary, brand, previousBrand, manifestStatus? }`.
+
+   <!-- Updated 2026-05-10 (v1.22.0 RSI fixes B001/B002/B004/D004/D005/E003) -->
+   **Explicit error check after `brand_activate` (BUG-B001):** if the response is `{ ok: false }` or `brand_activate` throws, surface a single-line error to the user — *"Brand activation failed: <reason>. Try the URL again or contact support."* — and STOP setup. Do NOT proceed to scheduled-task creation; the brand was scaffolded but never promoted to active, so any spells you create will fire under the wrong brand context. Do not retry `brand_activate` automatically; the user re-runs the setup flow with a fresh URL (or the same URL if the failure was transient).
+
+   **Brand-manifest skip handling (BUG-B002):** if `brand_activate` reports `manifestStatus: "skipped-no-assets"`, the binary scaffolded the folder but did NOT anchor a brand-manifest because there were no product photos to anchor against. Tell the user explicitly, in chat:
+
+   > *"I haven't anchored a brand-manifest yet because no product photos were imported. Drop product photos in `assets/brands/<brand>/products/<slug>/references/` (or paste a URL) and I'll re-anchor on the next ad-generation pass. Ad-creative quality depends on this anchor — without it, generated ads will hallucinate products instead of compositing your real photos."*
+
+   This is not a fatal error — continue with the rest of setup (autopilot creation, summary). But the warning MUST appear; silent skip is the regression we're fixing.
 
    **Autopilot — ON BY DEFAULT, no consent prompt.** Immediately after `brand_activate` succeeds, fire all four scheduled tasks below in PARALLEL — single message, four `mcp__scheduled-tasks__create_scheduled_task` tool calls in one batch. They are auto-approved (host gates these UI-side via the "+ New Brand" click; no per-call approval card fires). The user signed up for autopilot the moment they kicked off setup; making them re-confirm with chip cards was pure friction. If `productCount === 0` (no products were imported), still create `merlin-digest` and `merlin-memory` (they're useful without products) but SKIP `merlin-daily` and `merlin-optimize` — those would emit embarrassing empty content on first fire. Tell the user in the summary which spells were created and which are pending products.
 
    **Final summary (the ONLY setup message after products):**
 
+   <!-- Updated 2026-05-10 (v1.22.0 RSI fixes B001/B002/B004/D004/D005/E003) -->
+   **Spell enumeration rule (BUG-B004):** the summary MUST explicitly list every one of the four canonical autopilot spells with its current status — `✓` for created/active, `⏸` for paused-or-skipped with the one-line reason. Do not collapse to "autopilot is on" or omit skipped spells; users need to see what's pending and why so they can fix it (drop product photos, connect Meta, etc.). The four canonical spells are: `Daily creatives` (merlin-daily), `Ad optimization` (merlin-optimize), `Weekly digest` (merlin-digest), `Memory tidy` (merlin-memory).
+
    If at least one spell was created:
    ```
-   [Brand] is loaded — [X] products, [Y] reference photos. Autopilot is on: [names of enabled spells]. Toggle any of them in the ✦ Spellbook.
+   [Brand] is loaded — [X] products, [Y] reference photos.
+
+   Set up complete. Active automations:
+     ✓ Weekly digest (Mondays)
+     ✓ Memory tidy (nightly)
+     [✓ Daily creatives (weekdays 9 AM) | ⏸ Daily creatives (paused — drop product photos to activate)]
+     [✓ Ad optimization (weekdays 10 AM) | ⏸ Ad optimization (paused — connect Meta or TikTok + drop products to activate)]
+
+   Toggle any of them in the ✦ Spellbook.
 
    Want to supercharge your results? Drop any of these into your brand folder:
 
@@ -100,12 +120,20 @@ DO NOT narrate each setup step. The app has a native progress bar — do the wor
 
    If `productCount === 0` (only digest + memory created, daily/optimize skipped):
    ```
-   [Brand] is loaded. Drop product photos or a product URL and I'll generate creatives + ads daily. Weekly digest + memory tidy are already running — toggle anything in the ✦ Spellbook.
+   [Brand] is loaded.
+
+   Set up complete. Active automations:
+     ✓ Weekly digest (Mondays)
+     ✓ Memory tidy (nightly)
+     ⏸ Daily creatives (paused — drop product photos to activate)
+     ⏸ Ad optimization (paused — connect Meta or TikTok + drop products to activate)
+
+   Drop product photos or a product URL and I'll generate creatives + ads daily. Toggle anything in the ✦ Spellbook.
 
    What would you like to do first?
    ```
 
-   **Rules for the summary:** show ONCE per brand, first setup only · use the actual brand name + folder path · skip lines for folders already populated · always end with "What would you like to create first?" / equivalent · the autopilot line reflects what was actually created — never fabricate "autopilot is on" when nothing was created.
+   **Rules for the summary:** show ONCE per brand, first setup only · use the actual brand name + folder path · skip lines for folders already populated · always end with "What would you like to create first?" / equivalent · the autopilot block enumerates ALL FOUR spells — `✓` for what was actually created, `⏸` with the specific blocker (no products / no ad platform connected) for what was skipped — never silently drop a paused spell from the list, and never fabricate "autopilot is on" when nothing was created.
 
 ### B) Schedule daily generation (autopilot — created in PARALLEL by default)
 

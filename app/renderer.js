@@ -122,8 +122,14 @@ function initFactBinding({ sessionId, vaultKey, brand, toolsDir }) {
     if (!h) return 0;
     _factCacheHandle = h;
     if (toolsDir && sessionId) {
+      // REGRESSION GUARD (2026-05-10, BUG-H007): facts watcher polls the
+      // facts file on a fixed interval. 120ms was burning CPU on idle
+      // sessions for marginal latency improvement (the user's keystroke
+      // → fact-cache write → renderer render path is dominated by the
+      // SDK's own buffer flush, which is well > 100ms). 500ms keeps the
+      // observable lag indistinguishable while cutting wakeups by 4x.
       _factWatcherHandle = _factBridge.watchFactsFile({
-        toolsDir, sessionId, pollMs: 120, cacheHandle: h,
+        toolsDir, sessionId, pollMs: 500, cacheHandle: h,
       }) || 0;
     }
     return h;
@@ -140,18 +146,49 @@ try {
   }
 } catch { /* preload bridge missing — stay off */ }
 
+// REGRESSION GUARD (2026-05-10, BUG-H008): tailPush fires per text_delta,
+// which during a long streaming response means hundreds of preload-bridge
+// crossings per second. We debounce by accumulating deltas in a 100ms
+// window and pushing the merged buffer in one call. The cleaned-output
+// return path is preserved by holding the most recent push's result and
+// echoing the raw delta when no flushed result is available yet — facts
+// quarantining is purely additive sanitization, so a small render lag on
+// the tail of a delta is acceptable; the user-visible text either stays
+// the same or gets sanitized one tick later.
+let _factPushPending = '';
+let _factPushTimer = null;
+const FACT_PUSH_DEBOUNCE_MS = 100;
 function _factStreamStart() {
   if (!factBindingEnabled || !_factBridge) return;
   try { _tailHandle = _factBridge.createTailQuarantine({ absoluteMs: 2000 }) || 0; }
   catch (e) { console.warn('[facts] tail-quarantine start failed:', e && e.message); _tailHandle = 0; }
+  _factPushPending = '';
+  if (_factPushTimer) { clearTimeout(_factPushTimer); _factPushTimer = null; }
+}
+function _factStreamFlushPending() {
+  if (!factBindingEnabled || !_factBridge || !_tailHandle) return;
+  const buf = _factPushPending;
+  _factPushPending = '';
+  if (_factPushTimer) { clearTimeout(_factPushTimer); _factPushTimer = null; }
+  if (!buf) return;
+  try { _factBridge.tailPush(_tailHandle, buf); } catch (e) { /* swallow */ }
 }
 function _factStreamConsume(delta) {
   if (!factBindingEnabled || !_factBridge || !_tailHandle) return delta;
-  try { return _factBridge.tailPush(_tailHandle, delta); }
-  catch (e) { return delta; }
+  // Buffer the delta and schedule a debounced push. Return the raw
+  // delta synchronously so the render pipeline doesn't stall on the
+  // bridge crossing. The preload bridge's tail quarantine is the
+  // authoritative cleaner, but its sanitization runs out-of-band.
+  _factPushPending += delta;
+  if (!_factPushTimer) {
+    _factPushTimer = setTimeout(_factStreamFlushPending, FACT_PUSH_DEBOUNCE_MS);
+  }
+  return delta;
 }
 function _factStreamFinalize() {
   if (!factBindingEnabled || !_factBridge || !_tailHandle) return '';
+  // Flush any pending debounced delta synchronously before finalizing.
+  _factStreamFlushPending();
   let rest = '';
   try { rest = _factBridge.tailFinalize(_tailHandle) || ''; }
   catch (e) { rest = ''; }
@@ -292,26 +329,34 @@ function showModal({ title, body, bodyHTML, bodyNode, inputPlaceholder, confirmL
   const closeBtn = document.getElementById('merlin-modal-close');
 
   titleEl.textContent = title || '';
+  // REGRESSION GUARD (2026-05-09 modal-chip-render-fix + 2026-05-10 v1.22.0
+  // RSI bug F001): chip-sentinel detection applies to BOTH the `body` plain-
+  // string path AND the `bodyHTML` raw-html path. Pre-v1.22.0 the chip-detect
+  // only fired for `body`, so any showModal({bodyHTML: friendlyError(...)})
+  // call site (none today, but a future one is one PR away) would leak the
+  // literal `[[chip:Update Merlin:update]]` text via innerHTML — innerHTML
+  // does not know about our chip syntax. Live anchor: same incident class
+  // as 2026-05-09 Discord-on-Mac chip-leak in showModal.
+  //
+  // Order:
+  //   1. bodyNode (real DOM node) — caller-built tree, trust it
+  //   2. body has chip sentinels → buildErrorChipDom (chip-aware)
+  //   3. bodyHTML has chip sentinels → buildErrorChipDom (chip-aware,
+  //      strips raw-html intent but that's safer than chip-leak)
+  //   4. bodyHTML without chips → innerHTML (raw html as caller intended)
+  //   5. body without chips → textContent (plain string)
+  const bodyHasChips = body && typeof body === 'string' && /\[\[chip:/.test(body);
+  const bodyHTMLHasChips = typeof bodyHTML === 'string' && /\[\[chip:/.test(bodyHTML);
   if (bodyNode instanceof Node) {
     // Prefer a real DOM node over innerHTML — avoids any interpolation foot-gun
     // for callers that want to embed dynamic content (e.g. links).
     bodyEl.replaceChildren(bodyNode);
+  } else if (bodyHasChips) {
+    bodyEl.replaceChildren(buildErrorChipDom(body));
+  } else if (bodyHTMLHasChips) {
+    bodyEl.replaceChildren(buildErrorChipDom(bodyHTML));
   } else if (bodyHTML !== undefined) {
     bodyEl.innerHTML = bodyHTML;
-  } else if (body && typeof body === 'string' && /\[\[chip:/.test(body)) {
-    // REGRESSION GUARD (2026-05-09, modal-chip-render-fix):
-    // Pre-fix bodyEl.textContent rendered chip sentinels (e.g.
-    // [[chip:Update Merlin:update]]) verbatim as plain text — every
-    // platform "Connection Failed" modal that surfaced a friendly
-    // error containing a chip showed users the literal sentinel
-    // string. Live anchor: 2026-05-09 Discord OAuth failure on Mac
-    // surfaced the bug across the entire modal surface (Shopify,
-    // Discord, Meta, Google all emit chip sentinels via
-    // friendlyError). Fix: detect chip sentinels, build a DOM node
-    // through the same parser that renderErrorToBubble uses, and
-    // hand it to bodyEl. Renders clickable chip buttons in the
-    // modal body identically to chat-bubble errors.
-    bodyEl.replaceChildren(buildErrorChipDom(body));
   } else {
     bodyEl.textContent = body || '';
   }
@@ -3030,12 +3075,22 @@ merlin.onUpdatePendingRestart((info) => {
         merlin.restartApp();
       };
     }
-    // Hide dismiss — pending-restart is non-dismissible by policy. The
-    // user's only path forward is the Restart button. They can still
-    // close the app via the OS chrome (and their next launch will pick
-    // up the new code), but they shouldn't be able to dismiss this
-    // toast and silently keep running stale code.
-    if (dismissEl) dismissEl.classList.add('hidden');
+    // REGRESSION GUARD (2026-05-10, BUG-F008): pending-restart toast
+    // is non-dismissible by policy. Pre-fix, only the .hidden class
+    // was applied — but a stylesheet override or programmatic
+    // .classList.remove('hidden') from another handler could resurface
+    // the dismiss button and let the user close the toast while
+    // running mixed-version code. Belt-and-suspenders: hide via class,
+    // override inline display, disable the button, set aria-disabled,
+    // and clear any prior onclick handler so even an event already
+    // bound from a previous show cycle is severed.
+    if (dismissEl) {
+      dismissEl.classList.add('hidden');
+      dismissEl.style.display = 'none';
+      dismissEl.disabled = true;
+      dismissEl.setAttribute('aria-disabled', 'true');
+      dismissEl.onclick = null;
+    }
   } catch {}
 });
 
@@ -3908,25 +3963,48 @@ async function loadBrands() {
       select.appendChild(addOpt);
     };
     if (!brands || brands.length === 0) {
-      select.innerHTML = '<option value="">No brand</option>';
-      addBrandOption();
-      select.value = '';
+      // REGRESSION GUARD (2026-05-10, BUG-F010): fresh-user state.
+      // Pre-fix, the dropdown showed "No brand" as the default option,
+      // which confused first-time users into thinking the app was
+      // misconfigured. Replace the placeholder with an inline
+      // "Set up your first brand →" chip option that, when chosen,
+      // routes through the same setup flow as the "+ New Brand"
+      // option. The dropdown shape is preserved so existing layout +
+      // change-event wiring stay intact; only the affordance copy
+      // changes for the empty case.
+      const setupOpt = document.createElement('option');
+      setupOpt.value = '__add__';
+      setupOpt.textContent = 'Set up your first brand →';
+      setupOpt.dataset.freshUser = 'true';
+      select.appendChild(setupOpt);
+      select.value = '__add__';
       select.dataset.lastValue = '';
       updateVertical('');
       return;
     }
     const savedBrand = state?.activeBrand || '';
     let selectedBrand = brands[0];
+    let matched = false;
     brands.forEach((b) => {
       const opt = document.createElement('option');
       opt.value = b.name;
       opt.textContent = b.displayName || b.name;
-      if (b.name === savedBrand) { opt.selected = true; selectedBrand = b; }
+      if (b.name === savedBrand) { opt.selected = true; selectedBrand = b; matched = true; }
       select.appendChild(opt);
     });
     addBrandOption();
 
-    if (!savedBrand && brands[0]) select.querySelector('option').selected = true;
+    // REGRESSION GUARD (2026-05-10, BUG-F010): when brands exist but
+    // none match the saved active-brand state, auto-select the first.
+    // Pre-fix, an unmatched savedBrand could leave the select with the
+    // "+ New Brand" option (last in DOM) eligible as the default,
+    // which would auto-trigger startBrandSetupConversation on the
+    // next change event. Explicit selection eliminates that ambiguity.
+    if (!matched) {
+      const firstOpt = select.querySelector('option');
+      if (firstOpt) firstOpt.selected = true;
+      selectedBrand = brands[0];
+    }
     select.dataset.lastValue = selectedBrand?.name || brands[0]?.name || '';
     if (selectedBrand?.vertical) updateVertical(selectedBrand.vertical);
   } catch (err) { console.warn('[brands]', err); }
@@ -4851,7 +4929,35 @@ function loadConnections() {
   // sequence token; async resolves bail if the token has moved on or
   // if the brand selector has changed by the time the IPC returns.
   const mySeq = (window._connLoadSeq = (window._connLoadSeq || 0) + 1);
-  merlin.getConnectedPlatforms(brand).then((connected) => {
+
+  // REGRESSION GUARD (2026-05-10, BUG-F002): pre-resolve, paint every
+  // tile with `.loading` so the previous (now-stale) `.connected`
+  // accent doesn't flicker through the async window. pointer-events
+  // are suppressed via the .loading CSS class so a click during the
+  // fetch can't fire the OAuth flow against ambiguous state.
+  const _preTiles = document.querySelectorAll('#universal-tiles .magic-tile, #brand-tiles .magic-tile');
+  _preTiles.forEach(t => t.classList.add('loading'));
+  // Safety: even if the resolve callback never runs, drop .loading
+  // after 10s so tiles aren't stuck wait-cursor forever.
+  const _loadingClearTimer = setTimeout(() => {
+    document.querySelectorAll('#universal-tiles .magic-tile.loading, #brand-tiles .magic-tile.loading')
+      .forEach(t => t.classList.remove('loading'));
+  }, 10000);
+
+  // REGRESSION GUARD (2026-05-10, BUG-F003): merlin.getConnectedPlatforms
+  // is an IPC round-trip into the main process; with no timeout, a
+  // hung handler (slow disk, stuck handle, unresponsive vault) freezes
+  // every tile with the .loading wait cursor forever. Race the IPC
+  // against a 10s deadline; on timeout we restore last-known visual
+  // state (drop .loading) and surface a recoverable toast.
+  const fetchPromise = merlin.getConnectedPlatforms(brand);
+  const timeoutPromise = new Promise((_, rej) => setTimeout(
+    () => rej(new Error('connection-status-timeout')),
+    10000,
+  ));
+  Promise.race([fetchPromise, timeoutPromise]).then((connected) => {
+    clearTimeout(_loadingClearTimer);
+    _preTiles.forEach(t => t.classList.remove('loading'));
     if (window._connLoadSeq !== mySeq) return;
     if (getActiveBrandSelection() !== brand) return;
     const allTiles = document.querySelectorAll('#universal-tiles .magic-tile, #brand-tiles .magic-tile');
@@ -4933,7 +5039,26 @@ function loadConnections() {
         ]);
       });
     }
-  }).catch((err) => { console.warn('[connections]', err); });
+  }).catch((err) => {
+    // REGRESSION GUARD (2026-05-10, BUG-F003): on timeout (or any IPC
+    // rejection), drop the .loading wait cursor so the tiles return
+    // to their last-known visual state rather than freezing forever.
+    // A toast prompts the user to retry; the underlying fetchPromise
+    // is abandoned (the next loadConnections() call will issue a
+    // fresh sequence token and supersede it).
+    clearTimeout(_loadingClearTimer);
+    _preTiles.forEach(t => t.classList.remove('loading'));
+    console.warn('[connections]', err);
+    if (err && err.message === 'connection-status-timeout') {
+      try {
+        if (typeof showSpellToast === 'function') {
+          showSpellToast('Connection check timed out', 'Click any tile to retry.', 'error');
+        } else if (typeof showToast === 'function') {
+          showToast('Connection check timed out — retry?', { kind: 'error', duration: 5000 });
+        }
+      } catch {}
+    }
+  });
 }
 
 // Auto-refresh connections when tokens change (e.g., OAuth completed in background).
@@ -6745,21 +6870,55 @@ merlin.onSpellCompleted(({ taskId, status, summary, timestamp }) => {
   }
 });
 
-// Spell toast with stacking
+// REGRESSION GUARD (2026-05-10, BUG-F004): single-active-toast policy.
+// Pre-fix, every showSpellToast() call dropped a fresh DOM node and
+// stacked it 56px above the previous one. A noisy turn (10+ tool
+// failures, a burst of background spell errors) would pile half the
+// viewport with toasts. New behavior: one toast in the DOM at a time,
+// queued FIFO. When 3+ are pending we coalesce the queue tail into a
+// "(N) Notifications — click to expand" summary toast so the user
+// knows there's more without each one demanding 5s of screen time.
 let _toastCount = 0;
-function showSpellToast(title, detail, type) {
-  const offset = _toastCount * 56;
-  _toastCount++;
+const _toastQueue = [];
+let _toastActive = false;
+function _toastBuildEl(title, detail, type) {
   const toast = document.createElement('div');
   toast.className = `spell-toast spell-toast-${type}`;
-  toast.style.bottom = `${80 + offset}px`;
+  toast.style.bottom = `80px`;
   toast.innerHTML = `<strong>${escapeHtml(title)}</strong>`;
   if (detail) toast.innerHTML += `<br><span style="font-size:11px;opacity:.7">${escapeHtml(detail).slice(0, 80)}</span>`;
+  return toast;
+}
+function _toastShowNext() {
+  if (_toastActive) return;
+  if (_toastQueue.length === 0) return;
+  // Coalesce 3+ queued items into a summary entry so the user isn't
+  // forced to wait through every individual notification.
+  let item;
+  if (_toastQueue.length >= 3) {
+    const n = _toastQueue.length;
+    _toastQueue.length = 0;
+    item = { title: `(${n}) Notifications`, detail: 'Click to expand', type: 'info' };
+  } else {
+    item = _toastQueue.shift();
+  }
+  _toastActive = true;
+  _toastCount = 1;
+  const toast = _toastBuildEl(item.title, item.detail, item.type);
   document.body.appendChild(toast);
   setTimeout(() => {
     toast.style.opacity = '0';
-    setTimeout(() => { toast.remove(); _toastCount = Math.max(0, _toastCount - 1); }, 300);
+    setTimeout(() => {
+      toast.remove();
+      _toastCount = 0;
+      _toastActive = false;
+      _toastShowNext();
+    }, 300);
   }, 5000);
+}
+function showSpellToast(title, detail, type) {
+  _toastQueue.push({ title, detail, type });
+  _toastShowNext();
 }
 
 // Undo toast — appears after a destructive turn (ad pause) and offers a
@@ -7151,6 +7310,19 @@ function _renderQueueBadge() {
   const s = document.createElement('style');
   s.id = 'merlin-queue-pulse-style';
   s.textContent = '@keyframes merlin-queue-pulse { 0% { transform: scale(1); } 30% { transform: scale(1.08); } 100% { transform: scale(1); } }';
+  document.head.appendChild(s);
+})();
+
+// REGRESSION GUARD (2026-05-10, BUG-F002): connection-tile loading state.
+// Applied during the async getConnectedPlatforms fetch so the previous
+// .connected accent doesn't flicker against ambiguous state. Cleared
+// when the IPC resolves OR after a 10s safety timeout (matches the
+// BUG-F003 IPC deadline).
+(function ensureMagicTileLoadingStyle() {
+  if (document.getElementById('merlin-magic-tile-loading-style')) return;
+  const s = document.createElement('style');
+  s.id = 'merlin-magic-tile-loading-style';
+  s.textContent = '.magic-tile.loading { opacity: 0.5; pointer-events: none; cursor: wait; }';
   document.head.appendChild(s);
 })();
 
@@ -8594,6 +8766,17 @@ function renderPerfBar(perf) {
     renderPerfBarEmpty(text);
     return;
   }
+  // REGRESSION GUARD (2026-05-10, BUG-F006): a perf payload with a
+  // generatedAt timestamp but an empty `metrics` map is structurally
+  // valid (the dashboard ran, returned no data points) but the parts
+  // join below would render "·" or an empty string and freeze the
+  // perf bar in a confusing state. Treat empty metrics as the no-data
+  // empty state.
+  if (perf.metrics && typeof perf.metrics === 'object' && Object.keys(perf.metrics).length === 0
+      && !(perf.revenue > 0) && !(perf.spend > 0)) {
+    renderPerfBarEmpty(text);
+    return;
+  }
   const rev = perf.revenue > 0 ? `<strong>${fmtMoney(perf.revenue)}</strong> revenue` : '';
   const spend = perf.spend > 0 ? `${fmtMoney(perf.spend)} spent` : '';
   const mer = perf.mer > 0 ? `<strong>${perf.mer.toFixed(1)}x</strong> MER` : '';
@@ -8751,6 +8934,27 @@ async function loadPerfBar(days, brandOverride) {
   const brand = brandOverride !== undefined ? brandOverride : (document.getElementById('brand-select')?.value || '');
   perfState.currentPeriod = days;
   perfState.currentBrand = brand;
+
+  // REGRESSION GUARD (2026-05-10, BUG-F006): the perf bar previously
+  // sat on the "Loading…" shimmer forever when no brand was selected
+  // (first-launch + no brands yet) or when the brand had genuinely
+  // empty metrics. Render an actionable empty state immediately so
+  // there's never a permanent shimmer, then continue with the normal
+  // cache + fetch flow. The empty state is overwritten as soon as
+  // real data arrives.
+  if (!brand) {
+    const text = document.getElementById('perf-text');
+    if (text) {
+      text.innerHTML = 'No ad data for this brand — <a href="#" id="perf-empty-connect" style="color:var(--accent);text-decoration:underline;cursor:pointer">run a campaign</a> to see performance here.';
+      const link = document.getElementById('perf-empty-connect');
+      if (link) link.addEventListener('click', (e) => {
+        e.preventDefault();
+        const panel = document.getElementById('magic-panel');
+        if (panel) panel.classList.remove('hidden');
+      });
+    }
+    return;
+  }
 
   // Instant render from cache if available
   const cached = perfState.cache[brand]?.[days];
@@ -9646,6 +9850,30 @@ document.getElementById('archive-btn').addEventListener('click', () => {
   if (!panel.classList.contains('hidden')) { showArchiveView(); }
   else { setSidebarPinned('archive', false); }
 });
+
+// REGRESSION GUARD (2026-05-10, BUG-F007): archive auto-refresh on visible.
+// Prior behavior relied on the archive-btn click handler to call
+// showArchiveView() which calls loadArchive(). Any other code path that
+// flipped the .hidden class on #archive-panel (programmatic pin, deep
+// link, splash dismiss, modal close routing) bypassed that refresh and
+// left users staring at a stale grid until they manually flipped a
+// filter. A MutationObserver on the panel's class attribute catches
+// every hidden→visible transition.
+(function ensureArchiveAutoRefreshOnVisible() {
+  const panel = document.getElementById('archive-panel');
+  if (!panel || typeof MutationObserver !== 'function') return;
+  let _wasHidden = panel.classList.contains('hidden');
+  const obs = new MutationObserver(() => {
+    const isHidden = panel.classList.contains('hidden');
+    if (_wasHidden && !isHidden) {
+      try {
+        if (typeof loadArchive === 'function') loadArchive();
+      } catch (e) { console.warn('[archive] auto-refresh failed', e); }
+    }
+    _wasHidden = isHidden;
+  });
+  obs.observe(panel, { attributes: true, attributeFilter: ['class'] });
+})();
 document.getElementById('archive-close').addEventListener('click', () => {
   const panel = document.getElementById('archive-panel');
   panel.classList.remove('expanded');

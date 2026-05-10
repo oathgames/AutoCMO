@@ -103,6 +103,16 @@ function walk(root, relRoot, knownBrands, depth, runs, loose) {
   // One recursive pass that collects:
   //   runs  — Map keyed by relative folder path → { name, fullPath, relPath, files[] }
   //   loose — Array of { fullPath, relPath, ext, size, mtime, parentRel }
+  //
+  // REGRESSION GUARD (2026-05-10, H001): depth MUST be checked at the top of
+  // walk AND before every recursive descent below. If a future refactor
+  // removes either site, a pathological results/ tree (symlink loop a user
+  // accidentally created, deeply-nested junk drawer left over from an old
+  // pipeline) will spin the scanner indefinitely and freeze the Electron
+  // main process. ARCHIVE_MAX_DEPTH = 6 means we walk results/ itself at
+  // depth 0 and stop at depth 7 (i.e. 6 levels of nested directories under
+  // results/). Confirmed by archive-scanner.test.js's
+  // "ADVERSARIAL: beyond-depth files…" + "REGRESSION GUARD H001 …" tests.
   if (depth > ARCHIVE_MAX_DEPTH) return;
   let entries;
   try { entries = fs.readdirSync(root, { withFileTypes: true }); } catch { return; }
@@ -133,7 +143,11 @@ function walk(root, relRoot, knownBrands, depth, runs, loose) {
         } catch {}
         runs.set(relPath, { name, fullPath, relPath, files: runFiles });
       } else {
-        // Non-run directory — recurse
+        // Non-run directory — recurse, but only if the next level is still
+        // within the depth budget. The top-of-function guard catches it on
+        // the next call frame too, but checking before the call avoids one
+        // extra readdirSync syscall per pathological subtree (H001 guard).
+        if (depth + 1 > ARCHIVE_MAX_DEPTH) continue;
         walk(fullPath, relRoot, knownBrands, depth + 1, runs, loose);
       }
     } else if (e.isFile()) {
