@@ -1483,6 +1483,34 @@ async function createWindow() {
     (r) => path.resolve(appRoot, r) + path.sep
   );
 
+  // REGRESSION GUARD (2026-05-11, image-unavailable-windows-case incident):
+  // Windows filesystems are case-insensitive but JavaScript String.startsWith
+  // is case-sensitive. The Go binary emits artifact paths via
+  // forwardSlashPath which preserves whatever case the filesystem returned
+  // — and that case can disagree with `appRoot` because os.homedir() and
+  // process.env.USERPROFILE/HOMEPATH can return different casings of the
+  // same canonical path on Windows. Live user report 2026-05-11: every
+  // image-card in chat renders as "Image unavailable" even when files
+  // exist on disk and the merlin:// URL points at them. Root cause was
+  // 403 Forbidden from the startsWith mismatch (e.g.
+  // filePath="C:\\Users\\Ryan\\Merlin\\results\\..." but
+  // resolvedRoot="C:\\Users\\RYAN\\Merlin"). Existing retry-on-error
+  // logic in gallery-viewer.js can't recover because the 403 is
+  // permanent on every attempt. Fix: do path containment checks
+  // case-insensitively on Windows (still byte-exact on macOS/Linux,
+  // whose filesystems ARE case-sensitive). The MIME-type and existence
+  // checks still gate access — only the prefix comparison is loosened.
+  const pathContains = (haystack, needle) => {
+    if (process.platform === 'win32') {
+      return haystack.toLowerCase().startsWith(needle.toLowerCase());
+    }
+    return haystack.startsWith(needle);
+  };
+  const pathEquals = (a, b) => {
+    if (process.platform === 'win32') return a.toLowerCase() === b.toLowerCase();
+    return a === b;
+  };
+
   protocol.handle('merlin', async (request) => {
     // Keep the same URL parsing the original handler used — treating the
     // entire `merlin://...` tail as a relative path. Using `new URL()` would
@@ -1491,12 +1519,12 @@ async function createWindow() {
     const requested = decodeURIComponent(request.url.replace(/^merlin:\/\//, ''));
     const filePath = path.resolve(appRoot, requested);
     const resolvedRoot = path.resolve(appRoot);
-    if (!filePath.startsWith(resolvedRoot + path.sep) && filePath !== resolvedRoot) {
+    if (!pathContains(filePath, resolvedRoot + path.sep) && !pathEquals(filePath, resolvedRoot)) {
       return new Response('Forbidden', { status: 403 });
     }
 
     // Subdir allowlist: the renderer can only reach results/, assets/, pwa/.
-    if (!ALLOWED_MERLIN_ROOTS.some((r) => filePath.startsWith(r))) {
+    if (!ALLOWED_MERLIN_ROOTS.some((r) => pathContains(filePath, r))) {
       return new Response('Forbidden', { status: 403 });
     }
 
