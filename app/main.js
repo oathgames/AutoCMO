@@ -8116,6 +8116,7 @@ const BRAND_KEYS = [
   'redditAccessToken', 'redditRefreshToken', 'redditAdAccountId',
   'stripeAccessToken', 'stripeAccountId',
   'klaviyoAccessToken', 'klaviyoApiKey',
+  'mailchimpApiKey',
   'pinterestAccessToken',
   'slackBotToken', 'slackWebhookUrl',
   'applovinMaxReportKey', 'applovinAdReportKey',
@@ -9047,6 +9048,7 @@ ipcMain.handle('disconnect-platform', (_, platform, brandName) => {
       //   silently re-activates double-count risk.
       stripe: ['stripeAccessToken', 'stripeAccountId', 'revenueSourcePreference'],
       klaviyo: ['klaviyoAccessToken', 'klaviyoApiKey', 'klaviyoRefreshToken'],
+      mailchimp: ['mailchimpApiKey'],
       pinterest: ['pinterestAccessToken', 'pinterestRefreshToken'],
       amazon: ['amazonAccessToken', 'amazonRefreshToken', 'amazonProfileId'],
       etsy: ['etsyAccessToken', 'etsyRefreshToken', 'etsyShopId', 'etsyKeystring'],

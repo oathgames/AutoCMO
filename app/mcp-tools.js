@@ -1063,6 +1063,39 @@ function buildTools(tool, z, ctx) {
     handler: async (args) => toEnvelope(await runBinary(ctx, 'klaviyo-' + args.action, args)),
   }, tool, z, ctx));
 
+  // ── mailchimp ────────────────────────────────────────────
+  // Mailchimp email marketing — audiences, campaigns, and aggregate
+  // performance reports. Read-only as of v1.22.x (no campaign-send /
+  // audience-mutation actions yet). The API key is pasted via the
+  // Connections panel modal (API_KEY_PLATFORMS → "mailchimp") and
+  // saved as cfg.mailchimpApiKey; the binary parses the `-<dc>`
+  // suffix on every call to construct <dc>.api.mailchimp.com URLs.
+  //
+  // No OAuth — Mailchimp's Marketplace OAuth needs multi-week
+  // partner review and a private API key covers every scope we use
+  // (audiences:read, campaigns:read/write, reports:read).
+  tools.push(defineTool({
+    name: 'mailchimp',
+    description: 'Mailchimp email marketing — audiences (lists), campaigns, and aggregate performance reports. action="status" pings /3.0/ping to confirm the connection. action="audiences" lists every audience with member / unsubscribe / cleaned counts. action="campaigns" lists recent campaigns (default 25, sortable by status: save / paused / schedule / sending / sent). action="performance" pulls the open-rate / click-rate / unsubscribed / bounces aggregate for the last 10 sent campaigns plus an overall average. All actions are read-only HTTP GETs and route through the shared "mailchimp" rate-limit bucket (60/min preflight cap). When to use: brand-side email reporting for Mailchimp-using stores; complements the Klaviyo tool for stores on Klaviyo and is preferred when the brand answers "we use Mailchimp" in the connect dialog.',
+    destructive: false,
+    idempotent: true,
+    costImpact: 'api',
+    brandRequired: true,
+    concurrency: { platform: 'mailchimp' },
+    input: {
+      action: z.enum(['status', 'audiences', 'campaigns', 'performance']).describe('Operation'),
+      brand: brandSchema,
+      // batchCount aliases to Limit on the Go side for campaigns +
+      // performance — the binary normalizes both names. We expose
+      // both `limit` and `batchCount` so the LLM can use whichever
+      // is in its short-term context (every other reporting tool
+      // uses batchCount; SDK-level conventions tend to use limit).
+      limit: z.coerce.number().int().optional().describe('Max rows for campaigns (1-1000, default 25) and performance (1-100, default 10).'),
+      status: z.enum(['save', 'paused', 'schedule', 'sending', 'sent']).optional().describe('Filter campaigns by status. Only used by action="campaigns".'),
+    },
+    handler: async (args) => toEnvelope(await runBinary(ctx, 'mailchimp-' + args.action, args)),
+  }, tool, z, ctx));
+
   // ── applovin ─────────────────────────────────────────────
   // AppLovin reporting. Two independent endpoints:
   //   - MAX (publisher, r.applovin.com/maxReport) — monetization for app owners

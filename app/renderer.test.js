@@ -1198,3 +1198,101 @@ test('REGRESSION GUARD 2026-05-11: auto-reload callers (archive-changed, live-ad
   assert.ok(!/loadArchive\(\{ resetScroll: true/.test(f007Region),
     'hidden→visible MutationObserver MUST NOT pass resetScroll:true');
 });
+
+// REGRESSION GUARD (2026-05-11, mailchimp-integration + slack/discord move):
+// Two coupled UI changes ship in this batch:
+//   (a) Slack + Discord tiles move from #universal-tiles to #brand-tiles
+//       so they're visually grouped with the other per-brand integrations
+//       — each brand's scheduled tasks post to the configured channel
+//       for that brand.
+//   (b) Mailchimp tile added in #brand-tiles with data-scope="brand".
+//       API-key auth via API_KEY_PLATFORMS (same flow as Klaviyo,
+//       Postscript, etc.) — no OAuth.
+//
+// These tests source-scan app/index.html to lock the tile placement +
+// app/renderer.js to lock the API_KEY_PLATFORMS entry. They don't
+// instantiate the DOM (jsdom doesn't model panels/click handlers
+// faithfully) — the contracts are placement + registration only.
+
+const INDEX_HTML = fs.readFileSync(path.join(__dirname, 'index.html'), 'utf8');
+
+test('REGRESSION GUARD 2026-05-11: Slack tile lives in #brand-tiles, not #universal-tiles', () => {
+  const universal = sliceBetween(INDEX_HTML, '<div id="universal-tiles"', '</div>');
+  const brand = sliceBetween(INDEX_HTML, '<div id="brand-tiles"', '</div>');
+
+  assert.ok(!/data-platform="slack"/.test(universal),
+    'Slack tile MUST NOT be inside #universal-tiles (was moved to #brand-tiles in v1.22.x)');
+  assert.ok(/data-platform="slack"/.test(brand),
+    'Slack tile MUST be inside #brand-tiles');
+});
+
+test('REGRESSION GUARD 2026-05-11: Discord tile lives in #brand-tiles, not #universal-tiles', () => {
+  const universal = sliceBetween(INDEX_HTML, '<div id="universal-tiles"', '</div>');
+  const brand = sliceBetween(INDEX_HTML, '<div id="brand-tiles"', '</div>');
+
+  assert.ok(!/data-platform="discord"/.test(universal),
+    'Discord tile MUST NOT be inside #universal-tiles (was moved to #brand-tiles in v1.22.x)');
+  assert.ok(/data-platform="discord"/.test(brand),
+    'Discord tile MUST be inside #brand-tiles');
+});
+
+test('REGRESSION GUARD 2026-05-11: Mailchimp tile exists in #brand-tiles with data-scope="brand"', () => {
+  const brand = sliceBetween(INDEX_HTML, '<div id="brand-tiles"', '</div>');
+  assert.ok(/data-platform="mailchimp"/.test(brand),
+    'Mailchimp tile MUST be inside #brand-tiles');
+  // The tile must declare data-scope="brand" so the connection grid
+  // shows the "needs-brand" gray state when no brand is selected.
+  const tileMatch = brand.match(/<button[^>]*data-platform="mailchimp"[^>]*>/);
+  assert.ok(tileMatch, 'Mailchimp tile <button> tag must parse');
+  assert.match(tileMatch[0], /data-scope="brand"/,
+    'Mailchimp tile MUST declare data-scope="brand" — credentials are per-brand');
+});
+
+test('REGRESSION GUARD 2026-05-11: API_KEY_PLATFORMS registers mailchimp with the right config field', () => {
+  // The renderer's API-key modal save flow calls saveConfigField with
+  // API_KEY_PLATFORMS[platform].key. If the key string here doesn't
+  // match the Go binary's struct tag (`mailchimpApiKey`), every save
+  // hits "Unknown config field" silently.
+  const match = RENDERER_JS.match(/mailchimp:\s*\{\s*key:\s*'mailchimpApiKey'/);
+  assert.ok(match,
+    'API_KEY_PLATFORMS.mailchimp MUST be registered with key: \'mailchimpApiKey\' — same name as the Go binary struct tag (Config.MailchimpAPIKey json:"mailchimpApiKey")');
+  // And the placeholder MUST hint at the dc suffix so the user doesn't
+  // paste a bare key (which would fail parseMailchimpKey on the binary
+  // side with "must end with -<datacenter>").
+  const placeholderMatch = RENDERER_JS.match(/mailchimp:\s*\{[^}]*placeholder:\s*'([^']+)'/);
+  assert.ok(placeholderMatch, 'mailchimp entry must declare a placeholder');
+  assert.match(placeholderMatch[1], /us\d|-\w+/,
+    'Mailchimp placeholder MUST hint at the `-<datacenter>` suffix (e.g. "32-hex-chars-us6") so users include it');
+});
+
+// sliceBetween extracts the substring of `src` covering the <div>
+// element whose opening tag matches the `start` prefix, including
+// the matching closing </div> tag. Used to scope the tile-placement
+// assertions to a specific tiles container (#universal-tiles,
+// #brand-tiles). The function is <div>-aware — a naive
+// indexOf('</div>') would close at the first nested <div>'s closer
+// rather than the container's, mis-scoping every assertion.
+//
+// `start` must match the opening tag prefix verbatim (e.g.
+// '<div id="brand-tiles"'). The depth counter handles arbitrary
+// nesting of <div> children.
+function sliceBetween(src, start) {
+  const sIdx = src.indexOf(start);
+  if (sIdx < 0) return '';
+  let i = sIdx;
+  let depth = 0;
+  while (i < src.length) {
+    const open = src.indexOf('<div', i);
+    const close = src.indexOf('</div>', i);
+    if (close < 0) return src.slice(sIdx);
+    if (open >= 0 && open < close) {
+      depth++;
+      i = open + 4;
+    } else {
+      depth--;
+      if (depth === 0) return src.slice(sIdx, close + 6);
+      i = close + 6;
+    }
+  }
+  return src.slice(sIdx);
+}

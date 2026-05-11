@@ -107,6 +107,7 @@ const TOOL_ROUTING = [
   },
   { name: 'shopify', prefix: 'shopify' },
   { name: 'klaviyo', prefix: 'klaviyo' },
+  { name: 'mailchimp', prefix: 'mailchimp' },
   { name: 'applovin', prefix: 'applovin' },
   { name: 'postscript', prefix: 'postscript' },
   { name: 'email', prefix: 'email' },
