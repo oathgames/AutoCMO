@@ -9926,7 +9926,9 @@ document.getElementById('archive-expand').addEventListener('click', (e) => {
     if (!ok && typeof showCopyToast === 'function') {
       showCopyToast('Refresh failed — check connections');
     }
-    loadArchive();
+    // User explicitly clicked the refresh button — reset scroll to
+    // top so freshly-pulled live ads are immediately visible.
+    loadArchive({ resetScroll: true });
   });
   if (merlin.onLiveAdsChanged) {
     merlin.onLiveAdsChanged(() => {
@@ -9945,27 +9947,73 @@ function updateArchiveRefreshVisibility() {
   btn.style.display = active === 'live' ? '' : 'none';
 }
 
-// Archive filter buttons
+// Archive filter buttons — switching filters changes the content set,
+// so reset scroll to the top (current scroll position is meaningless
+// in the new tab's content).
 document.querySelectorAll('.archive-filter').forEach(btn => {
   btn.addEventListener('click', () => {
     document.querySelectorAll('.archive-filter').forEach(b => b.classList.remove('active'));
     btn.classList.add('active');
     updateArchiveRefreshVisibility();
-    loadArchive();
+    loadArchive({ resetScroll: true });
   });
 });
 
-// Archive search (debounced)
+// Archive search (debounced) — narrowing the visible set with a search
+// query changes the content; reset scroll so the user sees results
+// from the top.
 let _archiveSearchTimeout;
 document.getElementById('archive-search').addEventListener('input', () => {
   clearTimeout(_archiveSearchTimeout);
-  _archiveSearchTimeout = setTimeout(() => loadArchive(), 300);
+  _archiveSearchTimeout = setTimeout(() => loadArchive({ resetScroll: true }), 300);
 });
 
-async function loadArchive() {
+async function loadArchive(opts = {}) {
+  // resetScroll=true scrolls to the top of the panel after the rebuild
+  // (current-filter changed: filter button click, search input change,
+  // explicit refresh button — the user expects a fresh starting point).
+  // resetScroll=false (default) preserves whatever scrollTop the panel
+  // had before the rebuild (auto-refresh paths: archive-changed
+  // watcher, live-ads-changed event, bulk-flag completion, hidden→
+  // visible MutationObserver) — the user was reading at some scroll
+  // position and the rebuild was an INVISIBLE event from their POV.
+  // Mismatching this in a new call site is a UX regression: pick by
+  // asking "did the user explicitly ask for different content here?".
+  const resetScroll = opts.resetScroll === true;
   const grid = document.getElementById('archive-grid');
   const empty = document.getElementById('archive-empty');
   const loading = document.getElementById('archive-loading');
+
+  // REGRESSION GUARD (2026-05-11, archive-scroll-jumps-on-alt-tab):
+  // Live user report: "When I have the archive sidebar open and alt-tab
+  // away from the Merlin window, on return the scroll snaps back to
+  // the TOP." Root cause: alt-tab pauses some FS watch events on
+  // Windows/macOS; on focus regain the OS delivers queued events; the
+  // results-watcher fires `archive-changed`; renderer's
+  // onArchiveChanged handler debounces 200ms then calls loadArchive()
+  // — which does `grid.innerHTML = ''` and rebuilds, destroying the
+  // scroll position. The 2026-04-something comment on the handler
+  // CLAIMS "refresh the panel without losing focus or scroll position"
+  // but the implementation didn't honor that claim until this fix.
+  //
+  // Fix: capture scrollTop on the .archive-panel-scroll container
+  // BEFORE the innerHTML wipe, then watch the grid via MutationObserver
+  // and restore scrollTop after the FIRST batch of children is appended
+  // (the new cards have measurable height) + a double rAF (style recalc
+  // + layout pass). MutationObserver beats scheduling the restore at
+  // the top of this async function because every typeFilter branch
+  // appends cards on its OWN await timeline (swipes, live-ads,
+  // generated-images, swipes-image, etc.) and many of them have early
+  // returns — a top-of-function rAF would fire while the grid is still
+  // empty (scrollHeight === clientHeight → max=0 → savedScrollTop
+  // clamped to 0, defeating the fix). The observer fires the first
+  // time content actually lands.
+  //
+  // 5-second timeout disconnects the observer for the empty-state
+  // case (no cards ever land) so we don't leak an observer per filter
+  // change.
+  const scrollContainer = grid ? grid.closest('.archive-panel-scroll') : null;
+  const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
 
   loading.style.display = 'block';
   grid.innerHTML = '';
@@ -9976,6 +10024,41 @@ async function loadArchive() {
   // appending cards into a grid that already belongs to a newer load.
   const mySeq = (window._archiveLoadSeq = (window._archiveLoadSeq || 0) + 1);
   const isStale = () => window._archiveLoadSeq !== mySeq;
+
+  // Wire up the scroll-restore observer ONLY when:
+  //   • The caller asked us to preserve (resetScroll === false), AND
+  //   • There's something to restore (savedScrollTop > 0), AND
+  //   • We can locate the scroll container, AND
+  //   • The MutationObserver API is available (always true in Chromium).
+  // resetScroll=true short-circuits — the rebuild's natural innerHTML
+  // wipe sends the panel to the top, exactly the desired UX for filter
+  // / search / refresh-button paths.
+  if (!resetScroll && savedScrollTop > 0 && scrollContainer && typeof MutationObserver === 'function') {
+    let restored = false;
+    const tryRestore = () => {
+      if (restored) return;
+      if (window._archiveLoadSeq !== mySeq) { restored = true; return; }
+      // Wait one more frame for layout if scrollHeight hasn't grown
+      // yet (cards added to DOM but not yet measured). After two
+      // frames have already passed at the call site, this catches
+      // the edge case of slow image-size resolution.
+      const max = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+      if (max <= 0) return; // still empty; keep observing
+      scrollContainer.scrollTop = Math.min(savedScrollTop, max);
+      restored = true;
+      obs.disconnect();
+    };
+    const obs = new MutationObserver(() => {
+      // Wait for layout: rAF flushes the style recalc; second rAF
+      // ensures the new scrollHeight is observable.
+      requestAnimationFrame(() => requestAnimationFrame(tryRestore));
+    });
+    obs.observe(grid, { childList: true });
+    // Hard timeout — empty-state branch never appends, so the
+    // observer would sit forever. 5s is comfortably longer than any
+    // legitimate filter load on a populated archive.
+    setTimeout(() => { if (!restored) obs.disconnect(); }, 5000);
+  }
 
   const typeFilter = document.querySelector('.archive-filter.active')?.dataset.filter || 'all';
   const search = document.getElementById('archive-search').value.trim().toLowerCase();
@@ -11223,7 +11306,12 @@ function archiveDeleteFile(target) {
 
 // Live archive invalidation: when the watcher in the main process detects
 // a fresh run folder, an external file drop, or a bulk trash, refresh the
-// panel without losing focus or scroll position.
+// panel without losing focus or scroll position. Scroll-position
+// preservation is implemented inside loadArchive() itself via the
+// MutationObserver pattern documented under REGRESSION GUARD
+// (2026-05-11, archive-scroll-jumps-on-alt-tab) — every reload path
+// (this watcher, brand-switch, filter change, search) automatically
+// inherits the same restore.
 if (typeof merlin.onArchiveChanged === 'function') {
   merlin.onArchiveChanged(() => {
     const panel = document.getElementById('archive-panel');

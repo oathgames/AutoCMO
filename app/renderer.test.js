@@ -1090,3 +1090,111 @@ test('§H008 — _factStreamFinalize flushes pending buffer before tailFinalize'
   assert.ok(finalizeIdx > 0, 'tailFinalize call present');
   assert.ok(flushIdx < finalizeIdx, 'flush comes before tailFinalize');
 });
+
+// REGRESSION GUARD (2026-05-11, archive-scroll-jumps-on-alt-tab):
+// Live user report: alt-tab away from Merlin with the archive sidebar
+// open → return → scroll snaps to top. Root cause: alt-tab pauses fs
+// watch events; on focus regain the OS delivers queued events; the
+// results-watcher fires `archive-changed`; renderer's
+// onArchiveChanged handler calls loadArchive() which clears the grid
+// via innerHTML = '' and rebuilds, destroying scroll position.
+//
+// Fix: loadArchive(opts.resetScroll) — defaults to false (preserve).
+// Auto-reload paths (archive-changed watcher, live-ads-changed,
+// hidden→visible MutationObserver, bulk-flag completion) inherit the
+// default. User-initiated content-change paths (filter button click,
+// search input, refresh button) pass { resetScroll: true } so the
+// rebuild's natural innerHTML wipe sends the panel to the top — the
+// correct UX when the content set itself has changed.
+//
+// These tests source-scan the file because the live behavior depends
+// on Chromium scrollTop + MutationObserver, which jsdom doesn't
+// model faithfully. The contracts we lock here are:
+//   (a) loadArchive accepts opts.resetScroll
+//   (b) the preserve path wires up the MutationObserver under the
+//       savedScrollTop>0 && !resetScroll gate
+//   (c) filter / search / refresh-button callers pass resetScroll:true
+//   (d) auto-reload callers (the two `onArchiveChanged`-style
+//       handlers) do NOT pass resetScroll (preserve is the default)
+
+test('REGRESSION GUARD 2026-05-11: loadArchive signature accepts opts.resetScroll', () => {
+  assert.ok(/async function loadArchive\(opts = \{\}\)/.test(RENDERER_JS),
+    'loadArchive must take an opts object — pre-fix it was zero-arg, " +' +
+    '"so callers had no way to express preserve-vs-reset intent');
+  assert.ok(/const resetScroll = opts\.resetScroll === true/.test(RENDERER_JS),
+    'resetScroll must be a strict-true read of opts.resetScroll — ' +
+    'truthy coercion (just `opts.resetScroll`) would treat undefined as ' +
+    'false but might leak intent across falsy-but-not-explicit cases');
+});
+
+test('REGRESSION GUARD 2026-05-11: preserve-scroll path is gated on !resetScroll && savedScrollTop > 0', () => {
+  // The observer-wiring guard must short-circuit when the caller asked
+  // for a reset (filter click, search change, refresh button). Without
+  // !resetScroll in the predicate, a filter click would still restore
+  // the OLD filter's scroll position into the NEW filter's content —
+  // a worse UX than the original alt-tab bug.
+  const guardPattern = /if \(!resetScroll && savedScrollTop > 0 && scrollContainer/;
+  assert.ok(guardPattern.test(RENDERER_JS),
+    'preserve-scroll observer wiring must be gated on ' +
+    '`!resetScroll && savedScrollTop > 0 && scrollContainer && ...`');
+});
+
+test('REGRESSION GUARD 2026-05-11: filter-button + search + refresh-button callers pass resetScroll:true', () => {
+  // Filter buttons section
+  const filterRegion = RENDERER_JS.slice(
+    RENDERER_JS.indexOf('// Archive filter buttons'),
+    RENDERER_JS.indexOf('// Archive search')
+  );
+  assert.ok(/loadArchive\(\{ resetScroll: true \}\)/.test(filterRegion),
+    'filter-button click handler must call loadArchive({ resetScroll: true })');
+
+  // Search section
+  const searchStart = RENDERER_JS.indexOf('// Archive search (debounced)');
+  const searchEnd = RENDERER_JS.indexOf('async function loadArchive', searchStart);
+  const searchRegion = RENDERER_JS.slice(searchStart, searchEnd);
+  assert.ok(/loadArchive\(\{ resetScroll: true \}\)/.test(searchRegion),
+    'search-input handler must call loadArchive({ resetScroll: true }) inside its debounce');
+
+  // Refresh-button section — search for the explicit comment we added.
+  assert.ok(/User explicitly clicked the refresh button[\s\S]{0,400}loadArchive\(\{ resetScroll: true \}\)/.test(RENDERER_JS),
+    'refresh-button click handler must call loadArchive({ resetScroll: true }) with the rationale comment');
+});
+
+test('REGRESSION GUARD 2026-05-11: auto-reload callers (archive-changed, live-ads-changed, hidden→visible) do NOT pass resetScroll', () => {
+  // The whole point of this fix is that these three reload paths
+  // INHERIT the preserve-scroll default. Adding { resetScroll: true }
+  // to any of them would silently re-introduce the alt-tab bug.
+  //
+  // We pin them by their surrounding identifiers + a window of ~400
+  // chars and assert each window contains a bare `loadArchive()` (or
+  // `loadArchive();`) call but NOT a `loadArchive({ resetScroll`
+  // call.
+
+  // (a) onArchiveChanged handler near the bottom of the file
+  const archiveChangedIdx = RENDERER_JS.indexOf('merlin.onArchiveChanged(()');
+  assert.ok(archiveChangedIdx > 0, 'onArchiveChanged handler must exist');
+  const archiveChangedRegion = RENDERER_JS.slice(archiveChangedIdx, archiveChangedIdx + 2000);
+  assert.ok(/loadArchive\(\);/.test(archiveChangedRegion),
+    'onArchiveChanged handler must call bare loadArchive() — preserve is the default');
+  assert.ok(!/loadArchive\(\{ resetScroll: true/.test(archiveChangedRegion),
+    'onArchiveChanged handler MUST NOT pass resetScroll:true — that ' +
+    'would re-introduce the original alt-tab regression');
+
+  // (b) onLiveAdsChanged handler in the refresh-button block
+  const liveAdsIdx = RENDERER_JS.indexOf('merlin.onLiveAdsChanged(()');
+  assert.ok(liveAdsIdx > 0, 'onLiveAdsChanged handler must exist');
+  const liveAdsRegion = RENDERER_JS.slice(liveAdsIdx, liveAdsIdx + 600);
+  assert.ok(/loadArchive\(\);/.test(liveAdsRegion),
+    'onLiveAdsChanged handler must call bare loadArchive() — preserve is the default');
+  assert.ok(!/loadArchive\(\{ resetScroll: true/.test(liveAdsRegion),
+    'onLiveAdsChanged handler MUST NOT pass resetScroll:true');
+
+  // (c) ensureArchiveAutoRefreshOnVisible MutationObserver (BUG-F007)
+  const f007Idx = RENDERER_JS.indexOf('ensureArchiveAutoRefreshOnVisible');
+  assert.ok(f007Idx > 0, 'ensureArchiveAutoRefreshOnVisible function must exist (BUG-F007 fix)');
+  const f007Region = RENDERER_JS.slice(f007Idx, f007Idx + 800);
+  assert.ok(/loadArchive\(\);/.test(f007Region),
+    'hidden→visible MutationObserver must call bare loadArchive() — preserve is the default');
+  assert.ok(!/loadArchive\(\{ resetScroll: true/.test(f007Region),
+    'hidden→visible MutationObserver MUST NOT pass resetScroll:true');
+});
