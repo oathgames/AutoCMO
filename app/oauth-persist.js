@@ -19,6 +19,11 @@ const VAULT_SENSITIVE_KEYS = [
   'klaviyoAccessToken',
   'klaviyoRefreshToken',
   'klaviyoApiKey',
+  // Mailchimp Marketing API key (shipped v1.22.x via API_KEY_PLATFORMS).
+  // Same sensitivity profile as klaviyoApiKey — read/write access to
+  // audiences and campaigns; format `<32-hex>-<datacenter>`. Per-brand
+  // vault scope so each brand can connect a different Mailchimp account.
+  'mailchimpApiKey',
   'amazonAccessToken',
   'amazonRefreshToken',
   'pinterestAccessToken',
@@ -95,6 +100,7 @@ const CONFIG_FIELD_ALLOWLIST = new Set([
   'googleAccessToken', 'googleRefreshToken', 'googleAdsCustomerId', 'googleAdsDeveloperToken', 'googleApiKey',
   'amazonAccessToken', 'amazonRefreshToken', 'amazonProfileId', 'amazonSellerId',
   'klaviyoAccessToken', 'klaviyoApiKey',
+  'mailchimpApiKey',
   'pinterestAccessToken', 'pinterestRefreshToken',
   'falApiKey', 'elevenLabsApiKey', 'heygenApiKey', 'arcadsApiKey', 'foreplayApiKey', 'trendtrackApiKey',
   // Postscript + AppLovin BYOK API keys. Shipped in v1.18.0 but the

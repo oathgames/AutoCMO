@@ -5328,6 +5328,15 @@ const API_KEY_PLATFORMS = {
   // profiles:read) and ship today. The link drops users on the
   // "API Keys" tab where the "Create Private API Key" button lives.
   klaviyo:    { key: 'klaviyoApiKey', label: 'Klaviyo', placeholder: 'pk_xxxxxxxxxxxxxxxxxxxxxxxxxxxx', url: 'https://www.klaviyo.com/account#api-keys-tab' },
+  // Mailchimp Marketing API key — formatted as 32 hex chars + `-<dc>`
+  // suffix (e.g. abc123…-us6 → datacenter "us6"). The binary parses
+  // the dc from the suffix and constructs <dc>.api.mailchimp.com URLs
+  // on every call. Marketplace OAuth requires a long partner-review
+  // pipeline; private API keys cover every scope Merlin uses
+  // (audiences:read, campaigns:read/write, reports:read) and ship
+  // today. The link drops users on the Account → Extras → API keys
+  // page where the "Create A Key" button lives.
+  mailchimp:  { key: 'mailchimpApiKey', label: 'Mailchimp', placeholder: '32-hex-chars-us6', url: 'https://us1.admin.mailchimp.com/account/api/' },
   // AppLovin default tile click saves the MAX (publisher) key. Users who have
   // an AppDiscovery (advertiser) key instead — or both — can switch via the
   // tile's right-click "Use my API key" override, which opens the two-input
