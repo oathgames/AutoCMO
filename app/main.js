@@ -2575,6 +2575,44 @@ async function handleToolApproval(toolName, input) {
       });
     }
 
+    // CARDED_DESTRUCTIVE_ACTIONS — destructive writes that don't move ad
+    // dollars but DO touch live customer-facing state (sending real
+    // emails to real subscribers, pausing a workflow). Generic card,
+    // no budget context, no auto-approve eligibility.
+    //
+    // REGRESSION GUARD (2026-05-11, mailchimp-klaviyo-parity Gitar
+    // review): pre-fix this fell through to the catch-all auto-approve
+    // below. Mailchimp's campaign-send + campaign-schedule fired real
+    // email blasts to thousands of subscribers without a user-facing
+    // confirmation. The CAN-SPAM gate in mailchimp_campaigns.go is
+    // defense-in-depth (refuses non-compliant sends server-side) but
+    // does NOT replace "user, do you want to proceed?" — a compliant
+    // email blast to the WRONG audience is still a fire-the-CEO event.
+    // See the CARDED_DESTRUCTIVE_ACTIONS comment in mcp-approval-policy.js
+    // for the criteria the set captures.
+    if (approvalPolicy.CARDED_DESTRUCTIVE_ACTIONS &&
+        approvalPolicy.CARDED_DESTRUCTIVE_ACTIONS.has(action)) {
+      const translated = translateTool(toolName, input);
+      const toolUseID = Date.now().toString();
+      const labelOverride = intentToolLabel ||
+        (translated && translated.label) ||
+        `${toolName.replace('mcp__merlin__', '')} — ${action}`;
+      const payload = {
+        toolUseID,
+        label: labelOverride,
+        cost: (translated && translated.cost) || `${toolName} action=${action}`,
+        budget: 'Live customer-facing action. Auto-expires in 15 min if ignored.',
+      };
+      if (win && !win.isDestroyed()) win.webContents.send('approval-request', payload);
+      wsServer.broadcast('approval-request', payload);
+      nudgeForApproval();
+      return new Promise((resolve) => {
+        setPendingApproval(toolUseID, (approved) => {
+          resolve(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'User declined' });
+        });
+      });
+    }
+
     // All other MCP merlin tools: auto-approve (config, voice, content, etc.)
     return { behavior: 'allow', updatedInput: input };
   }

@@ -337,3 +337,65 @@ test('main.js threads intentToolLabel through the approval-card payload', () => 
     'main.js must override translated.label with intentToolLabel for intent tools'
   );
 });
+
+// REGRESSION GUARD (2026-05-11, mailchimp-klaviyo-parity Gitar review):
+// CARDED_DESTRUCTIVE_ACTIONS is the third approval tier — destructive
+// non-spend writes that must show a card before firing. Before this
+// tier existed, the mcp__merlin__ block in main.js had a binary
+// READ_ONLY-vs-SPEND switch with everything-else auto-approving, so
+// mailchimp-campaign-send fired real email blasts to thousands of
+// subscribers without a user confirmation. The tests below pin:
+//   1. The set is exported and non-empty.
+//   2. campaign-send + campaign-schedule are in it (the load-bearing
+//      Mailchimp cases — sending to a real audience is not recoverable).
+//   3. main.js wires the set BEFORE the catch-all auto-approve.
+//   4. No member of CARDED_DESTRUCTIVE_ACTIONS is also in READ_ONLY
+//      (would silently override the card) or in SPEND (would route
+//      through the budget-context path with no budget context, which
+//      is misleading rather than wrong).
+
+test('CARDED_DESTRUCTIVE_ACTIONS is exported and non-empty', () => {
+  assert.ok(policy.CARDED_DESTRUCTIVE_ACTIONS instanceof Set,
+    'CARDED_DESTRUCTIVE_ACTIONS must be a Set');
+  assert.ok(policy.CARDED_DESTRUCTIVE_ACTIONS.size >= 2,
+    'CARDED_DESTRUCTIVE_ACTIONS must have at least 2 entries (campaign-send + campaign-schedule)');
+});
+
+test('CARDED_DESTRUCTIVE_ACTIONS includes campaign-send + campaign-schedule', () => {
+  assert.ok(policy.CARDED_DESTRUCTIVE_ACTIONS.has('campaign-send'),
+    'campaign-send must be carded — fires real email blasts to live subscriber lists');
+  assert.ok(policy.CARDED_DESTRUCTIVE_ACTIONS.has('campaign-schedule'),
+    'campaign-schedule must be carded — queues a real email blast');
+});
+
+test('CARDED_DESTRUCTIVE_ACTIONS does not overlap READ_ONLY_ACTIONS', () => {
+  // Overlap would mean the READ_ONLY auto-approve fires first and the
+  // card never shows.
+  for (const action of policy.CARDED_DESTRUCTIVE_ACTIONS) {
+    assert.ok(!policy.READ_ONLY_ACTIONS.has(action),
+      `${action} is in BOTH CARDED_DESTRUCTIVE_ACTIONS and READ_ONLY_ACTIONS — the read-only check fires first, so the card never shows. Remove from one set.`);
+  }
+});
+
+test('CARDED_DESTRUCTIVE_ACTIONS does not overlap SPEND_ACTIONS', () => {
+  // Overlap would route through the budget-context card path with no
+  // budget context — confusing UX. Pick one path per action.
+  for (const action of policy.CARDED_DESTRUCTIVE_ACTIONS) {
+    assert.ok(!policy.SPEND_ACTIONS.has(action),
+      `${action} is in BOTH CARDED_DESTRUCTIVE_ACTIONS and SPEND_ACTIONS — these have incompatible UX (budget card vs generic card). Pick one.`);
+  }
+});
+
+test('main.js handleToolApproval wires CARDED_DESTRUCTIVE_ACTIONS BEFORE the catch-all auto-approve', () => {
+  // Source-scan: the CARDED_DESTRUCTIVE_ACTIONS branch must appear
+  // BEFORE the comment "All other MCP merlin tools: auto-approve"
+  // otherwise the catch-all would fire first and the card path is
+  // unreachable.
+  const cardedIdx = SRC_MAIN.indexOf('CARDED_DESTRUCTIVE_ACTIONS.has(action)');
+  assert.ok(cardedIdx > 0,
+    'main.js must check approvalPolicy.CARDED_DESTRUCTIVE_ACTIONS in handleToolApproval');
+  const catchAllIdx = SRC_MAIN.indexOf('All other MCP merlin tools: auto-approve');
+  assert.ok(catchAllIdx > 0, 'catch-all auto-approve comment must exist');
+  assert.ok(cardedIdx < catchAllIdx,
+    'CARDED_DESTRUCTIVE_ACTIONS branch must precede the catch-all auto-approve — otherwise the card never shows');
+});
