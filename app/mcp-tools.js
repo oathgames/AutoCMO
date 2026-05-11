@@ -1076,22 +1076,53 @@ function buildTools(tool, z, ctx) {
   // (audiences:read, campaigns:read/write, reports:read).
   tools.push(defineTool({
     name: 'mailchimp',
-    description: 'Mailchimp email marketing — audiences (lists), campaigns, and aggregate performance reports. action="status" pings /3.0/ping to confirm the connection. action="audiences" lists every audience with member / unsubscribe / cleaned counts. action="campaigns" lists recent campaigns (default 25, sortable by status: save / paused / schedule / sending / sent). action="performance" pulls the open-rate / click-rate / unsubscribed / bounces aggregate for the last 10 sent campaigns plus an overall average. All actions are read-only HTTP GETs and route through the shared "mailchimp" rate-limit bucket (60/min preflight cap). When to use: brand-side email reporting for Mailchimp-using stores; complements the Klaviyo tool for stores on Klaviyo and is preferred when the brand answers "we use Mailchimp" in the connect dialog.',
-    destructive: false,
+    description: 'Mailchimp email marketing — full Klaviyo-parity surface: audiences, campaigns, performance, template CRUD + bulk-upload, campaign send/schedule/test, and Classic Automations control. Read-only actions (status / audiences / campaigns / performance / templates-list / template-get / automations-list / automation-emails) are HTTP GETs, no approval card. Destructive actions (template-create/update/delete/bulk-upload, campaign-create/set-content/send-test/send/schedule/delete, automation-pause/start) gate through the standard approval card; campaign-send + campaign-schedule additionally run CheckMailchimpCampaignCANSPAM and REFUSE the call when subject_line / from_name / reply_to / *|UNSUB|* tag / physical-address tag is missing. Templates: applyTokens (default true) swaps {{UNSUB_URL}}, {{ FIRST_NAME }}, {{LAST_NAME}}, {{EMAIL}}, {{FULL_NAME}}, {{LIST_NAME}}, {{COMPANY_NAME}}, {{COMPANY_ADDRESS}} for Mailchimp merge tags (*|UNSUB|*, *|FNAME|*, etc.) so the same source HTML works on Klaviyo and Mailchimp. Bulk-upload reads a directory of .html files (cap 5 MB each, concurrency 3). Routing hints: For audience ROI use action="performance". For template management ("upload my 12 email templates") use "templates-bulk-upload" with dir + nameTemplate. For a one-off send use create → set-content → send-test → send. For workflow control ("pause the welcome series") use "automation-pause" with campaignId set to the workflow id (Mailchimp does not API-create automations — only list / control / inspect).',
+    // Destructive at the tool level because the surface includes 11
+    // write actions (template create/update/delete, bulk-upload,
+    // campaign create/set-content/send-test/send/schedule/delete,
+    // automation pause/start). The host's approval-card path uses
+    // input.action to decide WHICH writes need the card (vs the
+    // read-only ones). Same pattern as the Klaviyo tool above.
+    destructive: true,
+    preview: false,
     idempotent: true,
     costImpact: 'api',
     brandRequired: true,
     concurrency: { platform: 'mailchimp' },
     input: {
-      action: z.enum(['status', 'audiences', 'campaigns', 'performance']).describe('Operation'),
+      action: z.enum([
+        // Read-only reporting.
+        'status', 'audiences', 'campaigns', 'performance',
+        // Email template CRUD + bulk.
+        'templates-list', 'template-get', 'template-create',
+        'template-update', 'template-delete', 'templates-bulk-upload',
+        // Campaign write surface (manual broadcasts).
+        'campaign-create', 'campaign-set-content', 'campaign-send-test',
+        'campaign-send', 'campaign-schedule', 'campaign-delete',
+        // Classic Automations control (workflow create is UI-only
+        // on Mailchimp's side — list / control / inspect only).
+        'automations-list', 'automation-emails', 'automation-pause',
+        'automation-start',
+      ]).describe('Operation'),
       brand: brandSchema,
-      // batchCount aliases to Limit on the Go side for campaigns +
-      // performance — the binary normalizes both names. We expose
-      // both `limit` and `batchCount` so the LLM can use whichever
-      // is in its short-term context (every other reporting tool
-      // uses batchCount; SDK-level conventions tend to use limit).
       limit: z.coerce.number().int().optional().describe('Max rows for campaigns (1-1000, default 25) and performance (1-100, default 10).'),
       status: z.enum(['save', 'paused', 'schedule', 'sending', 'sent']).optional().describe('Filter campaigns by status. Only used by action="campaigns".'),
+      // Template fields.
+      templateId: z.string().optional().describe('Mailchimp template ID (integer-as-string). Required for template-get / -update / -delete and for campaign-set-content when sourcing from a template instead of raw HTML.'),
+      templateName: z.string().optional().describe('Display name on Mailchimp\'s side (template-create / -update).'),
+      htmlContent: z.string().optional().describe('Raw email HTML body. Max 5 MB. Used by template-create / template-update / campaign-set-content. When applyTokens is true (default) the body is run through the merge-tag swap before POST.'),
+      dir: z.string().optional().describe('Directory of .html / .htm files for templates-bulk-upload. MUST resolve inside assets/brands/<brand>/ (validated server-side).'),
+      nameTemplate: z.string().optional().describe('Format string for bulk-upload, e.g. "POG / 01-welcome / {basename}". {basename} = filename without extension. Same shape as the klaviyo tool — source HTML is portable.'),
+      applyTokens: z.boolean().optional().describe('Translate generic placeholders ({{UNSUB_URL}}, {{ FIRST_NAME }}, {{COMPANY_NAME}}, {{COMPANY_ADDRESS}}, etc.) to Mailchimp merge tags (*|UNSUB|*, *|FNAME|*, etc.) before POST. Default true for template-create / -update / -bulk-upload / campaign-set-content. Set false to preserve the user\'s HTML byte-for-byte.'),
+      // Campaign + automation fields.
+      campaignId: z.string().optional().describe('Mailchimp campaign ID — required for set-content / send-test / send / schedule / delete. Also reused as the automation/workflow ID for automation-emails / automation-pause / automation-start (Mailchimp workflow IDs share the same alphanumeric shape as campaign IDs).'),
+      audienceId: z.string().optional().describe('Mailchimp audience (list) ID — required for campaign-create. Pull this from the audiences action.'),
+      subjectLine: z.string().optional().describe('Campaign subject line — required for campaign-create. CAN-SPAM-gated at send time (empty subject REFUSES the send).'),
+      fromName: z.string().optional().describe('Sender display name — required for campaign-create. CAN-SPAM-gated at send time.'),
+      replyTo: z.string().optional().describe('Reply-to email address — required for campaign-create. CAN-SPAM-gated at send time.'),
+      preheader: z.string().optional().describe('Preview text shown next to the subject in inbox UIs. Optional but recommended (lifts open rate ~5-15%).'),
+      scheduleTime: z.string().optional().describe('RFC-3339 UTC timestamp for campaign-schedule, e.g. "2026-06-01T14:00:00+00:00". Mailchimp rounds to the nearest 15-minute slot.'),
+      testEmails: z.string().optional().describe('Comma-separated list of recipient addresses for campaign-send-test (max 50 — Mailchimp\'s hard cap on /actions/test). Addresses must be on the authenticated account\'s allowlist.'),
     },
     handler: async (args) => toEnvelope(await runBinary(ctx, 'mailchimp-' + args.action, args)),
   }, tool, z, ctx));

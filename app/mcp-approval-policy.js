@@ -41,6 +41,14 @@ const READ_ONLY_ACTIONS = Object.freeze(new Set([
   'accounts',
   // Reddit ad-group / ad list (parallel to 'campaigns' — read-only listing).
   'adgroups', 'ads',
+  // Mailchimp + Klaviyo read-only template / automation enumeration.
+  // Adding these here means the destructive=true tool wrapper auto-
+  // approves GET endpoints (templates-list / template-get / etc.)
+  // while still routing the CRUD verbs (-create / -update / -delete /
+  // -bulk-upload) through the approval card.
+  'templates-list', 'template-get',
+  'automations-list', 'automation-emails',
+  'flows-list', 'flow-get',
 ]));
 
 // SPEND_ACTIONS gate the approval card. `push` is the only action eligible
@@ -61,6 +69,52 @@ const SPEND_ACTIONS = Object.freeze(new Set([
   // 'create-ad' to reddit-create-campaign / reddit-create-ad in the binary —
   // both fire real spend without the universal `push` semantics).
   'create-campaign', 'create-ad',
+]));
+
+// CARDED_DESTRUCTIVE_ACTIONS gate the generic confirmation card for
+// destructive non-spend writes — actions that don't fire ad dollars
+// but DO send mail to real subscribers, pause/start workflows, or
+// otherwise touch live customer-facing state. Before this tier
+// existed, every action that wasn't in READ_ONLY_ACTIONS or
+// SPEND_ACTIONS fell through to the unconditional auto-approve at the
+// end of the mcp__merlin__ block in main.js. Campaign-send fired real
+// emails to thousands of subscribers without a confirmation card.
+//
+// REGRESSION GUARD (2026-05-11, mailchimp-klaviyo-parity Gitar
+// review): the Gitar reviewer flagged the auto-approve fallthrough
+// as a WARN on the Mailchimp expansion PR — Mailchimp's CAN-SPAM
+// gate is defense-in-depth (refuses non-compliant sends server-side)
+// but does NOT replace user confirmation of "yes, send this email
+// blast to 25,000 people." Adding 'campaign-send' and
+// 'campaign-schedule' here means main.js shows a generic card with
+// the action name + tool name so the user gets a "do you want to
+// proceed?" beat. The card does NOT include budget context (no
+// dollars involved) — handleToolApproval branches on
+// CARDED_DESTRUCTIVE_ACTIONS BEFORE the SPEND_ACTIONS branch's
+// budget machinery.
+//
+// Order of evaluation in main.js:
+//   1. READ_ONLY → auto-approve
+//   2. SPEND     → card with budget context + in-cap auto-approve
+//   3. CARDED_DESTRUCTIVE → card WITHOUT budget context, no
+//                            auto-approve eligibility
+//   4. catch-all → auto-approve (config / voice / content / etc.)
+//
+// What does NOT belong here:
+//   - Read-only enumerations (templates-list, automations-list, …)
+//     → READ_ONLY_ACTIONS
+//   - Anything that moves ad dollars
+//     → SPEND_ACTIONS
+//   - Idempotent setup writes a user already pre-authorized (the
+//     "click a tile to connect" flow) — those auto-approve.
+const CARDED_DESTRUCTIVE_ACTIONS = Object.freeze(new Set([
+  // Mailchimp / Klaviyo / future-email-platform real-send actions.
+  // These deliver mail to live subscriber lists and are not recoverable.
+  'campaign-send', 'campaign-schedule',
+  // Workflow-level pause / resume. Recoverable (the inverse action
+  // exists) but a fat-fingered pause on a brand's welcome series
+  // costs revenue until someone notices, so we card.
+  'automation-pause', 'automation-start',
 ]));
 
 // ── Intent-tool routing ─────────────────────────────────────────────
@@ -154,6 +208,7 @@ function resolveMerlinAction(toolName, input) {
 module.exports = {
   READ_ONLY_ACTIONS,
   SPEND_ACTIONS,
+  CARDED_DESTRUCTIVE_ACTIONS,
   INTENT_TOOL_TO_ACTION,
   INTENT_TOOL_LABELS,
   resolveMerlinAction,
