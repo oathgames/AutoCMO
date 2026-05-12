@@ -2803,6 +2803,45 @@ async function handleToolApproval(toolName, input) {
         });
       });
     }
+
+    // BUDGET-LESS DESTRUCTIVE BASH ACTIONS: mirror of the MCP path's
+    // CARDED_DESTRUCTIVE_ACTIONS tier (see mcp-approval-policy.js).
+    //
+    // REGRESSION GUARD (2026-05-11, post-audit bash bypass):
+    // The adversarial audit found that an agent could bypass the MCP
+    // CARDED_DESTRUCTIVE card by calling the binary directly via Bash
+    // — e.g. `Merlin '{"action":"mailchimp-campaign-send", ...}'`
+    // would route to the binary, run the CAN-SPAM gate, and ship real
+    // emails to the brand's audience WITHOUT the Electron card. The
+    // MCP tool's destructive-action gate is sufficient for tool-using
+    // agents (Claude on the MCP path); the Bash bypass let any agent
+    // that knows the binary's action names exfiltrate around it.
+    //
+    // Fix: a parallel set of bash actions that require the same
+    // generic card (no budget context — these actions don't move ad
+    // dollars). The card auto-expires in 15 min if ignored.
+    const BASH_CARDED_DESTRUCTIVE = new Set([
+      'mailchimp-campaign-send', 'mailchimp-campaign-schedule',
+      'mailchimp-automation-pause', 'mailchimp-automation-start',
+    ]);
+    if (BASH_CARDED_DESTRUCTIVE.has(bashAction)) {
+      const toolUseID = Date.now().toString();
+      const translated = translateTool(toolName, input);
+      const payload = {
+        toolUseID,
+        label: (translated && translated.label) || `Bash: ${bashAction}`,
+        cost: (translated && translated.cost) || `Merlin binary action=${bashAction}`,
+        budget: 'Live customer-facing action. Auto-expires in 15 min if ignored.',
+      };
+      if (win && !win.isDestroyed()) win.webContents.send('approval-request', payload);
+      wsServer.broadcast('approval-request', payload);
+      nudgeForApproval();
+      return new Promise((resolve) => {
+        setPendingApproval(toolUseID, (approved) => {
+          resolve(approved ? { behavior: 'allow', updatedInput: input } : { behavior: 'deny', message: 'User declined' });
+        });
+      });
+    }
   }
 
   if (toolName === 'AskUserQuestion') {
