@@ -1127,16 +1127,21 @@ test('REGRESSION GUARD 2026-05-11: loadArchive signature accepts opts.resetScrol
     'false but might leak intent across falsy-but-not-explicit cases');
 });
 
-test('REGRESSION GUARD 2026-05-11: preserve-scroll path is gated on !resetScroll && savedScrollTop > 0', () => {
+test('REGRESSION GUARD 2026-05-11: preserve-scroll path is gated on !resetScroll && (savedScrollTop > 0 || userWasNearBottom)', () => {
   // The observer-wiring guard must short-circuit when the caller asked
   // for a reset (filter click, search change, refresh button). Without
   // !resetScroll in the predicate, a filter click would still restore
   // the OLD filter's scroll position into the NEW filter's content —
   // a worse UX than the original alt-tab bug.
-  const guardPattern = /if \(!resetScroll && savedScrollTop > 0 && scrollContainer/;
+  //
+  // 2026-05-12 update: the OR-arm `userWasNearBottom` was added so
+  // the follow-new-content convention fires even when savedScrollTop
+  // happens to be 0 (the user is at the top AND the bottom of a tiny
+  // archive). Both arms must be present.
+  const guardPattern = /if \(!resetScroll && \(savedScrollTop > 0 \|\| userWasNearBottom\) && scrollContainer/;
   assert.ok(guardPattern.test(RENDERER_JS),
     'preserve-scroll observer wiring must be gated on ' +
-    '`!resetScroll && savedScrollTop > 0 && scrollContainer && ...`');
+    '`!resetScroll && (savedScrollTop > 0 || userWasNearBottom) && scrollContainer && ...`');
 });
 
 test('REGRESSION GUARD 2026-05-11: filter-button + search + refresh-button callers pass resetScroll:true', () => {
@@ -1265,6 +1270,20 @@ test('REGRESSION GUARD 2026-05-11: API_KEY_PLATFORMS registers mailchimp with th
     'Mailchimp placeholder MUST hint at the `-<datacenter>` suffix (e.g. "32-hex-chars-us6") so users include it');
 });
 
+test('REGRESSION GUARD 2026-05-12: Mailchimp API-key URL is the universal login.mailchimp.com entry, not a hardcoded datacenter', () => {
+  // The pre-fix URL was https://us1.admin.mailchimp.com/account/api/
+  // which only works for the us1 datacenter (~10% of users); everyone
+  // else lands on a forced-redirect / sign-in loop. login.mailchimp.com
+  // auto-detects the user's datacenter post-auth and routes to the
+  // right /account/api/ page. Lock the universal URL in.
+  const urlMatch = RENDERER_JS.match(/mailchimp:\s*\{[^}]*url:\s*'([^']+)'/);
+  assert.ok(urlMatch, 'mailchimp entry must declare a url');
+  assert.ok(!/^https:\/\/us\d+\.admin\.mailchimp\.com/.test(urlMatch[1]),
+    'Mailchimp URL MUST NOT hardcode a datacenter prefix (us1, us6, eu1, etc.) — landing-page-redirect only works for users on that exact datacenter');
+  assert.ok(/^https:\/\/login\.mailchimp\.com/.test(urlMatch[1]),
+    'Mailchimp URL MUST use login.mailchimp.com — it auto-routes to the user\'s actual datacenter post-auth');
+});
+
 // sliceBetween extracts the substring of `src` covering the <div>
 // element whose opening tag matches the `start` prefix, including
 // the matching closing </div> tag. Used to scope the tile-placement
@@ -1296,3 +1315,27 @@ function sliceBetween(src, start) {
   }
   return src.slice(sIdx);
 }
+
+test('REGRESSION GUARD 2026-05-12: loadArchive follows-new-content when user was near bottom', () => {
+  // Post-audit UX: when an external file appears while the user is
+  // scrolled to the bottom of the archive, the rebuild should auto-
+  // scroll to the NEW bottom rather than restoring the old scrollTop
+  // (which would hide the new content). Matches the Slack/iMessage/
+  // Messenger convention.
+  //
+  // Source-scan the implementation for the three load-bearing pieces:
+  //   1. userWasNearBottom captured BEFORE the innerHTML wipe
+  //   2. The 100px threshold constant
+  //   3. The restore-clamp branch picks `max` instead of
+  //      `Math.min(savedScrollTop, max)` when userWasNearBottom is true.
+  assert.ok(/FOLLOW_NEW_CONTENT_THRESHOLD_PX\s*=\s*100/.test(RENDERER_JS),
+    'follow-new-content threshold (100px) must be a named constant');
+  assert.ok(/let\s+userWasNearBottom\s*=\s*false/.test(RENDERER_JS),
+    'userWasNearBottom flag must default to false');
+  assert.ok(/userWasNearBottom\s*=\s*oldMax\s*>\s*0\s*&&\s*\(oldMax\s*-\s*savedScrollTop\)\s*<=\s*FOLLOW_NEW_CONTENT_THRESHOLD_PX/.test(RENDERER_JS),
+    'userWasNearBottom must be computed BEFORE the innerHTML wipe using oldMax');
+  // The restore branch must choose `max` (snap-to-bottom) when
+  // userWasNearBottom, else `Math.min(savedScrollTop, max)` (preserve).
+  assert.ok(/scrollContainer\.scrollTop\s*=\s*userWasNearBottom\s*\?\s*max\s*:\s*Math\.min\(savedScrollTop,\s*max\)/.test(RENDERER_JS),
+    'restore branch must snap to new max when userWasNearBottom, else clamp to savedScrollTop');
+});
