@@ -29,6 +29,23 @@
 // `sk-test` in an inline comment or doc fixture.
 const TOKEN_PREFIX_RE = /(sk_live_|sk_test_|sk-|github_pat_|ghp_|gho_|ghs_|ghu_|AKIA|ASIA|xoxb-|xoxp-|xoxa-|xoxs-|xoxr-|ca_live_|ca_test_|EAA[A-Z]|fal_|whsec_|gsk_|shpat_|shpss_|AIza)[A-Za-z0-9_\-]{8,}/g;
 
+// Mailchimp Marketing API key shape: <32-hex>-<datacenter> (e.g.
+// abc123def456...-us6). 32+1+2=35 chars at minimum — the existing
+// LONG_TOKEN_RE requires 40+, so a Mailchimp key in a log line would
+// NOT be redacted by the generic sweep. Mailchimp keys also have no
+// committed `mc_` / `mc-` prefix, so TOKEN_PREFIX_RE can't catch them
+// by prefix.
+//
+// REGRESSION GUARD (2026-05-11, post-audit token-redaction gap):
+// Cross-repo adversarial audit caught this — Hard-Won Rule G005 says
+// every recognizable token shape gets redacted in logs; Mailchimp keys
+// were exempt purely because their shape didn't fit either existing
+// pattern. The regex is structurally restrictive (lowercase hex + dash
+// + 2-3-char alnum dc) so it doesn't false-positive on generic hashes.
+// Mirrors autocmo-core/main.go's secretMailchimpPattern exactly so a
+// token leak detected in one repo's audit is caught in the other's.
+const MAILCHIMP_KEY_RE = /\b[a-f0-9]{32}-[a-z]{1,4}[0-9]{1,3}\b/g;
+
 // Long opaque base64-ish token catch-all (matches the appendAudit existing
 // behavior + the relay-client logSafe behavior). Tightened minimum from 32
 // to 40 because shorter strings tend to be legitimate identifiers (campaign
@@ -49,6 +66,11 @@ function redactSecret(s) {
   // Run prefix pass first — it catches short prefixed tokens (sk-XXXX) that
   // the long-token sweep would miss because they're under the 40-char floor.
   let out = s.replace(TOKEN_PREFIX_RE, '[REDACTED]');
+  // Mailchimp pattern (35-37 chars) sits between the prefix sweep and the
+  // long-token sweep — must run before LONG_TOKEN_RE so an unredacted
+  // Mailchimp key doesn't pass through (LONG_TOKEN_RE's 40-char floor
+  // wouldn't catch it).
+  out = out.replace(MAILCHIMP_KEY_RE, '[REDACTED]');
   out = out.replace(LONG_TOKEN_RE, '[REDACTED]');
   return out;
 }
