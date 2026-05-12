@@ -2346,8 +2346,54 @@ function translateTool(toolName, input) {
       'amazon-ads-kill': { label: 'Pause this Amazon campaign', cost: 'Free' },
       'api-key-setup': { label: 'Set up an image generation account', cost: 'Free' },
       'verify-key':    { label: 'Verify your API connection', cost: 'Free' },
+      // Mailchimp destructive actions — these card via the new
+      // BASH_CARDED_DESTRUCTIVE branch and on the MCP path via
+      // CARDED_DESTRUCTIVE_ACTIONS. The card title MUST be a plain-
+      // English sentence describing the impact in user terms.
+      // Pre-fix the labels came out as "mailchimp — campaign-send"
+      // (opaque developer phrasing) — see post-audit UX finding.
+      'mailchimp-campaign-send':     { label: 'Send this email campaign to your Mailchimp audience', cost: 'No ad spend — sends to subscribers in your selected audience' },
+      'mailchimp-campaign-schedule': { label: 'Schedule this email campaign on Mailchimp', cost: 'No ad spend — sends to subscribers at the scheduled time' },
+      'mailchimp-campaign-send-test':{ label: 'Send a test of this campaign to your own inbox', cost: 'Test only — does not reach subscribers' },
+      'mailchimp-campaign-delete':   { label: 'Delete this Mailchimp campaign', cost: 'Removes the campaign draft (only works if not sent yet)' },
+      'mailchimp-automation-pause':  { label: 'Pause this Mailchimp automation workflow', cost: 'Stops sends until you resume the workflow' },
+      'mailchimp-automation-start':  { label: 'Resume this Mailchimp automation workflow', cost: 'Restarts queued sends' },
+      'mailchimp-template-create':   { label: 'Save a new email template to Mailchimp', cost: 'Free' },
+      'mailchimp-template-update':   { label: 'Update an existing Mailchimp template', cost: 'Free' },
+      'mailchimp-template-delete':   { label: 'Delete a Mailchimp template', cost: 'Free' },
+      'mailchimp-templates-bulk-upload': { label: 'Upload a folder of HTML files as Mailchimp templates', cost: 'Free' },
+      'mailchimp-campaign-create':   { label: 'Create a Mailchimp email campaign (draft)', cost: 'Free — does not send' },
+      'mailchimp-campaign-set-content': { label: 'Update the content of a Mailchimp campaign', cost: 'Free — does not send' },
     };
     if (action && translations[action]) return translations[action];
+  }
+
+  // MCP mailchimp tool — same friendly labels as the Bash path so the
+  // approval card surfaces "Send this email campaign to your Mailchimp
+  // audience" rather than "mailchimp — campaign-send" (the default).
+  //
+  // REGRESSION GUARD (2026-05-12, post-audit UX): the
+  // CARDED_DESTRUCTIVE_ACTIONS branch in handleToolApproval falls
+  // back to `${toolName.replace('mcp__merlin__', '')} — ${action}`
+  // when translateTool returns the generic label. Translate
+  // explicitly so users see a sentence-level impact statement, not
+  // dev-facing tool-and-action shorthand.
+  if (toolName === 'mcp__merlin__mailchimp' && input && input.action) {
+    const mcpMailchimpLabels = {
+      'campaign-send':     { label: 'Send this email campaign to your Mailchimp audience', cost: 'No ad spend — sends to subscribers in your selected audience' },
+      'campaign-schedule': { label: 'Schedule this email campaign on Mailchimp', cost: 'No ad spend — sends to subscribers at the scheduled time' },
+      'campaign-send-test':{ label: 'Send a test of this campaign to your own inbox', cost: 'Test only — does not reach subscribers' },
+      'campaign-delete':   { label: 'Delete this Mailchimp campaign', cost: 'Removes the campaign draft (only works if not sent yet)' },
+      'automation-pause':  { label: 'Pause this Mailchimp automation workflow', cost: 'Stops sends until you resume the workflow' },
+      'automation-start':  { label: 'Resume this Mailchimp automation workflow', cost: 'Restarts queued sends' },
+      'template-create':   { label: 'Save a new email template to Mailchimp', cost: 'Free' },
+      'template-update':   { label: 'Update an existing Mailchimp template', cost: 'Free' },
+      'template-delete':   { label: 'Delete a Mailchimp template', cost: 'Free' },
+      'templates-bulk-upload': { label: 'Upload a folder of HTML files as Mailchimp templates', cost: 'Free' },
+      'campaign-create':   { label: 'Create a Mailchimp email campaign (draft)', cost: 'Free — does not send' },
+      'campaign-set-content': { label: 'Update the content of a Mailchimp campaign', cost: 'Free — does not send' },
+    };
+    if (mcpMailchimpLabels[input.action]) return mcpMailchimpLabels[input.action];
   }
 
   // Generic Bash — use friendly description, never show raw command

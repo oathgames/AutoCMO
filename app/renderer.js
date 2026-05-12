@@ -5336,7 +5336,16 @@ const API_KEY_PLATFORMS = {
   // (audiences:read, campaigns:read/write, reports:read) and ship
   // today. The link drops users on the Account → Extras → API keys
   // page where the "Create A Key" button lives.
-  mailchimp:  { key: 'mailchimpApiKey', label: 'Mailchimp', placeholder: '32-hex-chars-us6', url: 'https://us1.admin.mailchimp.com/account/api/' },
+  // REGRESSION GUARD (2026-05-12, post-audit UX): the URL was
+  // hardcoded to https://us1.admin.mailchimp.com/account/api/ —
+  // that only works for the ~10% of users on the us1 datacenter;
+  // everyone else lands on a forced-redirect / sign-in loop.
+  // login.mailchimp.com is the canonical entry point; it auto-
+  // detects the user's account datacenter post-login and routes to
+  // the right account/api page. Placeholder hint now spells out
+  // the `-<dc>` suffix requirement so users don't paste a bare
+  // 32-hex string and hit the "must end with -<datacenter>" gate.
+  mailchimp:  { key: 'mailchimpApiKey', label: 'Mailchimp', placeholder: 'paste the full key (looks like abc123...-us6)', url: 'https://login.mailchimp.com/?redirect=%2Faccount%2Fapi%2F' },
   // AppLovin default tile click saves the MAX (publisher) key. Users who have
   // an AppDiscovery (advertiser) key instead — or both — can switch via the
   // tile's right-click "Use my API key" override, which opens the two-input
@@ -10024,6 +10033,25 @@ async function loadArchive(opts = {}) {
   const scrollContainer = grid ? grid.closest('.archive-panel-scroll') : null;
   const savedScrollTop = scrollContainer ? scrollContainer.scrollTop : 0;
 
+  // REGRESSION GUARD (2026-05-12, post-audit UX — archive-follow-new-content):
+  // Capture whether the user is "near the bottom" of the archive
+  // BEFORE the innerHTML wipe. If so, on reload we auto-scroll to
+  // the new bottom rather than restoring the old scrollTop —
+  // matches the Slack / iMessage / Messenger convention where a
+  // user reading at the tail of a feed gets new content pushed
+  // into view rather than missing it.
+  //
+  // Threshold = within 100px of the max scrollable position. Tight
+  // enough that scroll-and-stop-mid-feed users don't get jumped
+  // around; loose enough that "I'm at the bottom" feels reliable
+  // even when scrollbar snap can leave a 1-2px gap.
+  const FOLLOW_NEW_CONTENT_THRESHOLD_PX = 100;
+  let userWasNearBottom = false;
+  if (scrollContainer && !resetScroll) {
+    const oldMax = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
+    userWasNearBottom = oldMax > 0 && (oldMax - savedScrollTop) <= FOLLOW_NEW_CONTENT_THRESHOLD_PX;
+  }
+
   loading.style.display = 'block';
   grid.innerHTML = '';
   empty.style.display = 'none';
@@ -10036,13 +10064,14 @@ async function loadArchive(opts = {}) {
 
   // Wire up the scroll-restore observer ONLY when:
   //   • The caller asked us to preserve (resetScroll === false), AND
-  //   • There's something to restore (savedScrollTop > 0), AND
+  //   • There's something to restore (savedScrollTop > 0) OR the user
+  //     was near the bottom (which we want to follow on reload), AND
   //   • We can locate the scroll container, AND
   //   • The MutationObserver API is available (always true in Chromium).
   // resetScroll=true short-circuits — the rebuild's natural innerHTML
   // wipe sends the panel to the top, exactly the desired UX for filter
   // / search / refresh-button paths.
-  if (!resetScroll && savedScrollTop > 0 && scrollContainer && typeof MutationObserver === 'function') {
+  if (!resetScroll && (savedScrollTop > 0 || userWasNearBottom) && scrollContainer && typeof MutationObserver === 'function') {
     let restored = false;
     const tryRestore = () => {
       if (restored) return;
@@ -10053,7 +10082,12 @@ async function loadArchive(opts = {}) {
       // the edge case of slow image-size resolution.
       const max = Math.max(0, scrollContainer.scrollHeight - scrollContainer.clientHeight);
       if (max <= 0) return; // still empty; keep observing
-      scrollContainer.scrollTop = Math.min(savedScrollTop, max);
+      // Follow-new-content: if the user was within 100px of the
+      // bottom pre-reload, snap to the NEW bottom instead of
+      // restoring the old scrollTop. Matches the Slack/iMessage
+      // convention. Otherwise restore the saved position clamped
+      // to the new max.
+      scrollContainer.scrollTop = userWasNearBottom ? max : Math.min(savedScrollTop, max);
       restored = true;
       obs.disconnect();
     };
