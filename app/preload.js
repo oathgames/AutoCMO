@@ -165,10 +165,17 @@ contextBridge.exposeInMainWorld('merlin', {
   refreshPerf: (brand, days) => ipcRenderer.invoke('refresh-perf', assertBrand(brand), Number.isInteger(days) && days > 0 && days <= 365 ? days : undefined),
   getPerfUpdated: (brand) => ipcRenderer.invoke('get-perf-updated', assertBrand(brand)),
   getActivityFeed: (brand, limit) => ipcRenderer.invoke('get-activity-feed', assertBrand(brand), assertInt(limit, 50)),
-  // getActivityFeedFull reads the brand's activity.jsonl in its entirety
-  // (subject to a 10 MB safety cap). Used by the export + search-all paths
-  // in the activity feed, where tailing 50 entries is not enough.
-  getActivityFeedFull: (brand) => ipcRenderer.invoke('get-activity-feed-full', assertBrand(brand)),
+  // getActivityFeedFull reads the brand's activity.jsonl up to a paginated
+  // tail (default 2000 entries; 50000 hard cap for the export path). Used by
+  // the export + search-all paths in the activity feed.
+  // RSI-archive-perf iter 1, fix 1-5: limit param is optional; main-side
+  // default keeps the handler from synchronously parsing 10 MB of JSONL on
+  // the event loop (300-850ms blocker).
+  getActivityFeedFull: (brand, limit) => ipcRenderer.invoke(
+    'get-activity-feed-full',
+    assertBrand(brand),
+    Number.isInteger(limit) && limit > 0 && limit <= 50000 ? limit : undefined,
+  ),
 
   // Archive
   getArchiveItems: (filters) => ipcRenderer.invoke('get-archive-items', assertObj(filters)),
@@ -224,8 +231,15 @@ contextBridge.exposeInMainWorld('merlin', {
   // mounts an fs.watch on results/ and sends `archive-changed` whenever
   // the tree changes (new run folder, external drop, bulk trash). Returns
   // an unsubscribe function so the caller can detach on tab teardown.
+  //
+  // RSI-archive-perf iter 1, fix 1-3: payload now carries `{ paths,
+  // truncated }` so the renderer can short-circuit a full reload when only
+  // a known-unimportant set of paths changed. Callback signature is
+  // (payload?) — back-compat for any caller that ignores it.
   onArchiveChanged: (cb) => {
-    const h = () => { try { cb(); } catch {} };
+    const h = (_event, payload) => {
+      try { cb(payload && typeof payload === 'object' ? payload : null); } catch {}
+    };
     ipcRenderer.on('archive-changed', h);
     return () => ipcRenderer.removeListener('archive-changed', h);
   },
