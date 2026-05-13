@@ -201,7 +201,8 @@ sending the user to Ads Manager when they ask "what audiences do I have",
 | `audit-audience-rule` | `brand`, `adId` (audience id) | The full targeting rule for one audience (raw rule blob preserved). Use when you need to know exactly *how* an audience is defined. |
 | `audit-retargeting-cascade` | `brand`, optional `status` | Walks active ad sets and cross-references `custom_audiences` ∩ `excluded_custom_audiences`. Flags the classic "include site visitors, forget to exclude purchasers" leak — the #1 cause of paying to retarget your own buyers. |
 | `list-conversions` | `brand`, optional `limit` | Every custom conversion: id, name, custom_event_type, last fired time, archived flag, default conversion value. |
-| `audit-pixel` | `brand`, optional `adId` (override pixel id) | Pixel diagnostics: match_rate_approx, server_events_match_rate, last fired time, automatic-matching state, top events over the last 7 days, plus per-pixel findings (low match rate, no recent fires, missing Purchase events, automatic matching off). |
+| `audit-pixel` | `brand`, optional `adId` (override pixel id) | Pixel health: last fired time, automatic-matching state, top events over the last 7 days, plus `match_rate_approx` where the Marketing API still exposes it. Flags never-fired pixels, automatic matching off, no Purchase events in last 7d. For per-event match quality use `audit-events` instead. |
+| `audit-events` | `brand`, optional `adId` (override pixel id) | Per-event Event Match Quality (EMQ) — mirrors the EMQ column in Events Manager → Data Sources. Returns a row per event with Grade (Great ≥8 / Good ≥6 / Low <6), 7d event count, and plain-English findings ("Match quality is low — turn on Automatic Advanced Matching, verify CAPI sends hashed email + phone"). Use to answer "is my pixel set up right" / "audit my events" / "check EMQ" / "is my CAPI sending the right params". |
 | `audit-frequency-caps` | `brand`, optional `status` | Every active ad set's `frequency_control_specs`. Flags ad sets with no cap configured (fatigue risk). |
 | `audit-catalog` | `brand`, `catalogId`, optional `limit` | Catalog product status counts (review_status, availability), top disapproval reasons, sample of disapproved products. Find catalogId via `meta_ads({action: "catalog"})`. |
 
@@ -301,7 +302,8 @@ Foreplay indexes 100M+ Meta/TikTok/LinkedIn ads worldwide. **Covers the US and a
 - "list my custom audiences" / "what audiences do I have" / "how big is X audience" → `meta_audit({action: "list-audiences"})`
 - "what's the rule for X audience" / "how is X audience defined" → `meta_audit({action: "audit-audience-rule", adId: "<audience-id>"})`
 - "list my custom conversions" / "what custom conversions are wired up" → `meta_audit({action: "list-conversions"})`
-- "is my pixel healthy" / "what's my pixel match quality" / "pixel diagnostics" / "match rate" → `meta_audit({action: "audit-pixel"})`
+- "is my pixel healthy" / "pixel diagnostics" / "is my pixel firing" → `meta_audit({action: "audit-pixel"})`
+- "what's my pixel match quality" / "check EMQ" / "audit my events" / "is my CAPI sending the right params" / "are my events set up right" → `meta_audit({action: "audit-events"})`
 - "are my ad sets capped" / "frequency caps" / "fatigue check" → `meta_audit({action: "audit-frequency-caps"})`
 - "is my catalog healthy" / "any disapproved products" / "audit my facebook catalog" → `meta_audit({action: "audit-catalog", catalogId: "<id>"})` (find id via `meta_ads({action: "catalog"})`)
 - "insights" / "performance" on a specific platform → platform's `insights` (prefer `dashboard` for aggregate — see `merlin-analytics`)
