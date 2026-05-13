@@ -2504,30 +2504,54 @@ merlin.onApprovalRequest(({ toolUseID, label, cost, budget }) => {
 
   approval.classList.remove('hidden');
 
-  // 15-minute countdown (matches backend APPROVAL_TIMEOUT_MS)
-  let secondsLeft = 900;
+  // 15-minute countdown (matches backend APPROVAL_TIMEOUT_MS).
+  //
+  // RSI-archive-perf iter 2, fix 2-3: replace setInterval(1000) with a
+  // two-phase setTimeout schedule. The original fired 900× per approval
+  // even though the UI only renders countdown text during the final 60
+  // seconds — 840 wakeups (14 min × 60s) of pure overhead per modal.
+  // The new shape:
+  //   • Phase 1: one 840-second setTimeout. No ticks until the warning
+  //     window opens.
+  //   • Phase 2: a recursive 1-second setTimeout chain for the final 60
+  //     seconds, updating DOM only while the warning is visible.
+  // _approvalCountdown holds a setTimeout handle (was: setInterval); the
+  // cleanup path uses clearTimeout explicitly for honesty.
   const savedCost = cost;
-  _approvalCountdown = setInterval(() => {
+  const APPROVAL_WARN_SECONDS = 60;
+  const APPROVAL_TOTAL_SECONDS = 900;
+  let secondsLeft = APPROVAL_TOTAL_SECONDS;
+  let _approvalTimerActive = true;
+  const finishApprovalTimeout = () => {
+    if (!_approvalTimerActive) return;
+    _approvalTimerActive = false;
+    _approvalCountdown = null;
+    approval.classList.add('hidden');
+    costEl.style.color = '';
+    budgetEl.innerHTML = '';
+    // Show toast so user knows it timed out
+    const bubble = addClaudeBubble();
+    textBuffer = `⏱ Approval timed out for: ${label}. Ask me again if you'd like to retry.`;
+    finalizeBubble();
+  };
+  const tickWarnPhase = () => {
+    if (!_approvalTimerActive) return;
+    if (secondsLeft <= 0) { finishApprovalTimeout(); return; }
+    costEl.textContent = `Expires in ${secondsLeft}s`;
+    costEl.style.color = '#ef4444';
     secondsLeft--;
-    if (secondsLeft <= 60) {
-      costEl.textContent = `Expires in ${secondsLeft}s`;
-      costEl.style.color = '#ef4444';
-    }
-    if (secondsLeft <= 0) {
-      clearInterval(_approvalCountdown);
-      _approvalCountdown = null;
-      approval.classList.add('hidden');
-      costEl.style.color = '';
-      budgetEl.innerHTML = '';
-      // Show toast so user knows it timed out
-      const bubble = addClaudeBubble();
-      textBuffer = `⏱ Approval timed out for: ${label}. Ask me again if you'd like to retry.`;
-      finalizeBubble();
-    }
-  }, 1000);
+    _approvalCountdown = setTimeout(tickWarnPhase, 1000);
+  };
+  // Phase 1: wait until the warning window (last APPROVAL_WARN_SECONDS).
+  _approvalCountdown = setTimeout(() => {
+    if (!_approvalTimerActive) return;
+    secondsLeft = APPROVAL_WARN_SECONDS;
+    tickWarnPhase();
+  }, (APPROVAL_TOTAL_SECONDS - APPROVAL_WARN_SECONDS) * 1000);
 
   const clearApproval = () => {
-    if (_approvalCountdown) { clearInterval(_approvalCountdown); _approvalCountdown = null; }
+    _approvalTimerActive = false;
+    if (_approvalCountdown) { clearTimeout(_approvalCountdown); _approvalCountdown = null; }
     approval.classList.add('hidden');
     costEl.style.color = '';
     budgetEl.innerHTML = '';
@@ -4654,29 +4678,50 @@ async function renderWisdom(w) {
   //   Row 1: Top Hooks · Top Platforms · Best Formats   (what's winning)
   //   Row 2: Image Models · Video Models · Best Timing   (how/when)
   // Keeping Image + Video adjacent makes the "pick a model" comparison obvious.
+  // RSI-archive-perf iter 3, fix 3-2: precompute the per-card max once.
+  // Pre-fix: each of the 5 cards spread its full items array into Math.max
+  // (Math.max(...arr.map(...))) — 5× O(n) map + 5× argument-spread arity.
+  // On a brand with rolling-history wisdom (50+ samples per metric per
+  // vertical) that's 250 map iters per render plus VM call-arity overhead.
+  // Single-pass loop is O(n) and allocates nothing per call.
+  const maxVal = (items) => {
+    if (!items || !items.length) return 1;
+    let m = -Infinity;
+    for (let i = 0; i < items.length; i++) {
+      const v = items[i].val;
+      if (v > m) m = v;
+    }
+    return m === -Infinity ? 1 : m;
+  };
+  const hookMax = maxVal(hookItems);
+  const platMax = maxVal(platItems);
+  const fmtMax  = maxVal(fmtItems);
+  const imgMax  = maxVal(imgItems);
+  const vidMax  = maxVal(vidItems);
+
   grid.innerHTML = `
     ${benchmarkHtml}
     ${intelHtml}
     ${seasonalHtml}
     <div class="wisdom-card">
       <div class="wisdom-card-title">Top Hooks <span class="wisdom-card-unit">avg ROAS</span></div>
-      ${rankRows(hookItems, i => i.val, 'color-hooks', hookItems.length ? Math.max(...hookItems.map(i => i.val)) : 1)}
+      ${rankRows(hookItems, i => i.val, 'color-hooks', hookMax)}
     </div>
     <div class="wisdom-card">
       <div class="wisdom-card-title">Top Platforms <span class="wisdom-card-unit">${platformHasRoas ? 'avg ROAS' : 'avg CTR'}</span></div>
-      ${rankRows(platItems, i => i.val, 'color-platforms', platItems.length ? Math.max(...platItems.map(i => i.val)) : 1)}
+      ${rankRows(platItems, i => i.val, 'color-platforms', platMax)}
     </div>
     <div class="wisdom-card">
       <div class="wisdom-card-title">Best Formats <span class="wisdom-card-unit">avg ROAS</span></div>
-      ${rankRows(fmtItems, i => i.val, 'color-formats', fmtItems.length ? Math.max(...fmtItems.map(i => i.val)) : 1)}
+      ${rankRows(fmtItems, i => i.val, 'color-formats', fmtMax)}
     </div>
     <div class="wisdom-card">
       <div class="wisdom-card-title">Image Models <span class="wisdom-card-unit">avg ROAS</span></div>
-      ${rankRows(imgItems, i => i.val, 'color-img', imgItems.length ? Math.max(...imgItems.map(i => i.val)) : 1)}
+      ${rankRows(imgItems, i => i.val, 'color-img', imgMax)}
     </div>
     <div class="wisdom-card">
       <div class="wisdom-card-title">Video Models <span class="wisdom-card-unit">avg ROAS</span></div>
-      ${rankRows(vidItems, i => i.val, 'color-vid', vidItems.length ? Math.max(...vidItems.map(i => i.val)) : 1)}
+      ${rankRows(vidItems, i => i.val, 'color-vid', vidMax)}
     </div>
     <div class="wisdom-card">
       <div class="wisdom-card-title">Best Timing</div>
@@ -4978,13 +5023,18 @@ function loadConnections() {
   // accent doesn't flicker through the async window. pointer-events
   // are suppressed via the .loading CSS class so a click during the
   // fetch can't fire the OAuth flow against ambiguous state.
+  // RSI-archive-perf iter 3, fix 3-3: reuse the tile NodeList across all
+  // three branches (pre-loading paint, safety timer, resolved branch).
+  // Pre-fix, the same selector ran three times per refresh; on a brand
+  // switch this fires per change. The NodeList is captured-once and
+  // stays valid because the tiles' DOM identity doesn't change between
+  // these phases (only classes mutate).
   const _preTiles = document.querySelectorAll('#universal-tiles .magic-tile, #brand-tiles .magic-tile');
   _preTiles.forEach(t => t.classList.add('loading'));
   // Safety: even if the resolve callback never runs, drop .loading
   // after 10s so tiles aren't stuck wait-cursor forever.
   const _loadingClearTimer = setTimeout(() => {
-    document.querySelectorAll('#universal-tiles .magic-tile.loading, #brand-tiles .magic-tile.loading')
-      .forEach(t => t.classList.remove('loading'));
+    _preTiles.forEach(t => t.classList.remove('loading'));
   }, 10000);
 
   // REGRESSION GUARD (2026-05-10, BUG-F003): merlin.getConnectedPlatforms
@@ -5003,7 +5053,9 @@ function loadConnections() {
     _preTiles.forEach(t => t.classList.remove('loading'));
     if (window._connLoadSeq !== mySeq) return;
     if (getActiveBrandSelection() !== brand) return;
-    const allTiles = document.querySelectorAll('#universal-tiles .magic-tile, #brand-tiles .magic-tile');
+    // RSI-archive-perf iter 3, fix 3-3: reuse the pre-paint tile NodeList.
+    // The selector and the underlying tiles haven't changed since line ~5026.
+    const allTiles = _preTiles;
 
     // Reset every tile to its default state first. Stubbed platforms get
     // `.unavailable` sticky-applied so they stay dark gray regardless of
