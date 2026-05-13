@@ -142,7 +142,55 @@ function atomicWrite(targetPath, contents) {
 // shape from cwd will match via brand_manifest.go's
 // brandManifestProductRefMatchesCanonical (which tries both manifest-
 // relative and cwd-relative candidates).
-function buildManifest(brand, productSlugs, productAssets, logoBasename) {
+// US Census-aligned race distribution used as the fail-safe when a persona
+// declares no race_distribution (RSI iter 5 invariant). Mirrors
+// autocmo-core/brand_manifest.go's DefaultUSCensusRaceDistribution so the
+// binary's matrix sampler picks the same buckets the validator expects.
+// NEVER mono-ethnic — that's the load-bearing brand-representation
+// invariant from the DoD.
+const DEFAULT_US_CENSUS_RACE_DISTRIBUTION = {
+  african_american: 0.13,
+  asian: 0.06,
+  hispanic_latino: 0.19,
+  white: 0.58,
+  other: 0.04,
+};
+
+// DEFAULT_ANDROMEDA_CONTEXTS mirrors autocmo-core's DefaultAndromedaContexts.
+// Brands can override via brand-manifest.andromeda_axes.contexts; this is
+// what ships when the scaffolder generates a fresh manifest.
+const DEFAULT_ANDROMEDA_CONTEXTS = [
+  'at-home', 'kitchen', 'bedroom', 'bathroom',
+  'on-the-go', 'commute', 'desk-at-work',
+  'workout', 'outdoors', 'social', 'travel',
+];
+
+// DEFAULT_ANDROMEDA_STYLES mirrors autocmo-core's DefaultAndromedaStyles.
+const DEFAULT_ANDROMEDA_STYLES = [
+  'lifestyle-candid', 'lifestyle-staged', 'layflat',
+  'product-hero-clean', 'ugc-still', 'editorial',
+  'macro-detail', 'environmental-portrait',
+];
+
+// applyRaceDefault returns a persona with race_distribution defaulted to
+// US Census when the caller didn't declare one OR the declared map is empty.
+// Load-bearing fail-safe — defends the never-mono-ethnic invariant per the
+// DoD. If a caller insists on overriding, they must pass an explicit
+// multi-ethnic map (validator at the Go side will refuse a single-bucket
+// override).
+function applyRaceDefault(persona) {
+  if (!persona || typeof persona !== 'object') return persona;
+  const out = { ...persona };
+  if (!out.demographics) out.demographics = {};
+  const rd = out.demographics.race_distribution;
+  if (!rd || typeof rd !== 'object' || Object.keys(rd).length === 0) {
+    out.demographics = { ...out.demographics, race_distribution: { ...DEFAULT_US_CENSUS_RACE_DISTRIBUTION } };
+  }
+  return out;
+}
+
+function buildManifest(brand, productSlugs, productAssets, logoBasename, extras) {
+  const e = extras || {};
   const manifest = {
     $schema: 'https://schemas.merlin.tools/brand-manifest/v1.json',
     _scaffold: {
@@ -175,6 +223,47 @@ function buildManifest(brand, productSlugs, productAssets, logoBasename) {
   // Drop empty products[].assets entries — the binary's canonical set
   // skips empty Assets maps, but emitting them as `{}` is noise.
   manifest.products = manifest.products.filter((p) => Object.keys(p.assets).length > 0);
+
+  // ── Persona × LP × Andromeda (RSI iter 5, 2026-05-13) ──────────────────
+  //
+  // The scaffolder accepts structured personas + landing pages + andromeda
+  // axes through the `extras` parameter. Caller (the merlin-setup SKILL
+  // running in the agent's context) is responsible for synthesizing the
+  // personas from brand.md's "Target Audience" section + the product list,
+  // and discovering landing pages via brand-scraper.js or manual entry.
+  //
+  // For each persona passed in, the scaffolder applies the US Census race
+  // distribution default when no race_distribution is declared. This is
+  // the fail-safe that defends the never-mono-ethnic invariant from the
+  // DoD.
+  //
+  // For andromeda_axes, the scaffolder ships the DEFAULT_ANDROMEDA_CONTEXTS
+  // / DEFAULT_ANDROMEDA_STYLES lists when the caller doesn't override. The
+  // binary's AndromedaContextsOrDefault() also falls back when the field
+  // is missing — defaulting in the scaffolder gives the brand a concrete
+  // editable starting point.
+  if (Array.isArray(e.personas) && e.personas.length > 0) {
+    manifest.personas = e.personas.map(applyRaceDefault);
+  }
+  if (Array.isArray(e.landingPages) && e.landingPages.length > 0) {
+    manifest.landing_pages = e.landingPages;
+  }
+  // Always default andromeda_axes so a fresh manifest has the discoverable
+  // shape (brand can edit). When the caller passes their own, we honor it.
+  manifest.andromeda_axes = {
+    contexts: Array.isArray(e.andromedaContexts) && e.andromedaContexts.length > 0
+      ? e.andromedaContexts
+      : [...DEFAULT_ANDROMEDA_CONTEXTS],
+    styles: Array.isArray(e.andromedaStyles) && e.andromedaStyles.length > 0
+      ? e.andromedaStyles
+      : [...DEFAULT_ANDROMEDA_STYLES],
+  };
+  if (Array.isArray(e.forbiddenPersonas) && e.forbiddenPersonas.length > 0) {
+    manifest.forbidden_personas = e.forbiddenPersonas;
+  }
+  if (Array.isArray(e.forbiddenLandingPages) && e.forbiddenLandingPages.length > 0) {
+    manifest.forbidden_landing_pages = e.forbiddenLandingPages;
+  }
   return manifest;
 }
 
@@ -270,10 +359,16 @@ function scaffoldBrandManifest(appRoot, brand, opts) {
     return result;
   }
 
-  // Build + write.
-  const manifest = buildManifest(brand, productSlugs, productAssets, logoBasename);
+  // Build + write. The `opts.extras` object lets callers (the merlin-setup
+  // SKILL synthesizing personas in iter 5) pass structured personas +
+  // landing pages + andromeda axis overrides + forbidden_* lists. Empty
+  // → scaffolder ships the legacy asset-only manifest plus the default
+  // andromeda_axes block.
+  const manifest = buildManifest(brand, productSlugs, productAssets, logoBasename, options.extras);
   result.products = manifest.products.length;
   result.hadLogo = !!logoBasename;
+  result.hadPersonas = Array.isArray(manifest.personas) && manifest.personas.length > 0;
+  result.hadLandingPages = Array.isArray(manifest.landing_pages) && manifest.landing_pages.length > 0;
 
   const json = JSON.stringify(manifest, null, 2) + '\n';
   if (!atomicWrite(manifestPath, json)) {
