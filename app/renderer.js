@@ -10999,10 +10999,32 @@ function createArchiveCard(item) {
   else if (item.qaPassed === true) extraBadges += `<span class="archive-card-badge badge-qa-pass" title="Quality gate passed">✓ QA</span>`;
   if (item.source === 'loose') extraBadges += `<span class="archive-card-badge badge-source-loose" title="Loose file — no metadata">legacy</span>`;
 
+  // RSI iter 4 (2026-05-13): when this run was matrix-driven, surface the
+  // persona + landing-page binding on the card so the user can see
+  // "→ <persona> → <LP path>" at a glance. Both fields are optional —
+  // pre-iter-4 runs have neither (just renders no extra line) so the
+  // archive UI stays backward-compatible.
+  let personaLpLine = '';
+  if (item.personaLabel || item.personaSlug || item.landingPageUrl) {
+    const personaShown = escapeHtml(item.personaLabel || item.personaSlug || '');
+    let lpShown = '';
+    if (item.landingPageUrl) {
+      // Show just the path portion for brevity (host + scheme reads as noise
+      // on a 200px-wide card). Falls back to the full string if URL parse fails.
+      try {
+        const u = new URL(item.landingPageUrl);
+        lpShown = escapeHtml(u.pathname + (u.search || ''));
+      } catch { lpShown = escapeHtml(item.landingPageUrl); }
+    }
+    const sep = personaShown && lpShown ? ' <span style="opacity:0.6">→</span> ' : '';
+    personaLpLine = `<div class="archive-card-persona-lp" title="${escapeHtml((item.personaLabel || item.personaSlug || '') + (item.landingPageUrl ? ' → ' + item.landingPageUrl : ''))}" style="font-size:11px;color:var(--text-dim);margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${personaShown}${sep}${lpShown}</div>`;
+  }
+
   card.innerHTML += `
     <div class="archive-card-info">
       <div class="archive-card-title">${escapeHtml(title)}</div>
       ${modelLabel ? `<div class="archive-card-model" title="${escapeHtml(item.model)}">${escapeHtml(modelLabel)}</div>` : ''}
+      ${personaLpLine}
       <div class="archive-card-meta">
         <span class="archive-card-badge ${badgeClass}">${badgeText}</span>
         <span>${time}</span>

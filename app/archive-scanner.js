@@ -332,6 +332,17 @@ function scanArchive(appRoot, filters = {}) {
           const t = new Date(meta.createdAt).getTime();
           if (!isNaN(t)) item.timestamp = t;
         }
+        // RSI iter 4 (2026-05-13): pass-through persona × LP × Andromeda
+        // signature fields written by the binary's runImagePipeline. The
+        // archive card render in renderer.js uses these to surface
+        // "→ <persona> → <LP path>" on every card. Missing on pre-iter-4
+        // runs — card render handles absence gracefully.
+        if (meta.personaSlug)    item.personaSlug    = meta.personaSlug;
+        if (meta.personaLabel)   item.personaLabel   = meta.personaLabel;
+        if (meta.landingPageUrl) item.landingPageUrl = meta.landingPageUrl;
+        if (meta.race)           item.race           = meta.race;
+        if (meta.context)        item.context        = meta.context;
+        if (meta.style)          item.style          = meta.style;
       }
     } catch (err) { console.warn(`[archive] Bad metadata in ${run.name}: ${err.message}`); }
 
