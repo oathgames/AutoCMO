@@ -668,9 +668,25 @@ function buildTools(tool, z, ctx) {
   //                              flags the classic "include site visitors,
   //                              forget to exclude purchasers" leak.
   //   list-conversions        — every custom conversion + when each last fired.
-  //   audit-pixel             — match-rate-approx + server-events match rate
-  //                              + 7d top events; flags low match rate, no
-  //                              recent fires, automatic-matching disabled.
+  //   audit-pixel             — pixel health: last_fired_time, automatic
+  //                              matching status, top events over 7d, plus
+  //                              match-rate-approx where the Marketing API
+  //                              still exposes it. Flags never-fired pixels,
+  //                              automatic matching disabled, no Purchase
+  //                              events in last 7d. server_events_match_rate
+  //                              was deprecated by Meta and is no longer
+  //                              requested — use audit-events for per-event
+  //                              match quality instead.
+  //   audit-events            — per-event Event Match Quality (EMQ) — the
+  //                              0-10 score Meta displays in Events Manager →
+  //                              Data Sources. Returns a row per event with
+  //                              Grade (Great ≥8 / Good ≥6 / Low <6), event
+  //                              count over 7d, and plain-English findings
+  //                              ("Match quality is low — turn on Automatic
+  //                              Advanced Matching, verify CAPI sends hashed
+  //                              email + phone"). Use this to answer "is my
+  //                              pixel set up right" / "audit my events" /
+  //                              "check EMQ".
   //   audit-frequency-caps    — every active ad set's frequency_control_specs;
   //                              flags ad sets with no cap (fatigue risk).
   //   audit-catalog           — review status counts + top disapproval reasons
@@ -682,7 +698,7 @@ function buildTools(tool, z, ctx) {
   // without a confirmation card.
   tools.push(defineTool({
     name: 'meta_audit',
-    description: 'Inspect Meta ad assets — list custom audiences and custom conversions, read the targeting rule of an audience, audit your retargeting cascade for the "forgot to exclude purchasers" leak, run pixel diagnostics (match rate, server events match rate, top events), list frequency caps across active ad sets, and audit a product catalog\'s review status. All actions are READ-ONLY GETs against the Graph API — never writes, never spend impact. Use when the user says "audit my retargeting", "what\'s my pixel match quality", "list my custom audiences", "what custom conversions do I have", "are my ad sets capped", or "is my catalog healthy".',
+    description: 'Inspect Meta ad assets — list custom audiences and custom conversions, read the targeting rule of an audience, audit your retargeting cascade for the "forgot to exclude purchasers" leak, run pixel diagnostics (last fired time, automatic matching status, top events, match rate where available), audit per-event Event Match Quality (EMQ) scores so the user can see exactly which events have a Low / Good / Great match grade and what to fix (mirrors the EMQ column in Events Manager → Data Sources), list frequency caps across active ad sets, and audit a product catalog\'s review status. All actions are READ-ONLY GETs against the Graph API — never writes, never spend impact. Use when the user says "audit my retargeting", "what\'s my pixel match quality", "audit my events setup", "are my events firing properly", "check my EMQ", "is my CAPI sending the right params", "list my custom audiences", "what custom conversions do I have", "are my ad sets capped", or "is my catalog healthy".',
     destructive: false,
     idempotent: true,
     costImpact: 'api',
@@ -696,11 +712,12 @@ function buildTools(tool, z, ctx) {
         'audit-retargeting-cascade',
         'list-conversions',
         'audit-pixel',
+        'audit-events',
         'audit-frequency-caps',
         'audit-catalog',
-      ]).describe('The audit operation to perform. All actions read-only.'),
+      ]).describe('The audit operation to perform. All actions read-only. audit-events surfaces per-event EMQ scores (0-10, graded Great/Good/Low) plus actionable fix advice for any event below 8.0 — call this when the user asks about match quality, CAPI param coverage, or "is my pixel set up right".'),
       brand: brandSchema.describe('Brand name for vault-scoped Meta credentials.'),
-      adId: z.string().optional().describe('For audit-audience-rule: the custom-audience numeric id. For audit-pixel: optional pixel id override (defaults to brand cfg metaPixelId).'),
+      adId: z.string().optional().describe('For audit-audience-rule: the custom-audience numeric id. For audit-pixel and audit-events: optional pixel id override (defaults to brand cfg metaPixelId).'),
       catalogId: z.string().optional().describe('For audit-catalog: the Meta product catalog id (find it via mcp__merlin__meta_ads({action:"catalog"}) or in Commerce Manager).'),
       status: z.enum(['active', 'all']).optional().describe('For audit-retargeting-cascade and audit-frequency-caps: filter ad sets. Default "active" (paused ad sets are noise).'),
       limit: z.number().optional().describe('Max records to return per page. Defaults: list-audiences=250, list-conversions=100, audit-catalog=200. Hard caps: 500.'),
@@ -710,6 +727,7 @@ function buildTools(tool, z, ctx) {
         args.action === 'list-audiences' ? 'audit-audiences' :
         args.action === 'list-conversions' ? 'audit-conversions' :
         args.action === 'audit-pixel' ? 'audit-pixel' :
+        args.action === 'audit-events' ? 'audit-events' :
         args.action === 'audit-frequency-caps' ? 'audit-frequency-caps' :
         args.action === 'audit-catalog' ? 'audit-catalog' :
         args.action === 'audit-retargeting-cascade' ? 'audit-retargeting-cascade' :
