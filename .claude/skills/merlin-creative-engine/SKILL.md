@@ -89,7 +89,7 @@ If everything resolves, no chat output yet. Move to Phase 1.
 
 ## Phase 1 — Build the randomization matrix (silent)
 
-Variety is engineered at sample-time, not filtered post-hoc. Sample N cells from an 8-axis space:
+Variety is engineered at sample-time, not filtered post-hoc. Sample N cells from a **13-axis space** (the 8 legacy axes + 5 added in RSI-persona-lp iter 3, 2026-05-13):
 
 | # | Axis | Cardinality | Source |
 |---|------|-------------|--------|
@@ -101,14 +101,25 @@ Variety is engineered at sample-time, not filtered post-hoc. Sample N cells from
 | 6 | Aspect ratio | 3 | `9:16` · `1:1` · `4:5` |
 | 7 | Emotional register | 8 | per brand.md persona |
 | 8 | varyDimension | 5 | `auto` · `scenario` · `lighting` · `subject` · `mood` (passed to mcp__merlin__content for Andromeda axis rotation when imageCount > 1) |
+| 9 | **Persona** | 3–5 | `brand-manifest.json` → `personas[].slug` — sets `personaSlug` on the brief |
+| 10 | **Landing page** | 1–N | `brand-manifest.json` → `landing_pages[].url` — sets `landingPageUrl` on the brief; persona↔LP compatibility enforced via `landing_pages[].persona_slugs[]` (sampler MUST never emit incompatible pair) |
+| 11 | **Race / representation** | 5 | per persona's `demographics.race_distribution` weights; falls back to US Census (`african_american`, `asian`, `hispanic_latino`, `white`, `other`) when not declared — sets `race` on the brief |
+| 12 | **Scene context** | 8–12 | `brand-manifest.json` → `andromeda_axes.contexts[]` (defaults: `at-home`, `kitchen`, `bedroom`, `bathroom`, `on-the-go`, `commute`, `desk-at-work`, `workout`, `outdoors`, `social`, `travel`) — sets `context` on the brief |
+| 13 | **Photographic style** | 6–8 | `brand-manifest.json` → `andromeda_axes.styles[]` (defaults: `lifestyle-candid`, `lifestyle-staged`, `layflat`, `product-hero-clean`, `ugc-still`, `editorial`, `macro-detail`, `environmental-portrait`) — sets `style` on the brief |
 
 ### Hard sampling rules
 
 - **No repeated `(demo, creative angle, ad-type module)` triple** in the same run — that 3-tuple is what most determines audience read
-- **`forbidden_angles` from brand.md = hard veto**; never sample
+- **`forbidden_angles` from brand-manifest.json = hard veto**; never sample
+- **`forbidden_personas` from brand-manifest.json = hard veto**; never sample (extends the angle-veto pattern to personas — RSI iter 3)
+- **`forbidden_landing_pages` from brand-manifest.json = hard veto**; never sample
 - **At-least-once-each on creative angles** before any reuse (forces breadth across the 10)
 - **At-least-once-each on ad-type modules** before any reuse (forces breadth across the 7)
-- **Awareness distribution** matches `--awareness=`; default `cold` = 80% problem-aware / 20% unaware; `all` = 60/30/10 cold/warm/hot
+- **At-least-once-each on Persona** before any reuse (RSI iter 3 — forces every brand persona to be exercised before any one gets a second variant)
+- **At-least-once-each on Landing page** before any reuse (RSI iter 3 — forces every funnel entry point to be exercised)
+- **At-least-once-each on Race** before any reuse (RSI iter 3 — load-bearing demographic-representation invariant; defaults to US Census distribution when manifest doesn't override; NEVER mono-ethnic batch)
+- **Persona ↔ Landing-page compatibility = HARD** — sampler MUST verify the LP's `persona_slugs[]` contains the sampled persona's slug before pairing them. Incompatible pairs are sampler bugs; CheckBrief's `persona_landing_page_incompatible` error catches stragglers.
+- **Awareness distribution** matches `--awareness=`; default `cold` = 80% problem-aware / 20% unaware; `all` = 60/30/10 cold/warm/hot. When a persona declares its own `awareness_level`, that overrides the global distribution for variants tagged to that persona.
 - **Demo distribution** honors brand-manifest avatar weights; if absent, even split across roster
 - **Aspect distribution** balanced across `--ratio=` set; weight 9:16 toward UGC + Talking-Head, 1:1 toward Hero, 4:5 toward Lifestyle/Talking-Head
 
@@ -118,16 +129,33 @@ Variety is engineered at sample-time, not filtered post-hoc. Sample N cells from
 - Match ad-type module to format intent (UGC → 9:16; Hero → 1:1 + 4:5; Talking-Head → 4:5 + 9:16; SaaS → 16:9 or 1:1)
 - Match `varyDimension` to angle cluster (mechanism/insider angles → `subject`; identity_shift/social_proof_pivot → `mood`; hidden_cost/failed_solution → `scenario`)
 - Honor `preferred_angles` from brand.md (sample these first to satisfy at-least-once)
+- Match persona `awareness_level` to the LP's `awareness_level` — a problem-aware persona pairs naturally with a problem-aware LP. Sampler may deliberately diverge (e.g. unaware persona warmed by a problem-aware LP that introduces the problem), but the default is matched.
+- Match **scene context** to persona `jobs_to_be_done` — a "feed family on a budget" JTBD pairs with `kitchen` / `at-home` / `commute` more naturally than `gym` / `social`.
+- Match **photographic style** to ad-type module — UGC → `ugc-still` / `lifestyle-candid`; Hero → `product-hero-clean` / `editorial`; Talking-Head → `environmental-portrait`.
 
 ### Matrix integrity check (silent)
 
-Before drafting any brief, generate the matrix as an internal table — N rows × 8 axis values — and inspect for collapse:
+Before drafting any brief, generate the matrix as an internal table — N rows × 13 axis values — and inspect for collapse:
 
-- ≤2 distinct values on any axis across the run = re-sample that axis
+- ≤2 distinct values on **any axis** across the run = re-sample that axis (applies to all 13 axes including the 5 new ones)
 - Three or more `(demo, awareness)` pairs collapsed onto the same angle = re-sample
-- Brand-manifest's `visual_direction.do_not_use` reflected as a banned aesthetic in every brief's negative-anchor list
+- Brand-manifest's `visual_direction.never[]` reflected as a banned aesthetic in every brief's negative-anchor list
+- **NEW**: Any `(persona, landing_page)` pair that isn't in `manifest.landing_pages[].persona_slugs[]` for the sampled LP = sampler bug, abort & re-sample
+- **NEW**: A run where every variant lands on the SAME `race` bucket = re-sample race axis (defends the never-mono-ethnic invariant)
 
 This is reasoning, not output. Nothing reaches the chat.
+
+### Sampling order (matters)
+
+The 5 new axes interact, so sampling order is fixed for determinism + compatibility:
+
+1. **Persona** (axis 9) — picked first per variant, at-least-once-each
+2. **Landing page** (axis 10) — sampled from `manifest.landing_pages[]` filtered to `persona_slugs[].contains(persona)` (incompatible filter applied at pick time, not post-validation)
+3. **Race** (axis 11) — sampled from the persona's `demographics.race_distribution` weights (or US Census fallback). At-least-once-each ACROSS THE FULL RUN, not per persona — a single-persona 20-image batch still hits all 5 race buckets.
+4. **Scene context** (axis 12) — sampled from `manifest.andromeda_axes.contexts[]` (or default 11-context list)
+5. **Photographic style** (axis 13) — sampled from `manifest.andromeda_axes.styles[]` (or default 8-style list)
+
+Then the legacy 8 axes are sampled on top, with their existing rules.
 
 ---
 
