@@ -1526,3 +1526,62 @@ test("RSI 1-4: archive render chunks via DocumentFragment + requestIdleCallback"
     "_archiveVisibleItems must still hold the COMPLETE filtered list (viewer prev/next depends on this)");
 });
 
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RSI-archive-perf iter 2-3 — renderer perf polish
+// Verifies the approval countdown, wisdom max-precompute, and
+// connection-status query-reuse changes.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('RSI 2-3: approval countdown uses two-phase setTimeout, not setInterval(1000)', () => {
+  // Pre-fix: setInterval(1000) fired 900× per modal even though the UI
+  // only updated text during the final 60s. Post-fix: a Phase 1 setTimeout
+  // sleeps until the warning window, then a Phase 2 recursive setTimeout
+  // chain ticks once per second only while the warning is on-screen.
+  assert.ok(/APPROVAL_WARN_SECONDS\s*=\s*60/.test(RENDERER_JS),
+    'warning window must be a named constant (60s)');
+  assert.ok(/APPROVAL_TOTAL_SECONDS\s*=\s*900/.test(RENDERER_JS),
+    'total countdown must be a named constant (900s = 15 min)');
+  assert.ok(/_approvalCountdown\s*=\s*setTimeout\(\(\)\s*=>\s*{[\s\S]*?secondsLeft\s*=\s*APPROVAL_WARN_SECONDS/.test(RENDERER_JS),
+    'Phase 1 must be a single setTimeout that sleeps until the warning window');
+  assert.ok(/tickWarnPhase\s*=\s*\(\)\s*=>/.test(RENDERER_JS),
+    'Phase 2 must be a named tick function');
+  assert.ok(/_approvalCountdown\s*=\s*setTimeout\(tickWarnPhase,\s*1000\)/.test(RENDERER_JS),
+    'tick must schedule itself via setTimeout, not setInterval');
+  // The cleanup path must use clearTimeout (matches the new handle type).
+  assert.ok(/clearTimeout\(_approvalCountdown\)/.test(RENDERER_JS),
+    'cleanup must call clearTimeout on the setTimeout handle');
+});
+
+test('RSI 3-2: wisdom cards precompute max value once per array', () => {
+  // Pre-fix: each of the 5 wisdom cards inlined Math.max(...arr.map(...))
+  // — 5× O(n) map iterations + spread-arity arg unpacking on every wisdom
+  // render. Post-fix: a single maxVal() helper computes each array's max
+  // in one pass and the result is referenced from the template.
+  assert.ok(/const maxVal\s*=\s*\(items\)\s*=>/.test(RENDERER_JS),
+    'maxVal helper must exist as a single-pass O(n) loop');
+  // Each precomputed max lands in a named const.
+  assert.ok(/const hookMax\s*=\s*maxVal\(/.test(RENDERER_JS), 'hookMax must be precomputed via maxVal()');
+  assert.ok(/const platMax\s*=\s*maxVal\(/.test(RENDERER_JS), 'platMax must be precomputed via maxVal()');
+  assert.ok(/const fmtMax\s*=\s*maxVal\(/.test(RENDERER_JS),  'fmtMax must be precomputed via maxVal()');
+  assert.ok(/const imgMax\s*=\s*maxVal\(/.test(RENDERER_JS),  'imgMax must be precomputed via maxVal()');
+  assert.ok(/const vidMax\s*=\s*maxVal\(/.test(RENDERER_JS),  'vidMax must be precomputed via maxVal()');
+  // The template MUST use the precomputed names, not the Math.max spread.
+  assert.ok(/rankRows\(hookItems, i => i\.val, 'color-hooks', hookMax\)/.test(RENDERER_JS),
+    'rankRows for hooks must use precomputed hookMax');
+  assert.ok(/rankRows\(vidItems, i => i\.val, 'color-vid', vidMax\)/.test(RENDERER_JS),
+    'rankRows for video models must use precomputed vidMax');
+});
+
+test('RSI 3-3: connection-status reuses one tile NodeList across all branches', () => {
+  // Pre-fix: three querySelectorAll calls for the same selector (pre-paint,
+  // safety timer, resolved branch) — 3× DOM scan per brand change. Post-fix:
+  // the pre-paint NodeList is captured once and reused.
+  // The safety-timer setTimeout must use the cached _preTiles, not re-query.
+  assert.ok(/_loadingClearTimer\s*=\s*setTimeout\(\(\)\s*=>\s*{[\s\S]{0,200}_preTiles\.forEach\(t => t\.classList\.remove\('loading'\)\)/.test(RENDERER_JS),
+    'safety timer must reuse _preTiles instead of re-running the selector');
+  // The resolved branch must reuse _preTiles as allTiles.
+  assert.ok(/const allTiles\s*=\s*_preTiles;/.test(RENDERER_JS),
+    'resolved branch must alias _preTiles to allTiles instead of re-querying');
+});
+
