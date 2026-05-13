@@ -1339,3 +1339,79 @@ test('REGRESSION GUARD 2026-05-12: loadArchive follows-new-content when user was
   assert.ok(/scrollContainer\.scrollTop\s*=\s*userWasNearBottom\s*\?\s*max\s*:\s*Math\.min\(savedScrollTop,\s*max\)/.test(RENDERER_JS),
     'restore branch must snap to new max when userWasNearBottom, else clamp to savedScrollTop');
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// REGRESSION GUARD (2026-05-13, copy-button-tooltip-fix)
+//
+// The data-copy click handler used to silently no-op when
+// navigator.clipboard.writeText rejected (Electron unfocused-window, strict
+// origin policy, etc.) — paying users clicked the ⧉ icon next to inline
+// `<code>` and got nothing: no visible "Copied!" feedback because the
+// pre-fix shape only flipped a 12px button glyph for 1.5s. The fix has
+// three load-bearing pieces (renderer toast, preload bridge, main IPC
+// handler) and these tests pin each so a future refactor can't silently
+// regress the feedback contract.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test('REGRESSION GUARD 2026-05-13: copy-btn click handler shows toast on success', () => {
+  // The handler MUST call showCopyToast('Copied!') on success, not just
+  // flip the button text in place. The pre-fix shape ONLY did the in-place
+  // flip — users reported clicking and seeing nothing happen.
+  assert.ok(/showCopyToast\(['"]Copied!['"]\)/.test(RENDERER_JS),
+    'copy-btn success path must call showCopyToast("Copied!")');
+});
+
+test('REGRESSION GUARD 2026-05-13: copy-btn click handler shows toast on failure', () => {
+  // The failure path MUST also surface user feedback — silent failure is
+  // exactly the bug that triggered this fix.
+  assert.ok(/showCopyToast\(['"]Copy failed['"]\)/.test(RENDERER_JS),
+    'copy-btn failure path must call showCopyToast("Copy failed")');
+});
+
+test('REGRESSION GUARD 2026-05-13: copy-btn falls back to Electron clipboard when browser API rejects', () => {
+  // When navigator.clipboard.writeText rejects (common in Electron under
+  // strict permission policies), the handler must try merlin.copyText
+  // before declaring failure. Without this, the click is a silent no-op on
+  // every system that rejected the browser API once.
+  assert.ok(/merlin\.copyText/.test(RENDERER_JS),
+    'copy-btn must call merlin.copyText as Electron fallback');
+  // The fallback must be invoked from a catch handler, not the happy path.
+  assert.ok(/\.catch\(tryElectronFallback\)|\.catch\([^)]*merlin\.copyText/.test(RENDERER_JS),
+    'merlin.copyText must run from the .catch handler, not the success path');
+});
+
+test('REGRESSION GUARD 2026-05-13: copy-btn handler defends against corrupt data-copy attribute', () => {
+  // decodeURIComponent can throw on a malformed %XX sequence. The pre-fix
+  // shape would crash the handler silently (no toast, no feedback). The
+  // fix catches and tells the user.
+  assert.ok(/try\s*{[\s\S]*?decodeURIComponent\(btn\.dataset\.copy\)[\s\S]*?}\s*catch/.test(RENDERER_JS),
+    'decodeURIComponent must be inside a try/catch — malformed data-copy must not silently crash the handler');
+});
+
+test('REGRESSION GUARD 2026-05-13: preload exposes merlin.copyText IPC bridge', () => {
+  // The Electron fallback path needs the bridge. Without it, the
+  // renderer-side fallback would throw on undefined access and the toast
+  // would say "Copy failed" 100% of the time on systems where the browser
+  // API misbehaves — defeating the whole point of the fix.
+  const preloadJs = fs.readFileSync(path.join(APP_DIR, 'preload.js'), 'utf8');
+  assert.ok(/copyText:\s*\(text\)\s*=>\s*ipcRenderer\.invoke\(['"]copy-text['"]/.test(preloadJs),
+    'preload.js must expose merlin.copyText → ipcRenderer.invoke("copy-text", …)');
+  // The bridge must validate the input via assertStr with the same 1 MB
+  // cap as the main-side handler so a typo'd payload can't serialize the
+  // entire activity feed into the clipboard.
+  assert.ok(/copyText:.*assertStr\(text,\s*1024\s*\*\s*1024\)/.test(preloadJs),
+    'preload.js copyText must cap the payload at 1 MB via assertStr');
+});
+
+test('REGRESSION GUARD 2026-05-13: main.js registers copy-text IPC handler', () => {
+  const mainJs = fs.readFileSync(path.join(APP_DIR, 'main.js'), 'utf8');
+  assert.ok(/ipcMain\.handle\(['"]copy-text['"]/.test(mainJs),
+    'main.js must register the copy-text IPC handler');
+  // The handler must use Electron's clipboard.writeText.
+  const handlerMatch = mainJs.match(/ipcMain\.handle\(['"]copy-text['"][\s\S]+?clipboard\.writeText\(text\)/);
+  assert.ok(handlerMatch,
+    'copy-text handler must call clipboard.writeText(text) from electron.clipboard');
+  // And it must cap the payload to defend against runaway payloads.
+  assert.ok(/text\.length\s*>\s*1024\s*\*\s*1024/.test(mainJs),
+    'copy-text handler must reject payloads larger than 1 MB');
+});

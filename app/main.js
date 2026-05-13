@@ -6833,6 +6833,26 @@ ipcMain.handle('copy-image-data-url', (_, dataUrl) => {
   }
 });
 
+// Copy plain text to the OS clipboard via Electron's native clipboard API.
+// Used as a fallback by the renderer when navigator.clipboard.writeText
+// rejects — that browser API can silently fail in Electron when the window
+// isn't focused, on a file:// origin, or under strict permission policies.
+// Capped at 1 MB because the only legitimate text-copy paths in the
+// renderer are: short code blocks, paths, URLs, and command snippets. A
+// multi-megabyte text copy would only happen if a runaway loop tried to
+// serialize the entire activity feed into a button — block that here.
+ipcMain.handle('copy-text', (_, text) => {
+  try {
+    if (typeof text !== 'string') return { success: false, reason: 'bad-type' };
+    if (text.length > 1024 * 1024) return { success: false, reason: 'too-long' };
+    const { clipboard } = require('electron');
+    clipboard.writeText(text);
+    return { success: true };
+  } catch (err) {
+    return { success: false, reason: String(err && err.message || err) };
+  }
+});
+
 // Last-resort fallback: drop the PNG onto disk in the user's Downloads
 // folder and reveal it. Still an image — users can drag it straight
 // from the shell to any social/chat app. Never falls through to text.

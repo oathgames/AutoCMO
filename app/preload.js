@@ -182,6 +182,12 @@ contextBridge.exposeInMainWorld('merlin', {
   // silently falls back to text — the share card is supposed to be an
   // image, never a paragraph of copy.
   copyImageDataUrl: (dataUrl) => ipcRenderer.invoke('copy-image-data-url', assertStr(dataUrl, 8_000_000)),
+  // Copy plain text via Electron's native clipboard. Renderer falls back
+  // to this when navigator.clipboard.writeText rejects — which it can do
+  // silently in Electron on unfocused windows or strict permission policies.
+  // Cap matches the main-side handler (1 MB) so a typo'd payload doesn't
+  // serialize an entire activity feed into the clipboard.
+  copyText: (text) => ipcRenderer.invoke('copy-text', assertStr(text, 1024 * 1024)),
   saveImageDataUrl: (dataUrl, filename) => ipcRenderer.invoke('save-image-data-url', assertStr(dataUrl, 8_000_000), assertStr(filename, 200)),
   // Accepts either a single relative path (legacy — used by context menus on
   // message images) or an array of paths (archive cards — the renderer
