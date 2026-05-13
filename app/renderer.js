@@ -10764,27 +10764,86 @@ async function loadArchive(opts = {}) {
     window._archiveVisibleItems = items.slice();
     let lastDate = '';
     const orderedKeys = [];
-    items.forEach(item => {
+
+    // RSI-archive-perf iter 1, fix 1-4: chunked render via DocumentFragment +
+    // requestIdleCallback. Pre-fix, items.forEach(... grid.appendChild ...)
+    // synchronously appended every card before returning control to the
+    // event loop. On a 5000-asset brand that's a 200-500ms blocked frame
+    // and a textbook first-paint stall. The chunked shape:
+    //   1. First INITIAL_VISIBLE_ARCHIVE_CARDS land synchronously into a
+    //      DocumentFragment (one reflow on parent append, not N).
+    //   2. Remaining items render in ARCHIVE_CHUNK_SIZE batches scheduled
+    //      via requestIdleCallback (fallback: 16ms setTimeout) so each
+    //      chunk fits in a single frame budget.
+    //   3. The existing isStale() race guard short-circuits idle callbacks
+    //      that belong to a stale loadArchive (user switched brand mid-
+    //      render) — no orphaned cards land in the new grid.
+    // Behavior unchanged: every item still renders, every key still tracked,
+    // the viewer can still swipe across the full filtered set. The user
+    // just sees the first 300 instantly instead of waiting for all 5000.
+    //
+    // REGRESSION GUARD (2026-05-13, rsi-archive-perf iter 1):
+    //   • _archiveVisibleItems still holds the COMPLETE list above so the
+    //     viewer's prev/next logic doesn't truncate at 300.
+    //   • observeLazyVideos + wireArchiveThumbLoadGate fire after EACH
+    //     chunk so newly-appended cards get observers wired (videos that
+    //     come into view during scroll mid-build must still lazy-load).
+    //   • syncOrder also fires per chunk so the archive-selection model
+    //     stays consistent with the DOM order at every point.
+    const INITIAL_VISIBLE_ARCHIVE_CARDS = 300;
+    const ARCHIVE_CHUNK_SIZE = 200;
+    const appendItem = (item, container) => {
       const d = new Date(item.timestamp);
       const dateStr = formatArchiveDate(d);
       if (dateStr !== lastDate) {
         const header = document.createElement('div');
         header.className = 'archive-date-header';
         header.textContent = dateStr;
-        grid.appendChild(header);
+        container.appendChild(header);
         lastDate = dateStr;
       }
       const card = createArchiveCard(item);
-      grid.appendChild(card);
+      container.appendChild(card);
       const key = __archiveCardKey(item, card);
       if (key) {
         window._archiveItemsByKey.set(key, { card, item });
         orderedKeys.push(key);
       }
-    });
+    };
+
+    // Synchronous first chunk.
+    const firstChunkEnd = Math.min(items.length, INITIAL_VISIBLE_ARCHIVE_CARDS);
+    const initialFrag = document.createDocumentFragment();
+    for (let i = 0; i < firstChunkEnd; i++) appendItem(items[i], initialFrag);
+    grid.appendChild(initialFrag);
     if (__archiveModel) __archiveModel.syncOrder(orderedKeys);
     observeLazyVideos(grid);
     wireArchiveThumbLoadGate(grid);
+
+    // Idle-time tail. If everything fit in the first chunk we're done.
+    if (firstChunkEnd < items.length) {
+      let cursor = firstChunkEnd;
+      const scheduleNext = (fn) => {
+        if (typeof requestIdleCallback === 'function') {
+          requestIdleCallback(fn, { timeout: 500 });
+        } else {
+          setTimeout(fn, 16);
+        }
+      };
+      const renderNextChunk = () => {
+        if (isStale()) return; // stale load — drop the rest, don't append into the wrong grid
+        const chunkEnd = Math.min(items.length, cursor + ARCHIVE_CHUNK_SIZE);
+        const frag = document.createDocumentFragment();
+        for (let i = cursor; i < chunkEnd; i++) appendItem(items[i], frag);
+        grid.appendChild(frag);
+        cursor = chunkEnd;
+        if (__archiveModel) __archiveModel.syncOrder(orderedKeys);
+        observeLazyVideos(grid);
+        wireArchiveThumbLoadGate(grid);
+        if (cursor < items.length) scheduleNext(renderNextChunk);
+      };
+      scheduleNext(renderNextChunk);
+    }
   } catch (err) {
     console.warn('[archive]', err);
     if (isStale()) return;

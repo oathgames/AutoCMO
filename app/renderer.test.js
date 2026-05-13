@@ -1415,3 +1415,114 @@ test('REGRESSION GUARD 2026-05-13: main.js registers copy-text IPC handler', () 
   assert.ok(/text\.length\s*>\s*1024\s*\*\s*1024/.test(mainJs),
     'copy-text handler must reject payloads larger than 1 MB');
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// RSI-archive-perf iter 1 — performance regression guards
+// Goal: bound first-paint, eliminate sync JSON.parse on large files,
+// keep archive watcher signal informative, and verify the archive
+// in-memory walk cache is wired through the watcher.
+// ─────────────────────────────────────────────────────────────────────────────
+
+test("RSI 1-1: archive-scanner exports invalidateScanCache for watcher hookup", () => {
+  const scannerJs = fs.readFileSync(path.join(APP_DIR, "archive-scanner.js"), "utf8");
+  assert.ok(/function invalidateScanCache\(\)/.test(scannerJs),
+    "archive-scanner.js must expose invalidateScanCache() so the watcher can flush the in-memory walk cache");
+  assert.ok(/module\.exports\s*=\s*{[^}]*invalidateScanCache/.test(scannerJs),
+    "invalidateScanCache must be exported");
+  // The FAST PATH must return BEFORE any fs walk happens.
+  assert.ok(/if\s*\(_walkCache && _walkCache\.appRoot === appRoot && Array\.isArray\(_walkCache\.items\)\)\s*{\s*return applyFilters/.test(scannerJs),
+    "scanArchive must return cached items BEFORE the walk on a cache hit");
+});
+
+test("RSI 1-1: main.js wires invalidateScanCache into the results watcher", () => {
+  const mainJs = fs.readFileSync(path.join(APP_DIR, "main.js"), "utf8");
+  // The watcher onChange MUST invalidate the scan cache so the next IPC
+  // call re-walks. Without this, the in-memory cache serves stale data
+  // every time results/ changes.
+  assert.ok(/onChange:[\s\S]*invalidateScanCache\(\)/.test(mainJs),
+    "results-watcher onChange must call invalidateScanCache() so cached walks expire on file change");
+});
+
+test("RSI 1-3: archive-changed event carries a path payload (incremental update support)", () => {
+  const mainJs = fs.readFileSync(path.join(APP_DIR, "main.js"), "utf8");
+  // The watcher broadcast must ship { paths, truncated } so the renderer
+  // can decide between incremental and full reload. Bare broadcast is
+  // kept as a fallback.
+  assert.ok(/win\.webContents\.send\(.archive-changed., \{\s*paths:[^}]*,\s*truncated:/.test(mainJs),
+    "archive-changed broadcast must include paths + truncated payload");
+  // Payload size cap so a 10k-file burst does not balloon the IPC clone.
+  assert.ok(/paths\.slice\(0,\s*200\)/.test(mainJs),
+    "path-set payload must be capped at 200 entries");
+});
+
+test("RSI 1-3: preload passes archive-changed payload through to the callback", () => {
+  const preloadJs = fs.readFileSync(path.join(APP_DIR, "preload.js"), "utf8");
+  // The handler must forward the payload — a callback that ignores the
+  // arg is back-compat for older sites but new callers can opt in.
+  assert.ok(/ipcRenderer\.on\(.archive-changed., h\)/.test(preloadJs),
+    "preload must subscribe to archive-changed");
+  assert.ok(/cb\(payload && typeof payload === .object. \? payload : null\)/.test(preloadJs),
+    "preload must forward the payload object (or null) to the callback");
+});
+
+test("RSI 1-2: get-live-ads handler is async and reads per-brand in parallel", () => {
+  const mainJs = fs.readFileSync(path.join(APP_DIR, "main.js"), "utf8");
+  // Async handler signature is the perf-critical change — sync handler
+  // blocked the main event loop on 10-brand workspaces (120-230 ms).
+  assert.ok(/ipcMain\.handle\(.get-live-ads., async \(_, brandName\)/.test(mainJs),
+    "get-live-ads must be an async ipcMain.handle");
+  // Per-brand fetches must run via Promise.all (parallel I/O).
+  assert.ok(/Promise\.all\(brands\.map\(b => _readBrandAdsCached\(brandsDir, b\)\)\)/.test(mainJs),
+    "all-brands path must fan out via Promise.all over _readBrandAdsCached");
+  // Cache must invalidate on mtime+size change.
+  assert.ok(/hit && hit\.mtimeMs === st\.mtimeMs && hit\.size === st\.size/.test(mainJs),
+    "per-brand cache must check mtimeMs + size before returning a hit");
+  // LRU cap so a pathological workspace cannot grow the cache forever.
+  assert.ok(/LIVE_ADS_CACHE_MAX\s*=\s*64/.test(mainJs),
+    "live-ads cache must be capped at 64 brand entries");
+});
+
+test("RSI 1-5: get-activity-feed-full accepts a limit param and defaults to a paginated tail", () => {
+  const mainJs = fs.readFileSync(path.join(APP_DIR, "main.js"), "utf8");
+  // Handler signature must accept a third arg (limit).
+  assert.ok(/ipcMain\.handle\(.get-activity-feed-full., \(_, brandName, limit\)/.test(mainJs),
+    "get-activity-feed-full must accept a limit arg");
+  // Default cap exists and is bounded.
+  assert.ok(/ACTIVITY_FEED_DEFAULT_LIMIT\s*=\s*2000/.test(mainJs),
+    "default limit must be 2000 entries (drop from full 10 MB sync parse)");
+  assert.ok(/ACTIVITY_FEED_MAX_LIMIT\s*=\s*50000/.test(mainJs),
+    "max limit must be 50000 entries (export-path ceiling)");
+});
+
+test("RSI 1-5: preload accepts an optional limit for getActivityFeedFull", () => {
+  const preloadJs = fs.readFileSync(path.join(APP_DIR, "preload.js"), "utf8");
+  // The bridge must take (brand, limit) and forward an integer 1..50000 (or omit).
+  assert.ok(/getActivityFeedFull:\s*\(brand,\s*limit\)\s*=>/.test(preloadJs),
+    "preload getActivityFeedFull must take a (brand, limit) signature");
+  assert.ok(/Number\.isInteger\(limit\)\s*&&\s*limit\s*>\s*0\s*&&\s*limit\s*<=\s*50000/.test(preloadJs),
+    "preload must clamp limit to [1, 50000] before invoking the IPC");
+});
+
+test("RSI 1-4: archive render chunks via DocumentFragment + requestIdleCallback", () => {
+  // Initial chunk renders synchronously into a fragment; the tail runs
+  // in idle-time chunks of ARCHIVE_CHUNK_SIZE. This converts the
+  // 5000-card synchronous appendChild loop (200-500 ms initial paint)
+  // into a 300-card first chunk (~30 ms) with the rest filling during
+  // idle frames.
+  assert.ok(/INITIAL_VISIBLE_ARCHIVE_CARDS\s*=\s*300/.test(RENDERER_JS),
+    "initial chunk size must be a named constant (300)");
+  assert.ok(/ARCHIVE_CHUNK_SIZE\s*=\s*200/.test(RENDERER_JS),
+    "idle-time chunk size must be a named constant (200)");
+  assert.ok(/createDocumentFragment\(\)/.test(RENDERER_JS),
+    "archive build path must use DocumentFragment for one-shot appendChild");
+  assert.ok(/requestIdleCallback\(/.test(RENDERER_JS),
+    "tail chunks must schedule via requestIdleCallback (or setTimeout fallback)");
+  // The stale-load guard must apply to idle callbacks too — otherwise a
+  // brand switch mid-render would dump cards into the new grid.
+  assert.ok(/renderNextChunk[\s\S]{0,200}isStale\(\)/.test(RENDERER_JS),
+    "idle-time chunk callback must consult isStale() to short-circuit on stale loads");
+  // The complete (unfiltered) list must still feed the viewer.
+  assert.ok(/_archiveVisibleItems = items\.slice\(\)/.test(RENDERER_JS),
+    "_archiveVisibleItems must still hold the COMPLETE filtered list (viewer prev/next depends on this)");
+});
+

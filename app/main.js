@@ -1655,10 +1655,32 @@ async function createWindow() {
       try { resultsWatcher.stop(); } catch {}
       resultsWatcher = null;
     }
+    // RSI-archive-perf iter 1, fix 1-1 + 1-3:
+    //   • invalidate archive-scanner in-memory walk cache so next IPC call
+    //     re-walks instead of serving stale items.
+    //   • ship the changed-path SET to the renderer alongside the bare
+    //     event so the renderer can decide between an incremental update
+    //     and a full reload, and cancel any in-flight loadArchive that
+    //     would otherwise discard a more-current result.
+    //
+    // REGRESSION GUARD (2026-05-13, rsi-archive-perf iter 1): the path
+    // SET is informational only — every renderer code path MUST keep
+    // working when the payload is `undefined` (older preload, missing
+    // bridge). The bare 'archive-changed' send is also kept as a
+    // back-compat fallback.
     resultsWatcher = createResultsWatcher(path.join(path.resolve(appRoot), 'results'), {
-      onChange: () => {
+      onChange: (paths) => {
+        try { require('./archive-scanner').invalidateScanCache(); } catch {}
         if (win && !win.isDestroyed()) {
-          try { win.webContents.send('archive-changed'); } catch {}
+          try {
+            // Cap payload at 200 paths to keep IPC structured-clone cost
+            // bounded during pathological 10k-file bursts. The renderer
+            // treats > N paths as "full reload" regardless.
+            const safePaths = Array.isArray(paths) ? paths.slice(0, 200) : [];
+            win.webContents.send('archive-changed', { paths: safePaths, truncated: Array.isArray(paths) && paths.length > 200 });
+          } catch {
+            try { win.webContents.send('archive-changed'); } catch {}
+          }
         }
       },
     });
@@ -7499,28 +7521,51 @@ ipcMain.handle('get-agency-report', async (_, requestedDays, brandNames) => {
 // Used by Activity view's search/export path. 10 MB cap is a safety
 // against runaway reads — the Go side already rotates at 10 MB, so this
 // is effectively "the current window" from the user's perspective.
-ipcMain.handle('get-activity-feed-full', (_, brandName) => {
+// RSI-archive-perf iter 1, fix 1-5: paginated activity-feed-full.
+//
+// Pre-fix the handler synchronously read up to 10 MB of JSONL and called
+// JSON.parse line-by-line on the main process — 300-850ms for a brand
+// with a busy log, blocking the event loop. The activity UI only ever
+// renders a limited tail (default 500 entries; export needs the whole
+// file but is rare). Honor an optional `limit` arg (1..50000) that caps
+// the tail size we slice; default 2000 covers the search-all view with
+// margin. The path stays synchronous-on-disk because the read happens
+// on the main process and parseJsonl is CPU-bound anyway; the size cap
+// is the real win — at 2000 entries × ~500 bytes/line = ~1 MB, parse
+// drops to <50ms. Callers needing the full file pass `limit: 50000`.
+const ACTIVITY_FEED_DEFAULT_LIMIT = 2000;
+const ACTIVITY_FEED_MAX_LIMIT = 50000;
+ipcMain.handle('get-activity-feed-full', (_, brandName, limit) => {
   if (!brandName) return [];
   // assertBrandSafe is the single canonical regex (length-capped at 100).
   // The older inline /^[a-z0-9_-]+$/i here accepted any length — tightened.
   try { assertBrandSafe(brandName); } catch { return []; }
+  let cap = Number.isFinite(limit) ? Math.floor(limit) : ACTIVITY_FEED_DEFAULT_LIMIT;
+  if (cap <= 0) cap = ACTIVITY_FEED_DEFAULT_LIMIT;
+  if (cap > ACTIVITY_FEED_MAX_LIMIT) cap = ACTIVITY_FEED_MAX_LIMIT;
   const logPath = path.join(appRoot, 'assets', 'brands', brandName, 'activity.jsonl');
   try {
     if (!fs.existsSync(logPath)) return [];
     const stat = fs.statSync(logPath);
-    if (stat.size > 10 * 1024 * 1024) {
-      // Refuse to load >10 MB in one shot — fall back to tail behavior.
+    // We size the tail buffer to roughly the requested entry count assuming
+    // ~1 KB/entry (generous — typical entries are 100-500 bytes). Bounded
+    // by the existing 10 MB hard ceiling.
+    const targetBytes = Math.min(Math.max(cap * 1024, 256 * 1024), 10 * 1024 * 1024);
+    let content;
+    if (stat.size > targetBytes) {
       const fd = fs.openSync(logPath, 'r');
-      const tailSize = 10 * 1024 * 1024;
-      const buf = Buffer.alloc(tailSize);
-      fs.readSync(fd, buf, 0, tailSize, stat.size - tailSize);
+      const buf = Buffer.alloc(targetBytes);
+      fs.readSync(fd, buf, 0, targetBytes, stat.size - targetBytes);
       fs.closeSync(fd);
-      let content = buf.toString('utf8');
+      content = buf.toString('utf8');
       const firstNewline = content.indexOf('\n');
       if (firstNewline > 0) content = content.slice(firstNewline + 1);
-      return parseJsonl(content);
+    } else {
+      content = fs.readFileSync(logPath, 'utf8');
     }
-    return parseJsonl(fs.readFileSync(logPath, 'utf8'));
+    const parsed = parseJsonl(content);
+    // parseJsonl returns newest-first (reversed). Slice to cap.
+    return parsed.length > cap ? parsed.slice(0, cap) : parsed;
   } catch { return []; }
 });
 function parseJsonl(text) {
@@ -9600,7 +9645,48 @@ ipcMain.handle('delete-spell', async (_, taskId) => {
 // brands are unioned together so the "All" view shows everything running.
 // Each entry is tagged with its brand so the renderer can show a badge and
 // filter client-side.
-ipcMain.handle('get-live-ads', (_, brandName) => {
+// RSI-archive-perf iter 1, fix 1-2: per-brand ads-live cache.
+//
+// Pre-fix the all-brands view did a synchronous fs.readdirSync + N ×
+// fs.readFileSync + N × JSON.parse on the main process, blocking the event
+// loop for 120-230ms on a 10-brand workspace with 200-ad files. The cache
+// keys on (mtimeMs, size) of ads-live.json so any file change blows the
+// entry; otherwise the parsed array (with brand injected) is reused.
+// Bounded at 64 entries — that's 2× the largest agency workspace we've
+// seen — with LRU touch on hit.
+const LIVE_ADS_CACHE_MAX = 64;
+const liveAdsCache = new Map(); // brand -> { mtimeMs, size, ads }
+function _touchLiveAdsCache(brand, entry) {
+  liveAdsCache.delete(brand);
+  liveAdsCache.set(brand, entry);
+  while (liveAdsCache.size > LIVE_ADS_CACHE_MAX) {
+    const first = liveAdsCache.keys().next().value;
+    liveAdsCache.delete(first);
+  }
+}
+async function _readBrandAdsCached(brandsDir, brand) {
+  // Length-capped canonical regex via assertBrandSafe.
+  try { assertBrandSafe(brand); } catch { return []; }
+  if (!brand) return [];
+  const adsPath = path.join(brandsDir, brand, 'ads-live.json');
+  let st;
+  try { st = await fs.promises.stat(adsPath); } catch { return []; }
+  const hit = liveAdsCache.get(brand);
+  if (hit && hit.mtimeMs === st.mtimeMs && hit.size === st.size) {
+    _touchLiveAdsCache(brand, hit);
+    return hit.ads;
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(await fs.promises.readFile(adsPath, 'utf8'));
+  } catch { return []; }
+  if (!Array.isArray(parsed)) return [];
+  const ads = parsed.map(ad => ({ ...ad, brand: ad.brand || brand }));
+  _touchLiveAdsCache(brand, { mtimeMs: st.mtimeMs, size: st.size, ads });
+  return ads;
+}
+
+ipcMain.handle('get-live-ads', async (_, brandName) => {
   // `brandName` is either specified (single-brand view) or empty (all-brands
   // view). When specified, validate upfront so a bad value short-circuits
   // before we enumerate directories.
@@ -9608,28 +9694,17 @@ ipcMain.handle('get-live-ads', (_, brandName) => {
     try { assertBrandSafe(brandName); } catch { return []; }
   }
   const brandsDir = path.join(appRoot, 'assets', 'brands');
-  const readBrandAds = (brand) => {
-    // Length-capped canonical regex via assertBrandSafe.
-    try { assertBrandSafe(brand); } catch { return []; }
-    if (!brand) return [];
-    const adsPath = path.join(brandsDir, brand, 'ads-live.json');
-    try {
-      const parsed = JSON.parse(fs.readFileSync(adsPath, 'utf8'));
-      if (!Array.isArray(parsed)) return [];
-      return parsed.map(ad => ({ ...ad, brand: ad.brand || brand }));
-    } catch { return []; }
-  };
 
-  if (brandName) return readBrandAds(brandName);
+  if (brandName) return _readBrandAdsCached(brandsDir, brandName);
 
-  // No brand → union every brand's ads-live.json
-  let all = [];
-  try {
-    for (const d of fs.readdirSync(brandsDir, { withFileTypes: true })) {
-      if (!d.isDirectory() || d.name === 'example') continue;
-      all = all.concat(readBrandAds(d.name));
-    }
-  } catch {}
+  // No brand → union every brand's ads-live.json IN PARALLEL.
+  let dirents;
+  try { dirents = await fs.promises.readdir(brandsDir, { withFileTypes: true }); } catch { return []; }
+  const brands = dirents
+    .filter(d => d.isDirectory() && d.name !== 'example')
+    .map(d => d.name);
+  const perBrand = await Promise.all(brands.map(b => _readBrandAdsCached(brandsDir, b)));
+  const all = perBrand.flat();
   // Sort most recent first — publishedAt > updatedAt > 0
   all.sort((a, b) => {
     const ta = Date.parse(a.updatedAt || a.publishedAt || 0) || 0;
