@@ -1613,17 +1613,60 @@ function renderMarkdown(text) {
   return html;
 }
 
-// Delegated copy handler for all data-copy buttons (prevents XSS from inline onclick)
+// Delegated copy handler for all data-copy buttons (prevents XSS from inline
+// onclick).
+//
+// REGRESSION GUARD (2026-05-13, copy-button-tooltip-fix): every code path in
+// this handler MUST produce visible user feedback — either a "Copied!" toast
+// on success or a "Copy failed" toast on failure. The pre-fix shape silently
+// swallowed both the navigator.clipboard rejection AND made the success state
+// indiscernible (a 1.5s "⧉" → "✓" glyph swap inside a 12px button — users
+// reported clicking and seeing nothing happen). Two layers of robustness:
+//
+//   1. Tries navigator.clipboard.writeText first (works in 99% of contexts).
+//   2. Falls back to merlin.copyText (Electron's native clipboard via IPC)
+//      when the browser API rejects — this hits the path where the window
+//      isn't focused, the origin policy is strict, or the user is on a
+//      version of Electron where ClipboardPermissionPolicy bites. Without
+//      the fallback, the click is a silent no-op.
+//
+// The button still flips its label briefly for visual continuity, but the
+// authoritative feedback is the floating .copy-toast (showCopyToast).
 document.addEventListener('click', (e) => {
   const btn = e.target.closest('[data-copy]');
   if (!btn) return;
-  const text = decodeURIComponent(btn.dataset.copy);
-  navigator.clipboard.writeText(text).then(() => {
+  let text;
+  try {
+    text = decodeURIComponent(btn.dataset.copy);
+  } catch {
+    // data-copy attribute got corrupted somewhere upstream. Don't crash; tell
+    // the user it failed so they don't think Merlin silently copied nothing.
+    showCopyToast('Copy failed');
+    return;
+  }
+
+  const flashSuccess = () => {
     const orig = btn.textContent;
     btn.textContent = orig === '⧉' ? '✓' : 'Copied!';
     btn.classList.add('copied');
     setTimeout(() => { btn.textContent = orig; btn.classList.remove('copied'); }, 1500);
-  });
+    showCopyToast('Copied!');
+  };
+
+  const tryElectronFallback = async () => {
+    try {
+      if (typeof merlin !== 'undefined' && typeof merlin.copyText === 'function') {
+        const result = await merlin.copyText(text);
+        if (result && result.success) { flashSuccess(); return; }
+      }
+    } catch { /* fall through to failure toast */ }
+    showCopyToast('Copy failed');
+  };
+
+  const p = navigator.clipboard && navigator.clipboard.writeText
+    ? navigator.clipboard.writeText(text)
+    : Promise.reject(new Error('no clipboard API'));
+  p.then(flashSuccess).catch(tryElectronFallback);
 });
 
 function escapeHtml(text) {
