@@ -1760,6 +1760,29 @@ function friendlyError(raw, platformName) {
     return 'Merlin had a hiccup mid-thought.\nTry: Merlin is automatically restarting your session — your last message will replay in a moment.';
   }
 
+  // REGRESSION GUARD (2026-05-14, meta-connect-parse-fix):
+  // The OAuth fast-open path's extractJsonBlock heuristic occasionally
+  // matched too much (concatenated two JSON blocks the binary printed
+  // back-to-back) and JSON.parse failed with "Unexpected non-whitespace
+  // character after JSON at position N (line M column K)". The raw
+  // parse error surfaced verbatim in the Connection Failed modal —
+  // exactly the Rule 6 "raw error visible to user" pattern. We've also
+  // hardened extractJsonBlock with a balanced-brace fallback, but this
+  // branch catches any future variant where the binary's output shape
+  // shifts unexpectedly. Match BEFORE the generic JSON / 5xx branches
+  // below so the parse-specific copy wins. The Reconnect chip uses the
+  // platformName the caller supplied — we can't infer the platform from
+  // the parse error text itself, so this only emits a chip when we know.
+  if (sl.includes('failed to parse exchange result') ||
+      (sl.includes('unexpected non-whitespace character after json') && sl.includes('position'))) {
+    const plat = (platformName || '').trim();
+    const platLower = plat.toLowerCase();
+    if (plat && platLower !== 'the platform') {
+      return `${plat} connected but Merlin had trouble reading the result.\nTry: [[chip:Reconnect ${plat}:reconnect:${platLower}]] — if it keeps failing, restart Merlin and try again.`;
+    }
+    return 'Almost there — Merlin had trouble finishing the connection.\nTry: Click Connect again. If it keeps failing, restart Merlin.';
+  }
+
   // SDK terminal-state error subtypes — surfaced when the conversation
   // hit a hard ceiling instead of finishing cleanly. Each gets its own
   // friendly translation so the user knows whether to wait, simplify

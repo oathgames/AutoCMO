@@ -259,25 +259,103 @@ async function fetchWithTimeout(url, init, ms) {
 // ── JSON extractor for binary stdout ───────────────────────────────
 //
 // The Go binary prints status messages to stdout before the final result
-// JSON block. We take the LAST well-formed { ... } block at column 0 as
-// the result. Matches the heuristic in main.js:3816-3832 (preserved so
-// the existing binary output shape doesn't need to change).
+// JSON block. We try TWO strategies in order:
+//
+//   1. Fast path — line-trim heuristic: walk lines from the bottom,
+//      find the last bare `}` and the matching bare `{` before it.
+//      Works for typical pretty-printed JSON the binary emits when the
+//      result is the final thing printed. Preserves original behavior.
+//
+//   2. Robust path — balanced-brace scanner: walk the entire stdout
+//      character-by-character with string-quote awareness, collect
+//      every complete `{ ... }` block, return the last one. Handles
+//      the pathological cases the line-trim path fails on:
+//        - Two complete JSON blocks back-to-back
+//        - JSON immediately followed by a non-empty postscript line
+//        - Outer/inner braces sharing a line with other tokens
+//
+// REGRESSION GUARD (2026-05-14, meta-connect-parse-fix): live incident
+// — Meta connection completed OAuth, the binary printed two JSON
+// blocks (final result + a status postscript), the fast-path heuristic
+// walked from the LAST `}` to the FIRST `{` and concatenated both
+// blocks into the slice. JSON.parse then failed with "Unexpected
+// non-whitespace character after JSON at position 73 (line 5 column
+// 3)" and the raw error surfaced verbatim in the Connection Failed
+// modal — Hard-Won Security Rule 6 violation. Two fixes ship together:
+//   - The balanced-brace scanner correctly identifies a single
+//     complete JSON object even with adjacent blocks (this function).
+//   - friendlyError() in renderer.js classifies any remaining
+//     "Failed to parse exchange result" into sympathetic copy.
 function extractJsonBlock(stdout) {
-  const lines = String(stdout || '').split('\n');
-  let jsonStart = -1;
-  let jsonEnd = -1;
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const t = lines[i].trim();
-    if (t === '}' && jsonEnd < 0) jsonEnd = i;
-    if (t === '{' && jsonEnd >= 0) {
-      jsonStart = i;
-      break;
+  const text = String(stdout || '');
+
+  // Fast path — original heuristic. Cheap; works for ~99% of binary outputs.
+  try {
+    const lines = text.split('\n');
+    let jsonStart = -1;
+    let jsonEnd = -1;
+    for (let i = lines.length - 1; i >= 0; i--) {
+      const t = lines[i].trim();
+      if (t === '}' && jsonEnd < 0) jsonEnd = i;
+      if (t === '{' && jsonEnd >= 0) {
+        jsonStart = i;
+        break;
+      }
+    }
+    if (jsonStart >= 0 && jsonEnd >= 0) {
+      return JSON.parse(lines.slice(jsonStart, jsonEnd + 1).join('\n'));
+    }
+  } catch { /* fall through to robust scanner */ }
+
+  // Robust path — balanced-brace scan.
+  return parseLastBalancedJsonObject(text);
+}
+
+// parseLastBalancedJsonObject — character-level scan that returns the LAST
+// complete top-level `{ ... }` block in `text`. Brace-balanced with
+// string-literal awareness so escaped quotes and braces inside string
+// values don't throw off the depth counter. Throws when no complete object
+// is found.
+//
+// Why this exists (vs. just JSON.parse(text)): the binary's stdout is a
+// MIX of plaintext logs + structured JSON. We can't JSON.parse the whole
+// thing. The only sound recovery when the line-shape heuristic fails is
+// a real brace-balanced parser.
+function parseLastBalancedJsonObject(text) {
+  const ranges = [];
+  let inString = false;
+  let escape = false;
+  let depth = 0;
+  let blockStart = -1;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (escape) { escape = false; continue; }
+    if (inString) {
+      if (c === '\\') escape = true;
+      else if (c === '"') inString = false;
+      continue;
+    }
+    if (c === '"') { inString = true; continue; }
+    if (c === '{') {
+      if (depth === 0) blockStart = i;
+      depth++;
+    } else if (c === '}') {
+      if (depth > 0) {
+        depth--;
+        if (depth === 0 && blockStart >= 0) {
+          ranges.push([blockStart, i + 1]);
+          blockStart = -1;
+        }
+      }
     }
   }
-  if (jsonStart < 0 || jsonEnd < 0) {
+  if (ranges.length === 0) {
     throw new Error('no JSON in binary stdout');
   }
-  return JSON.parse(lines.slice(jsonStart, jsonEnd + 1).join('\n'));
+  // Return the LAST complete block — the binary's final result follows
+  // any intermediate status objects it may emit.
+  const [start, end] = ranges[ranges.length - 1];
+  return JSON.parse(text.slice(start, end));
 }
 
 // ── Main entry point ───────────────────────────────────────────────
@@ -478,6 +556,7 @@ module.exports = {
   timingSafeCompareString,
   validateIncomingState,
   extractJsonBlock,
+  parseLastBalancedJsonObject,
   resolveShopifyShop,
   verifyShopifyShop,
   isBlockedShopifyHost,
