@@ -1533,6 +1533,54 @@ test("RSI 1-4: archive render chunks via DocumentFragment + requestIdleCallback"
 // connection-status query-reuse changes.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// REGRESSION GUARD (2026-05-15, story-thumb-broken-archive): three-layer
+// invariant covering the story-format thumbnail fix. Pre-fix, an archive
+// card whose only image was a 9:16 _story file got rendered with
+// .archive-card-thumb (object-fit:cover) inside a 1:1 card — the image
+// was center-banded to its middle ~56%, hiding the headline + persona
+// layers above and below the product. Users saw thumbnails identical
+// to a generic product hero shot, breaking visual differentiation in
+// the archive grid.
+
+test('story-thumb-broken-archive: createArchiveCard reads item.tallThumb and applies the class', () => {
+  // Must NOT shadow into a unconditional class assignment — the conditional
+  // is the entire fix. Match the assignment line + the tallThumb ternary.
+  assert.ok(
+    /const\s+thumbClass\s*=\s*item\.tallThumb\s*\?\s*'archive-card-thumb archive-card-thumb-tall'\s*:\s*'archive-card-thumb'/.test(RENDERER_JS),
+    'createArchiveCard must assign thumbClass with archive-card-thumb-tall when item.tallThumb is truthy');
+  // The class must reach the template literal — the .innerHTML must use
+  // ${thumbClass}, not a hardcoded 'archive-card-thumb' string.
+  assert.ok(
+    /innerHTML\s*=\s*`<img class="\$\{thumbClass\}"/.test(RENDERER_JS),
+    'createArchiveCard innerHTML must interpolate the resolved thumbClass, not a hardcoded class');
+});
+
+test('story-thumb-broken-archive: archive-scanner exposes tallThumb on the run item shape', () => {
+  const scannerJs = fs.readFileSync(path.join(APP_DIR, 'archive-scanner.js'), 'utf8');
+  // The TALL_FORMAT_RE constant must exist (the source-of-truth pattern).
+  assert.ok(/TALL_FORMAT_RE\s*=\s*\/_\(story\|vertical\|9x16\|reel\|reels\)\\\./.test(scannerJs),
+    'archive-scanner must declare TALL_FORMAT_RE covering story/vertical/9x16/reel/reels');
+  // The picker must prefer _square over tall.
+  assert.ok(/const\s+square\s*=\s*run\.files\.find/.test(scannerJs),
+    'thumbnail picker must check for _square first');
+  // The fall-through must consult tallImage only AFTER non-tall.
+  assert.ok(/const\s+nonTallImage[\s\S]*const\s+tallImage/.test(scannerJs),
+    'picker must consider nonTallImage before tallImage');
+  // The item shape must set tallThumb when the picked file matches TALL_FORMAT_RE.
+  assert.ok(/if\s*\(TALL_FORMAT_RE\.test\(thumbFile\.name\)\)\s*{\s*item\.tallThumb\s*=\s*true/.test(scannerJs),
+    'scanner must set item.tallThumb = true when the picked thumb matches TALL_FORMAT_RE');
+});
+
+test('story-thumb-broken-archive: style.css archive-card-thumb-tall uses object-fit: contain', () => {
+  const styleCss = fs.readFileSync(path.join(APP_DIR, 'style.css'), 'utf8');
+  // The class must exist with object-fit:contain — without it, the
+  // renderer's class hand-off is a no-op and tall images still get
+  // center-banded.
+  assert.ok(
+    /\.archive-card-thumb-tall\s*{\s*[^}]*object-fit:\s*contain/.test(styleCss),
+    '.archive-card-thumb-tall must apply object-fit: contain to letterbox tall images');
+});
+
 test('RSI 2-3: approval countdown uses two-phase setTimeout, not setInterval(1000)', () => {
   // Pre-fix: setInterval(1000) fired 900× per modal even though the UI
   // only updated text during the final 60s. Post-fix: a Phase 1 setTimeout
