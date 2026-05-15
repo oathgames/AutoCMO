@@ -265,6 +265,8 @@ const BRAND_OPTIONAL_ACTIONS = new Set([
   'applovin-max-login', 'applovin-ad-login', 'postscript-login',
   // Landing page audit takes a raw URL, no brand context needed
   'landing-audit',
+  // Funnel teardown (Stefan Georgi RMBC) also URL-driven, brand-agnostic.
+  'funnel-teardown',
   // Foreplay competitor ad spying — keyed on the competitor's domain/brand/ad,
   // never on the user's own brand. Output goes to <outputDir>/competitor-ads/
   // which is brand-agnostic by design (one research library across brands).
@@ -1495,13 +1497,13 @@ function buildTools(tool, z, ctx) {
     // audit P2 #1).
     brandRequired: false,
     input: {
-      action: z.enum(['dashboard', 'calendar', 'wisdom', 'report', 'competitor-scan', 'landing-audit']).describe('Operation'),
+      action: z.enum(['dashboard', 'calendar', 'wisdom', 'report', 'competitor-scan', 'landing-audit', 'funnel-teardown']).describe('Operation'),
       brand: brandSchema.optional(),
       batchCount: z.coerce.number().int().optional().describe('Days of data'),
-      url: z.string().optional().describe('URL (for landing-audit)'),
+      url: z.string().optional().describe('URL (for landing-audit and funnel-teardown — funnel-teardown grades the page against Stefan Georgi RMBC rubric)'),
     },
     handler: async (args) => {
-      const actionMap = { 'competitor-scan': 'competitor-scan', 'landing-audit': 'landing-audit' };
+      const actionMap = { 'competitor-scan': 'competitor-scan', 'landing-audit': 'landing-audit', 'funnel-teardown': 'funnel-teardown' };
       const action = actionMap[args.action] || args.action;
       return toEnvelope(await runBinary(ctx, action, args, { timeout: 60000 }));
     },
