@@ -2694,6 +2694,21 @@ body{transition:padding-right .25s cubic-bezier(.2,.8,.2,1)}
   background: var(--bg);
   display: block;
 }
+/* REGRESSION GUARD (2026-05-15, story-thumb-broken-archive): when the
+   archive-scanner flagged a run as tall (9:16 story / vertical / reel),
+   the renderer adds .archive-card-thumb-tall. The .cover rule above
+   would center-band the 9:16 image to its middle ~56% — for a typical
+   Stefan Georgi-style story ad that means just the product/bottle
+   region, hiding the headline + persona/lifestyle layers above and
+   below. The result was every story-format ad rendering as a generic
+   product hero in the archive grid, indistinguishable from any other
+   PDP-style shot. Fix: switch to object-fit:contain for tall thumbs so
+   the FULL composition is visible (letterboxed to fit the 1:1 card).
+   The background continues to be var(--bg) so the letterbox bars match
+   the card chrome. */
+.archive-card-thumb-tall {
+  object-fit: contain;
+}
 /* REGRESSION GUARD (2026-05-04, fal-image-chopped-in-half-while-
    downloading incident): the binary's atomic-rename fix on
    downloadFile/downloadFileWithKey is the root cause closure (the

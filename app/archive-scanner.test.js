@@ -707,5 +707,112 @@ test('scanArchive sorts newest first', () => {
   } finally { cleanup(tmp); }
 });
 
+// ─────────────────────────── story-thumb-broken-archive (2026-05-15) ────────
+//
+// REGRESSION GUARD: a run folder containing ONLY a 9:16 _story image
+// (typical TikTok / Reels / Stories ad) must:
+//   (a) still produce a valid thumbnail path pointing at the _story file
+//   (b) flag the item with tallThumb=true so the renderer applies
+//       object-fit:contain — without this, the archive card's 1:1 aspect
+//       ratio + object-fit:cover center-bands the tall image, hiding the
+//       headline + persona layers and producing a thumb that looks like
+//       a generic product hero shot.
+//   (c) prefer _square / _portrait / non-tall variants when present, so
+//       multi-aspect runs keep using the rendering-friendly thumb.
+//
+// Live incident anchor: user generated a Banana Pro Edit ad with
+// imageFormat:'story' for the nmnl brand; the archive card thumbnail
+// showed only the product/bottle region, indistinguishable from a PDP
+// hero, breaking the visual differentiation of story ads in the archive.
+
+test('story-thumb-broken-archive: tall-only run flags tallThumb', () => {
+  const tmp = makeTmpRoot();
+  try {
+    const dir = path.join(tmp, 'results', 'nmnl', 'img_20260515_090857');
+    writeBuf(path.join(dir, 'image_1_story.jpg'), 50_000);
+    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({
+      brand: 'nmnl', type: 'image', model: 'banana-pro-edit',
+    }));
+    const items = scanArchive(tmp);
+    const item = items.find(i => i.id === 'img_20260515_090857');
+    assert.ok(item, 'tall-only run should still surface as an archive item');
+    assert.ok(item.thumbnail.endsWith('image_1_story.jpg'),
+      `thumbnail must point at the _story file; got ${item.thumbnail}`);
+    assert.strictEqual(item.tallThumb, true,
+      'tall-only thumbnail must flag tallThumb=true so renderer uses object-fit:contain');
+  } finally { cleanup(tmp); }
+});
+
+test('story-thumb-broken-archive: _square wins over _story when both present', () => {
+  const tmp = makeTmpRoot();
+  try {
+    const dir = path.join(tmp, 'results', 'nmnl', 'img_20260515_091000');
+    writeBuf(path.join(dir, 'image_1_square.jpg'), 50_000);
+    writeBuf(path.join(dir, 'image_1_story.jpg'), 50_000);
+    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ brand: 'nmnl', type: 'image' }));
+    const items = scanArchive(tmp);
+    const item = items.find(i => i.id === 'img_20260515_091000');
+    assert.ok(item.thumbnail.endsWith('image_1_square.jpg'),
+      `_square should win when both _square and _story exist; got ${item.thumbnail}`);
+    assert.ok(!item.tallThumb,
+      'tallThumb must NOT be set when the picked thumb is _square');
+  } finally { cleanup(tmp); }
+});
+
+test('story-thumb-broken-archive: _portrait wins over _story', () => {
+  const tmp = makeTmpRoot();
+  try {
+    const dir = path.join(tmp, 'results', 'nmnl', 'img_20260515_091100');
+    writeBuf(path.join(dir, 'image_1_portrait.jpg'), 50_000);
+    writeBuf(path.join(dir, 'image_1_story.jpg'), 50_000);
+    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ brand: 'nmnl', type: 'image' }));
+    const items = scanArchive(tmp);
+    const item = items.find(i => i.id === 'img_20260515_091100');
+    assert.ok(item.thumbnail.endsWith('image_1_portrait.jpg'),
+      `_portrait should win when _portrait and _story both exist; got ${item.thumbnail}`);
+    assert.ok(!item.tallThumb,
+      'tallThumb must NOT be set when the picked thumb is _portrait');
+  } finally { cleanup(tmp); }
+});
+
+test('story-thumb-broken-archive: _vertical and _reel variants also flag tallThumb', () => {
+  // Run-folder regex requires img_\d{8}_\d{6}, so each iteration uses
+  // a unique 6-digit time suffix instead of name-embedding the variant.
+  const cases = [
+    { variant: 'vertical', time: '091200' },
+    { variant: 'reel',     time: '091300' },
+    { variant: '9x16',     time: '091400' },
+  ];
+  for (const { variant, time } of cases) {
+    const tmp = makeTmpRoot();
+    try {
+      const folderName = `img_20260515_${time}`;
+      const dir = path.join(tmp, 'results', 'nmnl', folderName);
+      writeBuf(path.join(dir, `image_1_${variant}.jpg`), 50_000);
+      fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ brand: 'nmnl', type: 'image' }));
+      const items = scanArchive(tmp);
+      const item = items.find(i => i.id === folderName);
+      assert.ok(item, `_${variant}-only run should surface as a run item`);
+      assert.ok(item.thumbnail && item.thumbnail.endsWith(`image_1_${variant}.jpg`),
+        `_${variant} thumbnail path should resolve; got ${item && item.thumbnail}`);
+      assert.strictEqual(item.tallThumb, true,
+        `_${variant} thumbnail must flag tallThumb=true`);
+    } finally { cleanup(tmp); }
+  }
+});
+
+test('story-thumb-broken-archive: plain image_1.jpg (no aspect suffix) does NOT flag tallThumb', () => {
+  const tmp = makeTmpRoot();
+  try {
+    const dir = path.join(tmp, 'results', 'nmnl', 'img_20260515_091400');
+    writeBuf(path.join(dir, 'image_1.jpg'), 50_000);
+    fs.writeFileSync(path.join(dir, 'metadata.json'), JSON.stringify({ brand: 'nmnl', type: 'image' }));
+    const items = scanArchive(tmp);
+    const item = items.find(i => i.id === 'img_20260515_091400');
+    assert.ok(item.thumbnail.endsWith('image_1.jpg'));
+    assert.ok(!item.tallThumb, 'plain image_1.jpg should not be tagged tall');
+  } finally { cleanup(tmp); }
+});
+
 console.log(`\n${passed} passed, ${failed} failed\n`);
 process.exit(failed > 0 ? 1 : 0);

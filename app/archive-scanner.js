@@ -355,12 +355,50 @@ function scanArchive(appRoot, filters = {}) {
       item.timestamp = Math.max(...run.files.map(f => f.mtime));
     }
 
+    // Thumbnail picker (in order of preference):
+    //   1. _square   — pre-cropped 1:1 thumbnail that fills the archive card
+    //                   cleanly with object-fit: cover. Preferred when present
+    //                   because no further cropping is needed.
+    //   2. _portrait — 4:5 portrait, still works with cover (slight top/bottom
+    //                   crop) without losing the hero composition.
+    //   3. _thumbnail — explicit thumbnail sibling.
+    //   4. any non-_story image — landscape / square /portrait / unspecified.
+    //   5. _story / _vertical / _9x16 — 9:16 tall. WORKS but gets center-banded
+    //                   by object-fit:cover, hiding the headline + product
+    //                   layers. Used as last-resort thumbnail; the renderer
+    //                   applies a `archive-card-thumb-tall` class so the
+    //                   thumb falls back to object-fit:contain (letterboxed)
+    //                   so the FULL story-ad composition is visible.
+    //   6. anything   — final fallback.
+    //
+    // REGRESSION GUARD (2026-05-15, story-thumb-broken-archive): pre-fix the
+    // picker preferred ANY non-_square image (line was `!/_square/i.test`),
+    // which would pick a `_story` image when a run was story-only. The
+    // archive card's `aspect-ratio: 1` + `object-fit: cover` then cropped
+    // the 9:16 image to its middle band, displaying only the product/
+    // bottle region and hiding the headline + persona layers. Result: users
+    // generating story-format ads saw thumbnails identical to a generic
+    // product hero shot, making story ads visually indistinguishable in
+    // the archive grid. Fix: prefer _square > _portrait > _thumbnail >
+    // non-tall over tall, and flag tall thumbnails so the renderer can
+    // apply object-fit:contain.
+    const TALL_FORMAT_RE = /_(story|vertical|9x16|reel|reels)\./i;
+    const square = run.files.find(f => /_square/i.test(f.name) && ARCHIVE_IMAGE_EXT.test(f.name));
     const portrait = run.files.find(f => /_portrait/i.test(f.name) && ARCHIVE_IMAGE_EXT.test(f.name));
     const thumbnail = run.files.find(f => /_thumbnail/i.test(f.name) && ARCHIVE_IMAGE_EXT.test(f.name));
-    const anyImage = run.files.find(f => ARCHIVE_IMAGE_EXT.test(f.name) && !/_square/i.test(f.name));
+    const nonTallImage = run.files.find(f => ARCHIVE_IMAGE_EXT.test(f.name) && !TALL_FORMAT_RE.test(f.name) && !/_(square|portrait|thumbnail)/i.test(f.name));
+    const tallImage = run.files.find(f => ARCHIVE_IMAGE_EXT.test(f.name) && TALL_FORMAT_RE.test(f.name));
     const fallbackImage = run.files.find(f => ARCHIVE_IMAGE_EXT.test(f.name));
-    const thumbFile = portrait || thumbnail || anyImage || fallbackImage;
-    if (thumbFile) item.thumbnail = run.relPath + '/' + thumbFile.name;
+    const thumbFile = square || portrait || thumbnail || nonTallImage || tallImage || fallbackImage;
+    if (thumbFile) {
+      item.thumbnail = run.relPath + '/' + thumbFile.name;
+      // tallThumb=true when the chosen thumbnail is a 9:16 / story-format
+      // file. Renderer reads this to switch to object-fit:contain so the
+      // full composition is visible in the archive card.
+      if (TALL_FORMAT_RE.test(thumbFile.name)) {
+        item.tallThumb = true;
+      }
+    }
 
     if (item.files.length === 0) continue;
 

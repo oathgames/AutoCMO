@@ -10992,7 +10992,15 @@ function createArchiveCard(item) {
   card.setAttribute('aria-label', `${title}, ${badgeText}, ${time}`);
 
   if (item.thumbnail) {
-    card.innerHTML = `<img class="archive-card-thumb" src="${escapeHtml(merlinUrl(item.thumbnail))}" alt="" loading="lazy" decoding="async">`;
+    // REGRESSION GUARD (2026-05-15, story-thumb-broken-archive): when the
+    // archive-scanner flagged this run as tall (9:16 story / vertical /
+    // reel), apply `archive-card-thumb-tall` so the CSS swaps from
+    // object-fit:cover to object-fit:contain. Without this class, a 9:16
+    // image gets center-banded by the 1:1 card aspect ratio, hiding the
+    // headline + persona layers and making the story ad visually
+    // indistinguishable from a generic product hero shot.
+    const thumbClass = item.tallThumb ? 'archive-card-thumb archive-card-thumb-tall' : 'archive-card-thumb';
+    card.innerHTML = `<img class="${thumbClass}" src="${escapeHtml(merlinUrl(item.thumbnail))}" alt="" loading="lazy" decoding="async">`;
   } else if (isVideo) {
     // No sibling _thumbnail.{jpg,png,webp} exists — fall back to the video
     // file itself with preload="metadata" so Chromium paints the first frame.
