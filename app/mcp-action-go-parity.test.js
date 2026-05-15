@@ -120,11 +120,13 @@ const TOOL_ROUTING = [
   { name: 'content', prefix: 'content',
     // content's handler is unusual — it doesn't always prepend 'content-'.
     actionMap: {
-      'image':       'image',
-      'batch':       'batch',
-      'blog-post':   'blog-post',
-      'blog-list':   'blog-list',
-      'social-post': 'social-post',
+      'image':           'image',
+      'batch':           'batch',
+      'blog-post':       'blog-post',
+      'blog-list':       'blog-list',
+      'social-post':     'social-post',
+      // RSI stefan-georgi iter 5: quiz-funnel-gen routes 1:1 (no prefix).
+      'quiz-funnel-gen': 'quiz-funnel-gen',
     },
   },
   { name: 'video', skip: true },          // mixed routing — not tested here
