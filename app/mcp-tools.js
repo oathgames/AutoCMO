@@ -1277,7 +1277,7 @@ function buildTools(tool, z, ctx) {
     concurrency: { platform: 'fal' },
     preview: false,
     input: {
-      action: z.enum(['image', 'batch', 'blog-post', 'blog-list', 'social-post']).describe('Operation'),
+      action: z.enum(['image', 'batch', 'blog-post', 'blog-list', 'social-post', 'quiz-funnel-gen']).describe('Operation. quiz-funnel-gen generates a Stefan Georgi-canonical 7-frame quiz funnel from the brand manifest persona + pain_state; output is a standalone HTML + manifest.json in results/quiz_<brand>_<ts>/. Approval-gated.'),
       brand: brandSchema,
       product: z.string().optional(),
       imagePrompt: z.string().optional().describe('Freeform image prompt'),
