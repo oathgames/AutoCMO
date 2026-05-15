@@ -243,6 +243,12 @@ function buildManifest(brand, productSlugs, productAssets, logoBasename, extras)
   // is missing — defaulting in the scaffolder gives the brand a concrete
   // editable starting point.
   if (Array.isArray(e.personas) && e.personas.length > 0) {
+    // RSI stefan-georgi iter 1 (2026-05-14): personas may now carry a
+    // structured pain_state object. The scaffolder accepts it verbatim
+    // and forwards it onto the manifest — validation lives on the Go
+    // side (validateBrandManifest in brand_manifest.go). The merlin-setup
+    // SKILL synthesizes pain_state from brand.md + scrape snippets via
+    // an LLM pass; callers can also hand-edit the manifest after.
     manifest.personas = e.personas.map(applyRaceDefault);
   }
   if (Array.isArray(e.landingPages) && e.landingPages.length > 0) {
@@ -263,6 +269,16 @@ function buildManifest(brand, productSlugs, productAssets, logoBasename, extras)
   }
   if (Array.isArray(e.forbiddenLandingPages) && e.forbiddenLandingPages.length > 0) {
     manifest.forbidden_landing_pages = e.forbiddenLandingPages;
+  }
+  // RSI stefan-georgi iter 1 (2026-05-14): forbidden_pain_framings extends
+  // the Rule 12 forbidden-angles HARD veto pattern to pain copy. A wellness
+  // brand can ban "you're dying"-style doom framing; a kids' brand bans
+  // every body-pain reference. Sampler refuses any creative whose resolved
+  // PainState contains these phrases. Substring (case-insensitive) match —
+  // see autocmo-core/brand_manifest.go IsForbiddenPainFraming for matching
+  // rules.
+  if (Array.isArray(e.forbiddenPainFramings) && e.forbiddenPainFramings.length > 0) {
+    manifest.forbidden_pain_framings = e.forbiddenPainFramings;
   }
   return manifest;
 }
